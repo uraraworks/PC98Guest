@@ -74,6 +74,7 @@ const files = [
   { name: 'DICTEST ', ext: 'COM', path: join(HERE, 'DICTEST.COM') },
   { name: 'FEP     ', ext: 'DIC', path: join(HERE, 'out', 'FEP.DIC') },
   { name: 'AHSPY   ', ext: 'COM', path: join(HERE, 'AHSPY.COM') },
+  { name: 'INTEST  ', ext: 'COM', path: join(HERE, 'INTEST.COM') },
 ];
 
 const root = Buffer.alloc(ROOT_SECTORS * BYTES_PER_SECTOR, 0);
