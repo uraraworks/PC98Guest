@@ -1351,6 +1351,8 @@ do_buffered_input:
         ; --- かな入力モード ---
         cmp     al, 0x20
         je      .do_space
+        cmp     al, ESC
+        je      .do_esc
 
         ; 大文字だけ小文字化する
         cmp     al, 'A'
@@ -1387,7 +1389,10 @@ do_buffered_input:
 .do_space:
         cmp     byte [cs:cand_count], 0
         jne     .space_next
-        ; 変換中でない: kanabuf を辞書引きして変換開始 (見つからなければ何もしない)
+        ; 変換中でない: romabuf に残っているローマ字を確定してから
+        ; (Enter確定時と同じ処理。n/nn->ん、それ以外は素通し)
+        ; kanabuf を辞書引きして変換開始 (見つからなければ何もしない)
+        call    finalize_romabuf
         call    dict_lookup
         jmp     .after_key
 .space_next:
@@ -1480,6 +1485,21 @@ do_buffered_input:
         loop    .bs_erase
         jmp     .after_key
 
+.do_esc:
+        ; かなモードのみで意味を持つ (直接モードは mode==0 の分岐で
+        ; .direct_char に流れるためここには来ない = v0のまま変えない)
+        cmp     byte [cs:cand_count], 0
+        jne     .esc_cancel
+        ; 変換中でない: kanabuf(とromabufの残り)を捨てる(仕様通り)
+        mov     byte [cs:romalen], 0
+        mov     byte [cs:kanalen], 0
+        mov     byte [cs:kanacnt], 0
+        jmp     .after_key
+.esc_cancel:
+        ; 変換中: 変換状態だけを解除し、kanabuf 自体は残す
+        call    cancel_conversion
+        jmp     .after_key
+
 .after_key:
         call    draw_status
         jmp     .key_loop
@@ -1521,6 +1541,23 @@ do_buffered_input:
         call    put_char
         mov     al, 0x0A
         call    put_char
+
+        ; 呼び出し元へ戻る前に最下行(ステータス行)をクリアしてから
+        ; ファンクションキー表示に戻す。これをしないと、直前まで
+        ; [KANA] 等が出ていた最下行がそのまま通常のスクロール行として
+        ; 残り、後の出力で本文中に紛れ込む。
+        mov     dx, msg_goto_line25
+        call    put_str
+        mov     cl, 80
+        xor     ch, ch
+.cr_clear_status:
+        jcxz    .cr_clear_done
+        mov     al, ' '
+        call    put_char
+        loop    .cr_clear_status
+.cr_clear_done:
+        mov     dx, msg_goto_line25
+        call    put_str
 
         mov     dx, msg_release_off
         call    put_str
