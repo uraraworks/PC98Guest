@@ -6,7 +6,7 @@
 
 改変:
   1. AUTOEXEC.BAT の中身を "@ECHO OFF\r\n" に差し替える(FDが起動しないように)
-  2. ESCT1.COM をルートディレクトリに追加(既存なら上書き)
+  2. ROOT_FILES に列挙した各 .COM をルートディレクトリに追加(既存なら上書き)
 
 FAT16 のレイアウトパラメータは WebPaint98/tools/extract_hdd.py の
 Fat16Image と同じ考え方(BPBから読む。ハードコードしない)。
@@ -20,9 +20,14 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 FEP_DIR = HERE.parent
 SRC_THD = FEP_DIR.parent.parent / 'WebNP2' / 'public' / 'test' / 'HDDimage.thd'
-ESCT1 = FEP_DIR / 'ESCT1.COM'
 OUT_DIR = FEP_DIR / 'out'
 OUT_THD = OUT_DIR / 'msdos620.thd'
+
+# ルートディレクトリへ収録するファイル一覧(FEP_DIR からの相対名で ROOT_FILES に足す)
+ROOT_FILES = [
+    FEP_DIR / 'ESCT1.COM',
+    FEP_DIR / 'ESCT2.COM',
+]
 
 THD_HEADER = 0x100
 CYL_BYTES = 8 * 33 * 256  # heads * spt * bytes/sector
@@ -194,8 +199,9 @@ def rewrite_file_inplace_same_cluster(fs: Fat16Writer, name: str, content: bytes
 def build():
     if not SRC_THD.exists():
         sys.exit(f'入力が見つからない: {SRC_THD}')
-    if not ESCT1.exists():
-        sys.exit(f'ESCT1.COM が見つからない: {ESCT1}')
+    for f in ROOT_FILES:
+        if not f.exists():
+            sys.exit(f'収録対象が見つからない: {f}')
 
     src_bytes = SRC_THD.read_bytes()
     data = bytearray(src_bytes)  # 常に入力から作り直す
@@ -205,9 +211,9 @@ def build():
     # 改変1: AUTOEXEC.BAT
     rewrite_file_inplace_same_cluster(fs, 'AUTOEXEC.BAT', AUTOEXEC_NEW)
 
-    # 改変2: ESCT1.COM
-    esct1_content = ESCT1.read_bytes()
-    write_file_to_root(fs, 'ESCT1.COM', esct1_content)
+    # 改変2: ROOT_FILES の各ファイルをルートに収録
+    for f in ROOT_FILES:
+        write_file_to_root(fs, f.name, f.read_bytes())
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     OUT_THD.write_bytes(bytes(data))
