@@ -406,3 +406,4 @@ romaji_table:
     db 07Ah, 079h, 075h	; "zyu"
     db 082h, 0B6h, 082h, 0E3h	; "じゅ"
     db 0, 0
+romaji_table_end:
