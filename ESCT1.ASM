@@ -126,7 +126,12 @@ msg3:           db '[3] attr : ', ESC, '[7m', 'REVERSED', ESC, '[0m', ' normal <
 
 msg4:           db '[4] save/restore : ', ESC, '[s', ESC, '[1;1H', '#', ESC, '[u', '<END4>', 0x0D, 0x0A, '$'
 
-msg5:           db ESC, '[>1h', ESC, '[24;1H', '[5] STATUS LINE BOTTOM <END5>', '$'
+msg5:           db ESC, '[>1h'
+                ; 24行目(元から使える行)と25行目(ESC[>1h で解放される最下行)の
+                ; 両方に書き、25行目が本当に使えるようになったかを区別する。
+                db ESC, '[24;1H', '[5a] LINE24 <END5A>'
+                db ESC, '[25;1H', '[5b] LINE25 <END5B>'
+                db '$'
 
 msg_back:       db ESC, '[6;1H', '$'
 
