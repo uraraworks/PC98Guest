@@ -66,7 +66,14 @@ setFatEntry(0, 0xf00 | MEDIA);
 setFatEntry(1, 0xfff);
 
 // --- ファイル配置 ---
-const files = [{ name: 'ESCT1   ', ext: 'COM', path: join(HERE, 'ESCT1.COM') }];
+// 測定用プログラム一式。FreeDOS(98) 側での確認にも使うので FEP 本体と辞書も入れる。
+const files = [
+  { name: 'ESCT1   ', ext: 'COM', path: join(HERE, 'ESCT1.COM') },
+  { name: 'ESCT2   ', ext: 'COM', path: join(HERE, 'ESCT2.COM') },
+  { name: 'FEP     ', ext: 'COM', path: join(HERE, 'FEP.COM') },
+  { name: 'DICTEST ', ext: 'COM', path: join(HERE, 'DICTEST.COM') },
+  { name: 'FEP     ', ext: 'DIC', path: join(HERE, 'out', 'FEP.DIC') },
+];
 
 const root = Buffer.alloc(ROOT_SECTORS * BYTES_PER_SECTOR, 0);
 let nextCluster = 2;
