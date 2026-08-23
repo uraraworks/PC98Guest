@@ -688,27 +688,16 @@ do_buffered_input:
         je      .direct_char
 
         ; --- かな入力モード ---
+        ; 制御文字(0x0D/0x08/0x0B/0x00)は上ですでに処理済み。
+        ; それ以外の印字可能文字はすべてローマ字処理に回す
+        ; (数字・記号なども romabuf を経由させ、未確定分の先を
+        ; 追い越して出力されるのを防ぐ)。大文字だけ小文字化する。
         cmp     al, 'A'
-        jb      .chk_lower
+        jb      .romaji_char
         cmp     al, 'Z'
-        ja      .chk_lower
+        ja      .romaji_char
         add     al, 0x20                ; 小文字化
         jmp     .romaji_char
-.chk_lower:
-        cmp     al, 'a'
-        jb      .chk_punct
-        cmp     al, 'z'
-        jbe     .romaji_char
-.chk_punct:
-        cmp     al, '-'
-        je      .romaji_char
-        cmp     al, ','
-        je      .romaji_char
-        cmp     al, '.'
-        je      .romaji_char
-        cmp     al, 0x27                ; '\''
-        je      .romaji_char
-        jmp     .direct_char
 
 .direct_char:
         call    try_append_ascii
