@@ -27,6 +27,7 @@ OUT_THD = OUT_DIR / 'msdos620.thd'
 ROOT_FILES = [
     FEP_DIR / 'ESCT1.COM',
     FEP_DIR / 'ESCT2.COM',
+    FEP_DIR / 'FEP.COM',
 ]
 
 THD_HEADER = 0x100

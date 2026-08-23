@@ -154,8 +154,9 @@ def gen_inc():
     for romaji, kana in ENTRIES:
         rom_bytes = romaji.encode("ascii")
         kana_bytes = kana.encode("cp932")
-        rom_hex = ", ".join(f"{b:02X}h" for b in rom_bytes)
-        kana_hex = ", ".join(f"{b:02X}h" for b in kana_bytes)
+        # nasmはA-Fで始まる16進数リテラルを識別子と誤認するため先頭に0を付ける
+        rom_hex = ", ".join(f"0{b:02X}h" for b in rom_bytes)
+        kana_hex = ", ".join(f"0{b:02X}h" for b in kana_bytes)
         lines.append(f"    db {len(rom_bytes)}, {len(kana_bytes)}")
         lines.append(f"    db {rom_hex}\t; \"{romaji}\"")
         lines.append(f"    db {kana_hex}\t; \"{kana}\"")
