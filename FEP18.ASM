@@ -853,17 +853,6 @@ newint18:
 ; AH=00h (キー入力・待ち)
 ;----------------------------------------------------------------
 .ah00:
-        cmp     byte [cs:outq_count], 0
-        je      .ah00_needkey
-
-        ; outq が空でない: 先頭を1バイト取り出して AH=0,AL=そのバイトで返す
-        push    bx
-        call    outq_pop                ; al = 取り出したバイト
-        pop     bx
-        xor     ah, ah
-        iret
-
-.ah00_needkey:
         push    bx
         push    cx
         push    dx
@@ -872,6 +861,23 @@ newint18:
         push    bp
 
 .ah00_loop:
+        ; ループの先頭で毎回 outq を見る。ここで見ずに下の oldint18 呼び出し
+        ; (ブロッキング)へ進むと、直前の反復で outq に積んだバイト(かな確定や
+        ; Enterの0x0D)が二度と読まれずに取りこぼれる。
+        cmp     byte [cs:outq_count], 0
+        je      .ah00_needkey
+
+        call    outq_pop                ; al = 取り出したバイト
+        pop     bp
+        pop     di
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        xor     ah, ah
+        iret
+
+.ah00_needkey:
         mov     ah, 0x00
         pushf
         call    far [cs:oldint18]       ; -> ah=キーコード, al=文字コード
