@@ -17,9 +17,11 @@
 ;
 ;   段階B = かな漢字変換を追加する。INT 18h ハンドラの中から辞書ファイルを
 ;   開くことはできない(下記の絶対厳守事項)ため、辞書は**インストール時に
-;   丸ごとメモリへ読み込み**、そのセグメントを常駐データ dic_seg に保存する。
-;   ハンドラは ES=dic_seg にしてメモリ上の辞書を直接二分探索する
-;   (ファイルI/Oは一切しない)。候補バッファ・候補巡回・確定のロジックは
+;   丸ごとメモリへ読み込む**。.COM は起動時点で使用可能なメモリを全部
+;   所有しているため AH=48h の追加確保は必ず失敗する。そこで別ブロックは
+;   確保せず、自分のメモリ空間の中、ファイル像(インストールコード込み)の
+;   直後の未使用領域 DIC_BUF に読み込む。ハンドラは ES=CS にして
+;   CS:DIC_BUF からメモリ上の辞書を直接二分探索する
 ;   FEP.ASM(INT 21h版 v1)の cand_*/confirm_candidate/dict_lookup を移植した
 ;   ものだが、確定先が lbuf ではなく outq である点、辞書がファイルではなく
 ;   常駐メモリである点が異なる。
@@ -114,10 +116,9 @@ scratchch:      db      0       ; kana_append_ascii が1バイトを指すため
 sound_n:        db      0x82, 0xF1      ; "ん"
 sound_sokuon:   db      0x82, 0xC1      ; "っ"
 
-; --- 段階B: 辞書(インストール時に丸ごとメモリへ読み込んだセグメント) ---
-; install: が AH=48h で確保し、辞書ファイルの中身をそのまま書き込む。
-; 0 のままなら辞書が無い(常駐しない=常駐後にここが0になることはない)。
-dic_seg:        dw      0
+; --- 段階B: 辞書はこの.COMのメモリの中(CS:DIC_BUFから)にインストール時に
+; 丸ごと読み込む。DIC_BUF はファイル像末尾から計算する定数(ファイル末尾の
+; image_end/DIC_BUF 定義を参照)であり、常駐時の実行時状態は不要。
 
 ; --- 段階B: 変換候補の状態 (FEP.ASM v1 の cand_* と同一の考え方) ---
 cand_count:     db      0       ; 0 = 変換していない
@@ -792,7 +793,7 @@ resolve_romaji:
 ; 段階B: かな漢字変換 (FEP.ASM v1 の confirm_candidate/cancel_conversion/
 ; dict_lookup を移植したもの。ただし:
 ;   - 確定先は lbuf ではなく outq(kb_ring_push経由でキーボードBIOSへ)
-;   - 辞書はファイルではなく dic_seg の常駐メモリ(ファイルI/Oを一切しない)
+;   - 辞書はファイルではなく CS:DIC_BUF の常駐メモリ(ファイルI/Oを一切しない)
 ;--------------------------------------------------------------------
 
 ; 現在の候補(cand_buf の cand_off[cand_index] から cand_len[cand_index]
@@ -874,7 +875,7 @@ vram_put_decimal:
         pop     ax
         ret
 
-; kanabuf(kanalen バイト)をよみとして、常駐辞書(dic_seg)を直接二分探索する。
+; kanabuf(kanalen バイト)をよみとして、常駐辞書(CS:DIC_BUF)を直接二分探索する。
 ; 見つかれば cand_count>0, cand_index=0 とし cand_buf/cand_off/cand_len を
 ; 設定する。見つからない・よみが長すぎる・辞書が無い場合は cand_count=0の
 ; まま(kanabuf は変えない)。ファイルI/Oは一切しない。
@@ -917,18 +918,19 @@ dict_lookup:
         loop    .copy_loop
 .copy_done:
 
-        mov     ax, [cs:dic_seg]
-        or      ax, ax
-        jz      .notfound               ; 辞書未ロード(常駐時に失敗していれば起きない)
-        mov     es, ax
+        mov     ax, cs
+        mov     es, ax                  ; 辞書は自分のセグメント内 CS:DIC_BUF にある
 
-        mov     ax, [es:8]              ; エントリ数 (ヘッダ +0008, u16)
+        mov     ax, [es:DIC_BUF+8]      ; エントリ数 (ヘッダ +0008, u16)
         or      ax, ax
         jz      .notfound
         dec     ax
         mov     [cs:search_hi], ax
         mov     word [cs:search_lo], 0
-        mov     bx, [es:10]             ; 索引開始オフセット (ヘッダ +000A, u16)
+        mov     bx, [es:DIC_BUF+10]     ; 索引開始オフセット (ヘッダ +000A, u16。
+                                         ; ファイル先頭からの相対値なので DIC_BUF を足して
+                                         ; 実アドレスへ変換する)
+        add     bx, DIC_BUF
 
 .search_loop:
         mov     ax, [cs:search_lo]
@@ -969,8 +971,10 @@ dict_lookup:
         jmp     .search_loop
 
 .found:
-        mov     si, [es:di]             ; si = 候補ブロックの絶対オフセット(下位ワード。
-                                         ; 辞書は64KB未満前提なので上位ワードは見ない)
+        mov     si, [es:di]             ; si = 候補ブロックのファイル先頭からの相対オフセット
+                                         ; (下位ワード。辞書は64KB未満前提なので上位ワードは
+                                         ; 見ない)。DIC_BUF を足して実アドレスへ変換する
+        add     si, DIC_BUF
 
         mov     al, [es:si]             ; 候補数
         cmp     al, CANDMAX
@@ -1572,9 +1576,16 @@ install:
 .install_now:
         ; --- 段階B: 辞書ファイルを丸ごとメモリへ読み込む ---
         ; INT 18h ハンドラの中からは INT 21h を呼べない(絶対厳守事項)ため、
-        ; ファイルI/Oが自由にできるこのインストール時に一度だけ読み込み、
-        ; そのセグメントを常駐データ dic_seg に保存する。失敗したら
-        ; どの段階で失敗したかが分かるメッセージを出して常駐せずに終了する。
+        ; ファイルI/Oが自由にできるこのインストール時に一度だけ読み込む。
+        ;
+        ; .COM は起動時点で使用可能なメモリを全部所有しているため、AH=48h で
+        ; 追加のブロックを確保しようとすると空きが無く必ず失敗する
+        ; (実機/FreeDOS(98)で実測: "FEP18: memory allocation for dictionary
+        ; failed." で常駐に失敗する)。そこで別ブロックは確保せず、自分の
+        ; メモリ空間の中、ファイル像(インストールコード込み)の直後の
+        ; まだ誰も使っていない領域 CS:DIC_BUF に辞書を読み込む。
+        ; 失敗したらどの段階で失敗したかが分かるメッセージを出して常駐せずに
+        ; 終了する。
 
         ; 辞書ファイル名を確定する ("X:\FEP.DIC" の X を現在のドライブへ)
         mov     ah, 0x19                ; カレントドライブ取得 (0=A, 1=B, ...)
@@ -1610,33 +1621,18 @@ install:
         int     0x21
         jc      .err_seek
 
-        ; 必要パラグラフ数 = ceil(size / 16) (32bit演算。sizeは64KB未満なので
-        ; size+15 が16bitに収まらない境界があり得るため dx:ax で計算する)
+        ; DIC_BUF + size がこのセグメント(オフセット 0-0xFFFF)に収まるか
+        ; 確認する(16bit加算のキャリーで判定)。収まらなければ常駐せず終了。
         mov     ax, [install_size]
-        xor     dx, dx
-        add     ax, 15
-        adc     dx, 0
-        mov     cx, 16
-        div     cx                      ; dx:ax / 16 -> ax=パラグラフ数
-        mov     [install_paras], ax
-
-        ; メモリブロックを確保
-        mov     bx, ax
-        mov     ah, 0x48
-        int     0x21
+        add     ax, DIC_BUF
         jc      .err_alloc
-        mov     [dic_seg], ax
 
-        ; 確保したブロックへ全体を読み込む (DS:DX を一時的に張り替える)
+        ; 自分のメモリの CS:DIC_BUF へ全体を読み込む (.COM なので DS=CS)
         mov     bx, [install_handle]
         mov     cx, [install_size]
-        push    ds
-        mov     ax, [dic_seg]
-        mov     ds, ax
-        xor     dx, dx
+        mov     dx, DIC_BUF
         mov     ah, 0x3F
         int     0x21
-        pop     ds
         jc      .err_read
         cmp     ax, [install_size]
         jne     .err_read
@@ -1647,10 +1643,10 @@ install:
         int     0x21
 
         ; マジック確認 ("FEPDIC01", 8バイト)
-        mov     ax, [dic_seg]
+        mov     ax, cs
         mov     es, ax
         mov     si, install_dic_magic
-        xor     di, di
+        mov     di, DIC_BUF
         mov     cx, 8
 .magic_loop:
         mov     al, [cs:si]
@@ -1674,7 +1670,18 @@ install:
         mov     ah, 0x09
         int     0x21
 
-        mov     dx, (resident_end - start + 0x100 + 15) / 16 ; PSPを含む常駐パラグラフ数
+        ; 常駐パラグラフ数 = ceil((DIC_BUF + 辞書サイズ) / 16)。DIC_BUF は
+        ; org 0x100 によりラベル値がそのまま PSP 先頭からのオフセットに
+        ; なっているため、+0x100 は不要(そのまま足すだけでPSPを含む)。
+        ; 32bit演算(DIC_BUF+size+15 が16bitに収まらない境界があり得るため
+        ; dx:ax で計算する)。
+        mov     ax, [install_size]
+        xor     dx, dx
+        add     ax, DIC_BUF + 15
+        adc     dx, 0
+        mov     cx, 16
+        div     cx                      ; dx:ax / 16 -> ax=パラグラフ数
+        mov     dx, ax
         mov     ax, 0x3100              ; 常駐終了
         int     0x21
 
@@ -1714,7 +1721,7 @@ msg_already:    db      'FEP18 already resident.', 0x0D, 0x0A, '$'
 msg_err_open:   db      'FEP18: dictionary open failed (FEP.DIC not found?).', 0x0D, 0x0A, '$'
 msg_err_seek:   db      'FEP18: dictionary seek failed.', 0x0D, 0x0A, '$'
 msg_err_toolarge: db    'FEP18: dictionary is empty or too large (must be <64KB).', 0x0D, 0x0A, '$'
-msg_err_alloc:  db      'FEP18: memory allocation for dictionary failed.', 0x0D, 0x0A, '$'
+msg_err_alloc:  db      'FEP18: dictionary too large to fit in the resident segment.', 0x0D, 0x0A, '$'
 msg_err_read:   db      'FEP18: dictionary read failed.', 0x0D, 0x0A, '$'
 msg_err_magic:  db      'FEP18: dictionary magic mismatch (not a FEPDIC01 file).', 0x0D, 0x0A, '$'
 
@@ -1723,4 +1730,15 @@ install_dic_path:      db      'X:\FEP.DIC', 0 ; 先頭のXはインストール
 install_dic_magic:     db      'FEPDIC01'
 install_handle:        dw      0
 install_size:           dw      0
-install_paras:          dw      0
+
+;--------------------------------------------------------------------
+; ファイル像の末尾 (インストールコード・メッセージ・上のデータも含めて
+; ここまでがファイルに出力される)。この直後は .COM の実行時には
+; まだ誰も使っていない自分のメモリなので、辞書バッファとして使う。
+; DIC_BUF は org 0x100 によりそのまま PSP 先頭からのオフセットになる
+; (image_end のラベル値が既に 0x100 起点で計算されているため)。
+;--------------------------------------------------------------------
+image_end:
+        align   16, db 0        ; 16バイト境界へ切り上げ(division/&演算子は
+                                 ; forward参照のラベルに使えないため align で行う)
+DIC_BUF:
