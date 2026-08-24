@@ -71,6 +71,7 @@ const files = [
   { name: 'ESCT1   ', ext: 'COM', path: join(HERE, 'ESCT1.COM') },
   { name: 'ESCT2   ', ext: 'COM', path: join(HERE, 'ESCT2.COM') },
   { name: 'FEP     ', ext: 'COM', path: join(HERE, 'FEP.COM') },
+  { name: 'FEP18   ', ext: 'COM', path: join(HERE, 'FEP18.COM') },
   { name: 'DICTEST ', ext: 'COM', path: join(HERE, 'DICTEST.COM') },
   { name: 'FEP     ', ext: 'DIC', path: join(HERE, 'out', 'FEP.DIC') },
   { name: 'AHSPY   ', ext: 'COM', path: join(HERE, 'AHSPY.COM') },

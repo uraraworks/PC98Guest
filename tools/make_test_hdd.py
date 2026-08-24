@@ -28,6 +28,7 @@ ROOT_FILES = [
     FEP_DIR / 'ESCT1.COM',
     FEP_DIR / 'ESCT2.COM',
     FEP_DIR / 'FEP.COM',
+    FEP_DIR / 'FEP18.COM',
     FEP_DIR / 'DICTEST.COM',
     OUT_DIR / 'FEP.DIC',   # ビルド成果物ではなく辞書データだが、収録手順は同じ
     FEP_DIR / 'AHSPY.COM',
