@@ -68,7 +68,11 @@ ATTR_BASE       equ     0x2000         ; A000:2000 属性エリア先頭
 LINE_BYTES      equ     160            ; 1行 = 160バイト
 STATUS_ROW      equ     24             ; Y=24 (25行目、0起点)
 STATUS_OFF      equ     (STATUS_ROW * LINE_BYTES)      ; = 3840
-REVERSE_ATTR    equ     0x05           ; 白文字+リバース (要確認・未検証)
+REVERSE_ATTR    equ     0xE5           ; 白(G/R/B=1)+リバース+表示。実測で確定。
+                                       ; 0x05 だと色ビットが全部0で黒になり、画面に
+                                       ; 何も見えない(TVRAMにはデータが入っているのに)。
+                                       ; DOSの通常表示は 0xE1(白)。書籍2-6-1の図2-25より
+                                       ; D7=G D6=R D5=B / D2=RV / D0=ST(1で表示)
 
 start:  jmp     install
 
