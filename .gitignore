@@ -10,3 +10,6 @@ tsukushi/dic/upstream/
 
 # macOS
 .DS_Store
+
+# ビルド成果物。ずれるのでツリーには置かず、Release で配る。
+*.COM
