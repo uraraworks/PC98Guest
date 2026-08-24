@@ -45,6 +45,24 @@ KANABUFSIZE     equ     64
 OUTQSIZE        equ     64
 STATUSCOLS      equ     80             ; ステータス行の埋め幅(桁=画面上のカラム数)
 
+; --- キーボードBIOSの作業領域 (物理アドレス。セグメント0000h) ---
+; CON ドライバは INT 18h AH=00h を呼ぶ前に 0x528(件数) を見て「入力が
+; あるか」を判断している。FEP18 の outq は自前バッファなので 0x528 が
+; 増えず、CON が待ち続けてしまう(実測で確定)。確定したバイトはここへ
+; 直接積む。レイアウトは NP2kai sdl/webnp2api.c の
+; webnp2_push_key_buffer() と同一 (bios/bios09.c 準拠)。
+KBSEG           equ     0x0000
+KBBUF_START     equ     0x502
+KBBUF_END       equ     0x522          ; 0x502-0x521 が実データ(排他上限)
+KBCOUNT         equ     0x528
+KBTAIL          equ     0x526
+
+; FEP18 が積んだバイトの印。AH=00h ハンドラが oldint18 から読み戻した
+; ときにこのキーコードを見て「自分が積んだものだから再変換しない」と
+; 判定する。0xFF は実測した実キー(0x00-0x7F、修飾付きで0xA5/0xB1/0xB5)
+; とは衝突しないが、これはあくまで実測範囲内での仮定であり未証明。
+INJECT_KEYCODE  equ     0xFF
+
 TEXT_BASE       equ     0x0000         ; A000:0000 文字エリア先頭 (セグメントは別途 ES=0xA000)
 ATTR_BASE       equ     0x2000         ; A000:2000 属性エリア先頭
 LINE_BYTES      equ     160            ; 1行 = 160バイト
@@ -153,6 +171,92 @@ push_kanabuf_to_outq:
         mov     byte [cs:kanacnt], 0
         pop     si
         pop     cx
+        pop     ax
+        ret
+
+; outq_pop の取り消し。AL = 戻すバイト。head を1つ戻して差し込み、
+; count を+1する(popの逆操作。データの重複も欠落もしない)。
+outq_unpop:
+        push    bx
+        cmp     byte [cs:outq_head], 0
+        jne     .noWrapH
+        mov     byte [cs:outq_head], OUTQSIZE
+.noWrapH:
+        dec     byte [cs:outq_head]
+        mov     bl, [cs:outq_head]
+        xor     bh, bh
+        mov     [cs:outq + bx], al
+        inc     byte [cs:outq_count]
+        pop     bx
+        ret
+
+;--------------------------------------------------------------------
+; キーボードBIOSリングバッファ(物理 0x502-0x528)への直接投入
+;--------------------------------------------------------------------
+
+; AL = 積むバイト(文字コード)。キーコードは INJECT_KEYCODE(0xFF)固定。
+; 件数・head・tail はキーボード割り込みからも書かれるため cli/sti
+; (pushf/popf で元の割り込み許可状態を保存・復元。勝手に sti しない)
+; で保護する。
+; 出力: CF=1で投入成功、CF=0でリングバッファが満杯(投入せず)。
+; 破壊: 呼び出し規約上 AX 以外(BX,DX,ES,フラグ)を保存して復元する。
+kb_ring_push:
+        push    bx
+        push    dx
+        push    es
+        mov     dl, al                  ; dl = 投入する文字コード
+        pushf
+        cli
+        xor     bx, bx
+        mov     es, bx                  ; es = 0000h (物理アドレス直参照)
+        cmp     byte [es:KBCOUNT], 0x10
+        jae     .full
+        mov     bx, [es:KBTAIL]
+        cmp     bx, KBBUF_START
+        jae     .chk_hi
+        mov     bx, KBBUF_START         ; 不正値の安全策(webnp2api.cと同じ)
+        jmp     .store
+.chk_hi:
+        cmp     bx, KBBUF_END
+        jb      .store
+        mov     bx, KBBUF_START
+.store:
+        mov     byte [es:bx], dl        ; 下位バイト = 文字コード
+        mov     byte [es:bx+1], INJECT_KEYCODE ; 上位バイト = キーコード(印)
+        add     bx, 2
+        cmp     bx, KBBUF_END
+        jb      .nowrap
+        mov     bx, KBBUF_START
+.nowrap:
+        mov     [es:KBTAIL], bx
+        inc     byte [es:KBCOUNT]
+        popf
+        pop     es
+        pop     dx
+        pop     bx
+        stc
+        ret
+.full:
+        popf
+        pop     es
+        pop     dx
+        pop     bx
+        clc
+        ret
+
+; outq (自前の「まだリングバッファへ積めていない残り」置き場) から
+; キーボードBIOSリングバッファへ、空きがある限り移す。
+; AH=00h/AH=01h ハンドラの入口、および outq へ新規に積んだ直後に呼ぶ。
+drain_outq_to_ring:
+        push    ax
+.loop:
+        cmp     byte [cs:outq_count], 0
+        je      .done
+        call    outq_pop                ; al = 取り出したバイト
+        call    kb_ring_push
+        jc      .loop                   ; 積めた: 続けて次を試す
+        call    outq_unpop              ; 満杯: 戻して打ち切る
+.done:
         pop     ax
         ret
 
@@ -860,27 +964,21 @@ newint18:
         push    di
         push    bp
 
+        ; ハンドラ入口: 前回までに outq に溜まった残りをリングバッファへ
+        ; 移す(CONが読んで空きができた分だけ入る)。
+        call    drain_outq_to_ring
+
 .ah00_loop:
-        ; ループの先頭で毎回 outq を見る。ここで見ずに下の oldint18 呼び出し
-        ; (ブロッキング)へ進むと、直前の反復で outq に積んだバイト(かな確定や
-        ; Enterの0x0D)が二度と読まれずに取りこぼれる。
-        cmp     byte [cs:outq_count], 0
-        je      .ah00_needkey
-
-        call    outq_pop                ; al = 取り出したバイト
-        pop     bp
-        pop     di
-        pop     si
-        pop     dx
-        pop     cx
-        pop     bx
-        xor     ah, ah
-        iret
-
-.ah00_needkey:
         mov     ah, 0x00
         pushf
         call    far [cs:oldint18]       ; -> ah=キーコード, al=文字コード
+
+        ; --- 自分がリングバッファへ積んだバイトの読み戻し ---
+        ; drain_outq_to_ring で積んだバイトを、この oldint18 呼び出しが
+        ; そのまま拾って返してくることがある。これをローマ字処理へ回すと
+        ; 二重変換になるので、印(INJECT_KEYCODE)を見たら即座にそのまま返す。
+        cmp     ah, INJECT_KEYCODE
+        je      .ah00_injected
 
         ; --- 切り替えキー判定 (かなモードでも直接モードでも有効) ---
         cmp     ah, 0xB5                ; Ctrl+XFER
@@ -965,7 +1063,23 @@ newint18:
 
 .ah00_redraw_continue:
         call    draw_status
+        ; ここまでで outq に新規確定バイトが積まれた可能性がある
+        ; (かな確定/単独Enter)。次の .ah00_loop の oldint18 呼び出しが
+        ; 実キー待ちでブロックしてしまう前に、リングバッファへ移しておく。
+        call    drain_outq_to_ring
         jmp     .ah00_loop
+
+.ah00_injected:
+        ; drain_outq_to_ring が積んだバイトの読み戻し。何も処理せず
+        ; AH=0, AL=そのバイトのまま即座に返す。
+        pop     bp
+        pop     di
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        xor     ah, ah
+        iret
 
 .ah00_exit:
         pop     bp
@@ -980,22 +1094,12 @@ newint18:
 ; AH=01h (キーセンス。絶対に待たないこと)
 ;----------------------------------------------------------------
 .ah01:
-        cmp     byte [cs:outq_count], 0
-        jne     .ah01_have
-        jmp     far [cs:oldint18]       ; outqが空: 素通し
-
-.ah01_have:
-        ; outqの先頭を"取り出さずに"返す。元のAH=01hの形式(PC-98の
-        ; INT18h AH=01hはBH!=0でキーあり、AH/ALにキーコード/文字コード)に
-        ; 合わせる。outqのバイトには物理キーコードが無いため AH=0 とする。
-        push    bx
-        mov     bl, [cs:outq_head]
-        xor     bh, bh
-        mov     al, [cs:outq + bx]
-        pop     bx
-        xor     ah, ah
-        mov     bh, 1
-        iret
+        ; outq に溜まった残りをリングバッファへ移してから、元の
+        ; AH=01h(BIOS本来のキーセンス)へそのまま素通しする。確定済み
+        ; バイトはすでにリングバッファの実データなので、件数(0x528)を
+        ; 見る元のキーセンスがそのまま正しく「入力あり」を返す。
+        call    drain_outq_to_ring
+        jmp     far [cs:oldint18]
 
 ;--------------------------------------------------------------------
 ; ローマ字->かな 変換テーブル (tools/gen_romaji.py の生成物)
