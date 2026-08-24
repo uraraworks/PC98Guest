@@ -203,10 +203,13 @@ outq_tail:      db      0
 outq_count:     db      0
 
 ; --- ステータス行(25行目)の退避領域。文字160+属性160=320バイト。
-; TSUKUSHIは常駐したままなので今回は復元しないが、将来の常駐解除に備えて
-; 退避だけは行う(仕様指定通り)。
+; 直接入力中はFEPの情報が不要なので、かなモードに入る直前の内容を
+; ここへ退避しておき、直接モードへ戻るときに書き戻す。
 status_save:    times   320 db 0
 status_col:     db      0       ; draw_status 作業用: 使用済み桁数
+status_saved:   db      0       ; 1=status_saveに退避済み(かなモード中に
+                                 ; 何度描いても自分のステータス行で退避
+                                 ; 内容を汚さないためのフラグ)
 
 ;--------------------------------------------------------------------
 ; outq (確定済みバイトの待ち行列。円環バッファ)
@@ -1564,6 +1567,11 @@ draw_status:
         mov     es, ax
 
         ; --- 25行目(文字160+属性160=320バイト)を退避 ---
+        ; かなモード中に何度もdraw_statusが呼ばれても、退避内容が
+        ; 自分の描いたステータス行で上書きされないよう、既に退避済み
+        ; なら退避処理そのものをスキップする(status_savedで判定)。
+        cmp     byte [cs:status_saved], 0
+        jne     .save_skip
         mov     si, TEXT_BASE + STATUS_OFF
         mov     di, status_save
         mov     cx, 160
@@ -1586,6 +1594,8 @@ draw_status:
         inc     di
         loop    .save_attr
 .save_attr_done:
+        mov     byte [cs:status_saved], 1
+.save_skip:
 
         ; --- 内容を描く ---
         mov     di, TEXT_BASE + STATUS_OFF
@@ -1768,6 +1778,55 @@ draw_status:
         pop     ax
         ret
 
+; --- 直接モードへ戻るとき: 退避しておいた25行目(文字160+属性160)を
+; VRAMへ書き戻し、退避済みフラグを下ろす。status_savedが0(=未退避)の
+; ときは呼ばれない想定だが、そのときは何もしない(ゼロ埋めの退避領域を
+; 誤って書き戻さない)。 ---
+restore_status:
+        push    ax
+        push    cx
+        push    si
+        push    di
+        push    es
+
+        cmp     byte [cs:status_saved], 0
+        je      .rs_done
+
+        mov     ax, 0xA000
+        mov     es, ax
+
+        mov     si, status_save
+        mov     di, TEXT_BASE + STATUS_OFF
+        mov     cx, 160
+.rs_text:
+        jcxz    .rs_text_done
+        mov     al, [cs:si]
+        mov     [es:di], al
+        inc     si
+        inc     di
+        loop    .rs_text
+.rs_text_done:
+        mov     si, status_save + 160
+        mov     di, ATTR_BASE + STATUS_OFF
+        mov     cx, 160
+.rs_attr:
+        jcxz    .rs_attr_done
+        mov     al, [cs:si]
+        mov     [es:di], al
+        inc     si
+        inc     di
+        loop    .rs_attr
+.rs_attr_done:
+        mov     byte [cs:status_saved], 0
+
+.rs_done:
+        pop     es
+        pop     di
+        pop     si
+        pop     cx
+        pop     ax
+        ret
+
 ;--------------------------------------------------------------------
 ; メッセージ (ステータス行プレフィクス。VRAM直書きで使うので '$' 終端は不要)
 ;--------------------------------------------------------------------
@@ -1885,7 +1944,15 @@ newint18:
         call    cancel_conversion       ; 変換中: 取り消してから切替(かなは残す)
 .ah00_toggle_simple:
         xor     byte [cs:mode], 1
-        jmp     .ah00_redraw_continue
+        cmp     byte [cs:mode], 0
+        je      .ah00_toggle_to_direct
+        ; 直接->かな: ステータス行を描く(draw_status内で未退避なら退避する)
+        call    draw_status
+        jmp     .ah00_after_status
+.ah00_toggle_to_direct:
+        ; かな->直接: 退避しておいた内容を書き戻し、以後は描かない
+        call    restore_status
+        jmp     .ah00_after_status
 
 .ah00_do_space:
         cmp     byte [cs:cand_count], 0
@@ -1976,7 +2043,12 @@ newint18:
         jmp     .ah00_exit
 
 .ah00_redraw_continue:
+        ; この経路は mode==1(かなモード)のときにしか通らない
+        ; (直接モードの各キーは .ah00_direct_return で早期に返るため)。
+        ; toggle だけは自分で .ah00_after_status へ直接ジャンプして
+        ; ここを経由しない。
         call    draw_status
+.ah00_after_status:
         ; ここまでで outq に新規確定バイトが積まれた可能性がある
         ; (かな確定/単独Enter)。次の .ah00_loop の oldint18 呼び出しが
         ; 実キー待ちでブロックしてしまう前に、リングバッファへ移しておく。
