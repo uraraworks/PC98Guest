@@ -35,6 +35,21 @@ OUT_RELEASE = REPO_ROOT / 'out' / 'release'
 
 MAX_LINE_WIDTH = 80
 
+# FD 用辞書の読みかな数上限。zip 用はこの制限を付けず全語彙を収録する。
+FD_MAX_YOMI_KANA = 4
+
+# 以下は common/build-disk.mjs --release モードの FAT12 レイアウト定数の
+# 写し(このスクリプト側で「辞書が収まるか」を build-disk.mjs 実行前に
+# 検査するため)。build-disk.mjs は Buffer.copy でイメージバッファに
+# 書き込むため、収まらない場合も例外を出さず黙って末尾が切り詰められる。
+# それを避けるため、node を呼ぶ前にここで容量を検査して止める。
+FD_BYTES_PER_SECTOR = 1024
+FD_RESERVED_SECTORS = 1
+FD_FAT_COUNT = 2
+FD_SECTORS_PER_FAT = 2
+FD_ROOT_ENTRIES = 192
+FD_TOTAL_SECTORS = 1232
+
 
 def die(msg: str) -> None:
     print(f'エラー: {msg}', file=sys.stderr)
@@ -82,7 +97,7 @@ def build_com(tmp_dir: Path) -> Path:
 # 手順2: TSUKUSHI.DIC の再生成
 # ---------------------------------------------------------------------------
 
-def build_dic(tmp_dir: Path) -> Path:
+def build_dic(tmp_dir: Path, out_name: str, max_yomi_kana: int | None) -> Path:
     if not UPSTREAM_DIC.exists():
         die(
             f'上流辞書が見つからない: {UPSTREAM_DIC}\n'
@@ -91,11 +106,14 @@ def build_dic(tmp_dir: Path) -> Path:
             '  (直接ファイル: https://github.com/skk-dev/dict/raw/master/SKK-JISYO.L)\n'
             '  リポジトリには含まれません(.gitignore対象、数MBのため)。'
         )
-    out_dic = tmp_dir / 'TSUKUSHI.DIC'
-    run([sys.executable, str(MKDIC2_PY), '--max-yomi-kana', '4',
-         '--out', str(out_dic)], cwd=REPO_ROOT)
+    out_dic = tmp_dir / out_name
+    cmd = [sys.executable, str(MKDIC2_PY)]
+    if max_yomi_kana is not None:
+        cmd += ['--max-yomi-kana', str(max_yomi_kana)]
+    cmd += ['--out', str(out_dic)]
+    run(cmd, cwd=REPO_ROOT)
     if not out_dic.exists():
-        die('mkdic2.py はエラーを返さなかったが TSUKUSHI.DIC が生成されなかった')
+        die(f'mkdic2.py はエラーを返さなかったが {out_name} が生成されなかった')
     return out_dic
 
 
@@ -132,6 +150,37 @@ def build_readme_cp932(tmp_dir: Path) -> Path:
     out_path = tmp_dir / 'READ.ME'
     out_path.write_bytes(cp932_bytes)
     return out_path
+
+
+# ---------------------------------------------------------------------------
+# 手順3.5: FD 容量検査(build-disk.mjs を呼ぶ前に、辞書が収まるか検査する)
+# ---------------------------------------------------------------------------
+
+def check_fd_capacity(com: Path, dic: Path, readme: Path) -> None:
+    root_sectors = (FD_ROOT_ENTRIES * 32) // FD_BYTES_PER_SECTOR
+    data_start = FD_RESERVED_SECTORS + FD_FAT_COUNT * FD_SECTORS_PER_FAT + root_sectors
+    data_sectors = FD_TOTAL_SECTORS - data_start
+    data_bytes = data_sectors * FD_BYTES_PER_SECTOR
+
+    def cluster_bytes(size: int) -> int:
+        clusters = (size + FD_BYTES_PER_SECTOR - 1) // FD_BYTES_PER_SECTOR
+        return clusters * FD_BYTES_PER_SECTOR
+
+    other_bytes = (cluster_bytes(com.stat().st_size)
+                   + cluster_bytes(readme.stat().st_size)
+                   + cluster_bytes(LICENSE_TXT.stat().st_size)
+                   + cluster_bytes(GPL2_TXT.stat().st_size))
+    free_for_dic = data_bytes - other_bytes
+    dic_size = dic.stat().st_size
+    if dic_size > free_for_dic:
+        die(
+            f'FD 用辞書 {dic.name} ({dic_size} bytes) が FD に収まらない。'
+            f'FD の辞書用空き容量は約 {free_for_dic} bytes '
+            f'(全データ領域 {data_bytes} bytes から COM/READ.ME/LICENSE/GPL2 の '
+            f'{other_bytes} bytes を引いた残り)。'
+            f'--max-yomi-kana を絞るか、FD に同梱するファイルを減らしてください。'
+        )
+    print(f'  FD 容量検査: 辞書 {dic_size} bytes / 空き容量 {free_for_dic} bytes (OK)')
 
 
 # ---------------------------------------------------------------------------
@@ -258,8 +307,32 @@ GNU General Public License version 2 (またはそれ以降) で配布されて�
 # 手順6: zip
 # ---------------------------------------------------------------------------
 
-def build_zip(version: str, com: Path, dic: Path) -> Path:
-    readme_text = READ_ME_TEMPLATE.read_text(encoding='utf-8')
+def build_zip_readme_text(fd_entry_count: int, zip_entry_count: int) -> str:
+    base_text = READ_ME_TEMPLATE.read_text(encoding='utf-8')
+
+    dic_note = f"""■ 辞書について(zip 版)
+  この zip に同梱した TSUKUSHI.DIC は全語彙版です({zip_entry_count}語)。
+  容量制限が無い zip だけの特典で、「ありがとう」「東京」「入力」のような
+  読み5かな以上の語も変換できます。
+  配布 FD イメージ(.xdf)側の辞書は、FD(1232KB)の容量に収まる読み4かな
+  以内版です({fd_entry_count}語)。より語彙の多いこの zip 版の辞書に
+  差し替えて使うこともできます。
+
+■ HDD へのコピー方法
+  TSUKUSHI.COM と TSUKUSHI.DIC を、常駐させたいドライブのルート
+  ディレクトリ(A:\\ 等)にそのままコピーしてください。2ファイルは
+  必ず同じドライブに置く必要があります。
+"""
+
+    marker = '■ 動作環境'
+    idx = base_text.find(marker)
+    if idx == -1:
+        die(f'{READ_ME_TEMPLATE}: zip 用 README.txt を組み立てられない({marker!r} が見つからない)')
+    return base_text[:idx] + dic_note + '\n' + base_text[idx:]
+
+
+def build_zip(version: str, com: Path, dic: Path, fd_entry_count: int, zip_entry_count: int) -> Path:
+    readme_text = build_zip_readme_text(fd_entry_count, zip_entry_count)
     dict_license_text = build_dictionary_license_txt()
 
     zip_path = OUT_RELEASE / f'tsukushi-v{version}.zip'
@@ -291,31 +364,37 @@ def main():
     with tempfile.TemporaryDirectory(prefix='tsukushi-release-') as tmp:
         tmp_dir = Path(tmp)
 
-        print('[1/6] TSUKUSHI.COM をアセンブル中...')
+        print('[1/7] TSUKUSHI.COM をアセンブル中...')
         com = build_com(tmp_dir)
 
-        print('[2/6] TSUKUSHI.DIC を生成中...')
-        dic = build_dic(tmp_dir)
-        entry_count = dic_entry_count(dic)
+        print('[2/7] TSUKUSHI.DIC (FD用/zip用の2種) を生成中...')
+        fd_dic = build_dic(tmp_dir, 'TSUKUSHI.DIC.fd', FD_MAX_YOMI_KANA)
+        zip_dic = build_dic(tmp_dir, 'TSUKUSHI.DIC.zip', None)
+        fd_entry_count = dic_entry_count(fd_dic)
+        zip_entry_count = dic_entry_count(zip_dic)
 
-        print('[3/6] READ.ME (CP932/CRLF) を生成中...')
+        print('[3/7] READ.ME (CP932/CRLF) を生成中...')
         readme = build_readme_cp932(tmp_dir)
 
-        print('[4/6] FD イメージを組み立て中...')
-        xdf = build_fd_image(version, com, dic, readme)
+        print('[4/7] FD 容量を検査中...')
+        check_fd_capacity(com, fd_dic, readme)
+
+        print('[5/7] FD イメージを組み立て中...')
+        xdf = build_fd_image(version, com, fd_dic, readme)
         runs = check_dic_contiguous(xdf)
         if runs != 1:
             die(f'{xdf}: TSUKUSHI.DIC が断片化している(区間数={runs})。'
                 'build-disk.mjs --release の配置ロジックを確認してください。')
         print(f'  TSUKUSHI.DIC の区間数: {runs} (OK)')
 
-        print('[5/6] zip を組み立て中...')
-        zip_path = build_zip(version, com, dic)
+        print('[6/7] zip を組み立て中...')
+        zip_path = build_zip(version, com, zip_dic, fd_entry_count, zip_entry_count)
 
-        print('[6/6] マニフェストを出力中...')
+        print('[7/7] マニフェストを出力中...')
         manifest_files = [
             ('TSUKUSHI.COM', com),
-            ('TSUKUSHI.DIC', dic),
+            ('TSUKUSHI.DIC (FD用)', fd_dic),
+            ('TSUKUSHI.DIC (zip用/全語彙)', zip_dic),
             ('READ.ME (CP932)', readme),
             (xdf.name, xdf),
             (zip_path.name, zip_path),
@@ -326,7 +405,8 @@ def main():
             size = path.stat().st_size
             digest = sha256_of(path)
             print(f'  {label}: {size} bytes  sha256={digest}')
-        print(f'  TSUKUSHI.DIC 語数: {entry_count}')
+        print(f'  TSUKUSHI.DIC (FD用) 語数: {fd_entry_count}')
+        print(f'  TSUKUSHI.DIC (zip用/全語彙) 語数: {zip_entry_count}')
         print()
         print(f'完了: {OUT_RELEASE}')
 

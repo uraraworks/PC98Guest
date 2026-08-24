@@ -87,6 +87,10 @@ python3 common/make_release.py --version 0.1.0
 本体・辞書・`READ.ME`・`LICENSE.TXT`・`GPL2.TXT` の5ファイルのみで、
 probes は含みません。
 
+同梱する `TSUKUSHI.DIC` は FD 版と zip 版で語彙数が異なります。FD 版は
+1232KB の容量制限のため読み4かな以内(43,859語)、zip 版には容量制限が
+無いため全語彙(131,835語)を収録します。
+
 ## 受け取りポリシー
 
 既存の FEP や市販ソフトを逆アセンブルした結果・内部仕様の提供は
