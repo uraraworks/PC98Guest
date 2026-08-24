@@ -39,7 +39,11 @@ PC-98 の挙動を実測するために書いた小さなプログラム群で�
   行っています
 - **NEC MS-DOS では動作を保証しません**(FreeDOS(98) 前提で作られています。
   部分的に動く可能性はありますが未検証です)
+- 辞書の置き場は**フロッピーディスク**または **SASI ハードディスク**です。
+  **SCSI ハードディスクは対象外**です(エミュレータ側に SCSI を指定する経路が
+  無く、動作を確認できないため)
 - ノーマルモード(640x400)のみに対応。ハイレゾモードは対象外です
+  (Neko Project II kai がハイレゾを実装しておらず、確認できないため)
 
 ## ディレクトリ構成
 
@@ -59,7 +63,7 @@ guest/
 # つくし本体のアセンブル(リポジトリルートで実行すること。-I でインクルードパスを指定)
 nasm -I tsukushi/ -f bin tsukushi/TSUKUSHI.ASM -o tsukushi/TSUKUSHI.COM
 
-# 辞書の生成(SKK-JISYO.L が dic/upstream/ にある場合)
+# 辞書の生成(SKK-JISYO.L が tsukushi/dic/upstream/ にある場合)
 python3 tsukushi/tools/mkdic2.py --out out/TSUKUSHI.DIC
 
 # probes を含む測定用FDイメージの組み立て
