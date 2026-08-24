@@ -222,7 +222,7 @@ def physical_sector_of_logical(logical_sector: int) -> int:
     return HIDDEN + logical_sector * (BPS // PHYS_SECTOR)
 
 
-def build():
+def build(fragment_count=1):
     if not FEP_DIC.exists():
         sys.exit(
             f'収録対象が見つからない: {FEP_DIC}\n'
@@ -323,20 +323,21 @@ def build():
     def cluster_data_off(cluster):
         return data_off + (cluster - 2) * CLSIZE
 
-    # --- ファイルを連続クラスタで詰めていく ---
+    # --- ファイルを連続クラスタで詰めていく(TSUKUSHI.DICだけ --fragment
+    # 指定時は断片化配置にする。常駐側の区間対応(段階E)をテストするため) ---
     next_free = 2
     report = []
-    for f in files:
-        content = f.read_bytes()
+
+    def alloc_contig(content):
+        nonlocal next_free
         n_clusters = max(1, (len(content) + CLSIZE - 1) // CLSIZE)
         if next_free + n_clusters - 1 - 2 >= n_max:
-            sys.exit(f'空き容量不足: {f.name} を配置できない(データ領域が小さすぎる)')
+            sys.exit('空き容量不足: 配置できない(データ領域が小さすぎる)')
         start_cluster = next_free
         chain = list(range(start_cluster, start_cluster + n_clusters))
         for i, c in enumerate(chain):
             nxt = chain[i + 1] if i + 1 < len(chain) else 0xFFFF
             fat_set(c, nxt)
-        # データ書き込み(最終クラスタの余りは0埋め)
         remaining = content
         for c in chain:
             doff = cluster_data_off(c)
@@ -345,6 +346,81 @@ def build():
             data[doff:doff + len(chunk)] = chunk
             if len(chunk) < CLSIZE:
                 data[doff + len(chunk):doff + CLSIZE] = b'\x00' * (CLSIZE - len(chunk))
+        next_free += n_clusters
+        return start_cluster
+
+    def alloc_fragmented(content, n_frags):
+        """content を n_frags 個の断片に分けて配置する。断片の間には
+        FAT16の不良クラスタマーカー(0xFFF7)で埋めたダミークラスタを挟み、
+        クラスタチェーンが連続にならないようにする。FATチェーン自体は
+        断片をまたいで正しくつながる(DOSから普通に読める1本のファイル)。
+        """
+        nonlocal next_free
+        n_clusters_total = max(1, (len(content) + CLSIZE - 1) // CLSIZE)
+        n = min(n_frags, n_clusters_total)
+        if n < n_frags:
+            print(f'  (note: fragment count reduced from {n_frags} to {n}: '
+                  f'file has only {n_clusters_total} clusters)')
+        base = n_clusters_total // n
+        extra = n_clusters_total % n
+        frag_sizes = [base + (1 if i < extra else 0) for i in range(n)]
+
+        first_cluster = None
+        prev_last = None
+        offset = 0
+        runs = []
+        for fi, size in enumerate(frag_sizes):
+            if next_free + size - 1 - 2 >= n_max:
+                sys.exit('空き容量不足: 断片を配置できない(データ領域が小さすぎる)')
+            frag_first = next_free
+            runs.append((frag_first, size))
+            if first_cluster is None:
+                first_cluster = frag_first
+
+            chain = list(range(frag_first, frag_first + size))
+            is_last_frag = (fi == len(frag_sizes) - 1)
+            for i, c in enumerate(chain):
+                if i < len(chain) - 1:
+                    fat_set(c, c + 1)
+                elif is_last_frag:
+                    fat_set(c, 0xFFFF)
+                # 断片内最終クラスタ(かつファイル末尾でない)は、次の断片の
+                # 先頭が決まってから(下のprev_last経由で)つなぐ
+
+            chunk_all = content[offset * CLSIZE:(offset + size) * CLSIZE]
+            remaining = chunk_all
+            for c in chain:
+                doff = cluster_data_off(c)
+                chunk = remaining[:CLSIZE]
+                remaining = remaining[CLSIZE:]
+                data[doff:doff + len(chunk)] = chunk
+                if len(chunk) < CLSIZE:
+                    data[doff + len(chunk):doff + CLSIZE] = b'\x00' * (CLSIZE - len(chunk))
+
+            if prev_last is not None:
+                fat_set(prev_last, frag_first)  # 前の断片の最終クラスタ -> この断片の先頭
+            prev_last = frag_first + size - 1
+            offset += size
+            next_free += size
+
+            if not is_last_frag:
+                if next_free - 2 >= n_max:
+                    sys.exit('空き容量不足: 断片間のダミークラスタを配置できない')
+                fat_set(next_free, 0xFFF7)  # FAT16の不良クラスタマーカー。どのファイルにも属さない
+                next_free += 1
+
+        print(f'  TSUKUSHI.DIC fragmented into {len(runs)} run(s):')
+        for start, count in runs:
+            print(f'    start cluster {start}  cluster count {count}')
+
+        return first_cluster
+
+    for f in files:
+        content = f.read_bytes()
+        if f == FEP_DIC and fragment_count > 1:
+            start_cluster = alloc_fragmented(content, fragment_count)
+        else:
+            start_cluster = alloc_contig(content)
 
         # ルートディレクトリエントリ
         entry = bytearray(32)
@@ -364,8 +440,6 @@ def build():
         start_logical = DATA_START_LOGICAL + (start_cluster - 2) * SPC
         start_phys = physical_sector_of_logical(start_logical)
         report.append((f.name, start_cluster, start_logical, start_phys, len(content)))
-
-        next_free += n_clusters
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     OUT_THD.write_bytes(bytes(data))
@@ -434,6 +508,8 @@ if __name__ == '__main__':
     parser.add_argument('--dump-parttab', metavar='IMAGE', type=Path)
     parser.add_argument('--compare-bpb', metavar='IMAGE', type=Path)
     parser.add_argument('--cylinders', type=int, default=DEFAULT_CYLINDERS)
+    parser.add_argument('--fragment', type=int, default=1,
+                         help='TSUKUSHI.DICをN個の断片に分けて配置する(既定1=断片化なし)')
     args = parser.parse_args()
 
     if args.dump_parttab is not None:
@@ -441,5 +517,7 @@ if __name__ == '__main__':
     elif args.compare_bpb is not None:
         compare_bpb(args.compare_bpb)
     else:
+        if args.fragment < 1:
+            sys.exit('--fragment には1以上の整数を指定してください')
         N_CYLINDERS = args.cylinders
-        build()
+        build(fragment_count=args.fragment)

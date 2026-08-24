@@ -82,17 +82,31 @@ def main():
 
     print(f'[file] clus={file_clus} size={file_size}')
 
-    # --- FAT12チェーンを辿る ---
+    # --- FAT12チェーンを辿り、連続する区間ごとにまとめる(TSUKUSHI.ASM の
+    # 段階Eと同じ考え方。区間は出現順)。従来の contiguous=yes/no は
+    # 区間数1個かどうかと同じ意味になる ---
+    def clus_to_lba(clus: int) -> int:
+        return data_start + (clus - 2) * spc
+
+    runs = []  # [{clus_start, clus_count}]
     count = 1
     contiguous = True
     cur = file_clus
+    run_start_clus = file_clus
+    run_len_clus = 1
     safety = 8192
     while True:
         nxt = fat12_entry(cur)
         if nxt >= 0x0FF8:
+            runs.append({'clus_start': run_start_clus, 'clus_count': run_len_clus})
             break
         if nxt != cur + 1:
             contiguous = False
+            runs.append({'clus_start': run_start_clus, 'clus_count': run_len_clus})
+            run_start_clus = nxt
+            run_len_clus = 1
+        else:
+            run_len_clus += 1
         count += 1
         cur = nxt
         safety -= 1
@@ -102,11 +116,19 @@ def main():
 
     print(f'[chain] count={count} contiguous={"yes" if contiguous else "no"}')
 
-    # --- 開始LBA・セクタ数 ---
-    lba = data_start + (file_clus - 2) * spc
+    # --- 開始LBA・セクタ数(先頭区間。従来互換の表示) ---
+    lba = clus_to_lba(file_clus)
     sectors = count * spc
 
     print(f'[loc] lba={lba} sectors={sectors}')
+
+    # --- 区間リスト(段階E: 断片化した辞書向け) ---
+    print(f'[runs] n={len(runs)}')
+    for i, r in enumerate(runs):
+        run_lba = clus_to_lba(r['clus_start'])
+        run_sectors = r['clus_count'] * spc
+        print(f'  run {i}: clus={r["clus_start"]} clus_count={r["clus_count"]} '
+              f'lba={run_lba} sectors={run_sectors}')
 
     return 0
 

@@ -33,6 +33,24 @@ const FAT_START = RESERVED_SECTORS;
 const ROOT_START = FAT_START + FAT_COUNT * SECTORS_PER_FAT;
 const DATA_START = ROOT_START + ROOT_SECTORS;
 
+// --fragment N : TSUKUSHI.DIC を N個の断片に分けて配置する(常駐側の
+// 区間対応(段階E)をテストするため)。断片の間には「不良クラスタ」
+// マーカー(FAT12の0xFF7)で埋めたダミークラスタを挟み、クラスタ
+// チェーンが連続にならないようにする。FATのチェーン自体はDOSから
+// 普通に読める正しい形で張る。
+const FRAGMENT_GAP_CLUSTERS = 1;
+
+let fragmentCount = 1;
+for (let i = 0; i < process.argv.length; i++) {
+  if (process.argv[i] === '--fragment') {
+    fragmentCount = parseInt(process.argv[i + 1], 10);
+    if (!Number.isInteger(fragmentCount) || fragmentCount < 1) {
+      console.error('--fragment には1以上の整数を指定してください');
+      process.exit(1);
+    }
+  }
+}
+
 const image = Buffer.alloc(TOTAL_SECTORS * BYTES_PER_SECTOR, 0);
 
 // --- ブートセクタ (BPB のみ。起動はしない) ---
@@ -93,11 +111,10 @@ const root = Buffer.alloc(ROOT_SECTORS * BYTES_PER_SECTOR, 0);
 let nextCluster = 2;
 let rootOffset = 0;
 
-for (const file of files) {
-  const data = readFileSync(file.path);
+// 通常配置: クラスタを連続で割り当てる(従来どおり)
+function allocateContiguous(data) {
   const clusterCount = Math.max(1, Math.ceil(data.length / (BYTES_PER_SECTOR * SECTORS_PER_CLUSTER)));
   const firstCluster = nextCluster;
-
   for (let i = 0; i < clusterCount; i++) {
     const cluster = firstCluster + i;
     const isLast = i === clusterCount - 1;
@@ -106,6 +123,84 @@ for (const file of files) {
     data.copy(image, sector * BYTES_PER_SECTOR, i * BYTES_PER_SECTOR, Math.min((i + 1) * BYTES_PER_SECTOR, data.length));
   }
   nextCluster += clusterCount;
+  return firstCluster;
+}
+
+// 断片化配置: N個の断片に分け、断片の間に不良クラスタマーカーで埋めた
+// ダミークラスタを挟む。FATチェーン自体は各断片をまたいで正しくつながる
+// (DOSから見て普通に読める1本のファイル)。
+function allocateFragmented(data, nFrags) {
+  const clusterBytes = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER;
+  const totalClusters = Math.max(1, Math.ceil(data.length / clusterBytes));
+  const n = Math.min(nFrags, totalClusters);
+  if (n < nFrags) {
+    console.log(`  (note: fragment count reduced from ${nFrags} to ${n}: file has only ${totalClusters} clusters)`);
+  }
+
+  const base = Math.floor(totalClusters / n);
+  const extra = totalClusters % n;
+  const fragSizes = [];
+  for (let i = 0; i < n; i++) fragSizes.push(base + (i < extra ? 1 : 0));
+
+  const fragRuns = [];
+  let clusterOffset = 0; // ファイル内の0起点クラスタ番号
+  let firstClusterOfFile = null;
+  let prevLastCluster = null;
+
+  for (let f = 0; f < fragSizes.length; f++) {
+    const size = fragSizes[f];
+    const fragFirst = nextCluster;
+    fragRuns.push({ start: fragFirst, count: size });
+    if (firstClusterOfFile === null) firstClusterOfFile = fragFirst;
+
+    for (let i = 0; i < size; i++) {
+      const cluster = fragFirst + i;
+      const fileClusterIndex = clusterOffset + i;
+      const isLastOfFile = (f === fragSizes.length - 1) && (i === size - 1);
+      if (i < size - 1) {
+        setFatEntry(cluster, cluster + 1);
+      } else if (isLastOfFile) {
+        setFatEntry(cluster, 0xfff);
+      }
+      // 断片内最終クラスタ(かつファイル末尾でない)は、次の断片の先頭が
+      // 決まってから(次のループの先頭で)つなぐ。ここでは仮値のまま。
+      const sector = DATA_START + (cluster - 2) * SECTORS_PER_CLUSTER;
+      data.copy(image, sector * BYTES_PER_SECTOR, fileClusterIndex * BYTES_PER_SECTOR,
+                Math.min((fileClusterIndex + 1) * BYTES_PER_SECTOR, data.length));
+    }
+
+    if (prevLastCluster !== null) {
+      setFatEntry(prevLastCluster, fragFirst); // 前の断片の最終クラスタ -> この断片の先頭
+    }
+    prevLastCluster = fragFirst + size - 1;
+    clusterOffset += size;
+    nextCluster += size;
+
+    if (f < fragSizes.length - 1) {
+      // 断片間にダミークラスタ(不良クラスタマーカー)を挟む。
+      // どのファイルにも属さないのでFATチェーン上は無関係。
+      for (let g = 0; g < FRAGMENT_GAP_CLUSTERS; g++) {
+        setFatEntry(nextCluster, 0xff7);
+        nextCluster += 1;
+      }
+    }
+  }
+
+  console.log(`  TSUKUSHI.DIC fragmented into ${fragRuns.length} run(s):`);
+  for (const r of fragRuns) {
+    console.log(`    start cluster ${r.start}  cluster count ${r.count}`);
+  }
+
+  return firstClusterOfFile;
+}
+
+for (const file of files) {
+  const data = readFileSync(file.path);
+  const isDic = file.name === 'TSUKUSHI' && file.ext === 'DIC';
+
+  const firstCluster = (isDic && fragmentCount > 1)
+    ? allocateFragmented(data, fragmentCount)
+    : allocateContiguous(data);
 
   root.write(file.name, rootOffset, 8, 'ascii');
   root.write(file.ext, rootOffset + 8, 3, 'ascii');

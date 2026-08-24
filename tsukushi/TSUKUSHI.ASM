@@ -30,7 +30,8 @@
 ;   確立した手順(BPB・FAT・ルートディレクトリを読んでFAT12クラスタ
 ;   チェーンを辿る)と同じ考え方をインストール時に行う(DICLOC.ASM
 ;   自体は変更しない。同じ手順を本ファイル内に書く)。断片化した辞書
-;   ファイルは対象外とし、連続していなければ常駐せずに終了する。
+;   ファイルにも対応する(段階E)。連続する区間(最大32個)のリストを
+;   常駐させ、区間数がそれを超える場合だけ常駐せずに終了する。
 ;
 ;   辞書形式は v2(疎索引。tools/mkdic2.py が生成する FEPDIC02)。
 ;   検索は tools/dic2_ref.py の docstring の手順(疎索引を二分探索して
@@ -164,12 +165,21 @@ dic_sparse:         dw   0      ; ヘッダ+0x1C: 疎索引の間隔(ブロッ�
 ; dic_kind = 0: FD(INT 1Bh CHS。MF/f0/SEEK1固定=AH 0x76)
 ;            1: HDD SASI相対アドレス指定(AH 0x06、DA/UA=0x00〜0x03)
 dic_kind:           db   0
-; dic_start_lba: 辞書先頭セクタの位置。単位は dic_kind によって違う:
+; --- 段階E: 断片化した辞書に対応するため、単一の dic_start_lba ではなく
+; 「連続する区間」のリストを持つ。ほとんどの断片化は少数の連続区間に
+; 分かれるだけなので、区間を最大 MAXRUNS(=32) 個まで常駐させる。
+; 各区間は { 開始セクタ(dic_run_start), セクタ数(dic_run_sectors) } の組。
+; 単位は dic_kind によって違う(旧 dic_start_lba と同じ考え方):
 ;   FD  : BPBの論理セクタ番号(BPBのbps単位)。従来どおり0〜65535に収まる前提。
 ;   HDD : ディスク先頭からの物理256バイトセクタの線形番号。
 ;         hidden(BPBのhidden sectors、物理セクタ単位) + 論理セクタ番号×(BPBのbps/256)。
 ;         実測した33MB級HDDイメージで既に65536を超えるため32bitにした。
-dic_start_lba:      dd   0
+; 区間はファイル内の出現順(FATチェーンを辿った順)に並んでいる。
+; 連続配置のファイルは区間が1個になるだけで、従来の動作と同じになる。
+MAXRUNS             equ  32
+dic_nruns:          db   0
+dic_run_start:      times MAXRUNS dd 0
+dic_run_sectors:    times MAXRUNS dd 0
 dic_da_ua:          db   0      ; INT 1Bh の DA/UA。FDなら 0x90+ドライブ番号、
                                  ; HDD(SASI相対)なら 0x00〜0x03(候補ごと)
 dic_bps:            dw   0      ; 転送に使う物理セクタ長。FDはBPBのbps、HDDは256固定
@@ -996,6 +1006,48 @@ lba_to_rel24:
         stc
         ret
 
+; 段階E: dic_quot_tmp(ファイル先頭からの相対セクタ番号、dic_bps単位)を
+; 区間リスト(dic_run_start/dic_run_sectors, 計 dic_nruns 個)で引き、
+; 絶対セクタ番号(dic_target_lbaと同じ単位)へ変換する。区間は出現順に
+; 並んでいるので、先頭から累積セクタ数を引き算しながら該当区間を探す
+; (区間は最大 MAXRUNS=32 個なので線形走査でよい)。
+; IN: AX = dic_quot_tmp(word)
+; OUT: DX:AX = 絶対セクタ番号(32bit)、CF=0のとき成功。
+;      CF=1のとき該当区間なし(区間データとdic_quot_tmpが矛盾。想定外)。
+; 破壊: BX,CX,SI
+dic_locate_run:
+        push    cx
+        push    si
+        mov     cl, [cs:dic_nruns]
+        xor     ch, ch
+        xor     si, si                  ; si = 区間インデックス×4 (dword配列オフセット)
+.rloop:
+        jcxz    .rfail
+        mov     bx, [cs:dic_run_sectors + si]  ; 区間のセクタ数(下位ワード。
+                                                ; dic_quot_tmpがwordである以上、
+                                                ; 個々の区間長もword範囲に収まる)
+        cmp     ax, bx
+        jb      .rfound
+        sub     ax, bx
+        add     si, 4
+        dec     cx
+        jmp     .rloop
+.rfound:
+        mov     bx, ax                  ; bx = 区間内オフセット(word)
+        mov     ax, [cs:dic_run_start + si]
+        mov     dx, [cs:dic_run_start + si + 2]
+        add     ax, bx
+        adc     dx, 0
+        clc
+        pop     si
+        pop     cx
+        ret
+.rfail:
+        stc
+        pop     si
+        pop     cx
+        ret
+
 ; IN: DX:AX = 辞書ファイル先頭からの絶対バイトオフセット(32bit), CX = 必要バイト数
 ;     (CX は dic_bps を超えないこと。呼び出し側はすべてこの前提で使う)
 ; OUT: DI = dic_read_buf 内のオフセット。そこから CX バイト連続で有効データがある
@@ -1008,13 +1060,20 @@ read_dict_range:
         mov     [cs:dic_within0], dx
         mov     [cs:dic_quot_tmp], ax
 
-        ; dic_target_lba(32bit) = dic_start_lba(32bit) + dic_quot_tmp(word,0拡張)。
-        ; dic_start_lba はFDでもHDDでも65536を超えうる(実測した33MB級HDD
-        ; イメージで既に超える)ため32bit加算にした。
+        ; dic_target_lba(32bit) = dic_quot_tmp(相対セクタ番号)を区間リストで
+        ; 引いた絶対セクタ番号。断片化した辞書に対応するため、単一の
+        ; dic_start_lbaへの加算ではなく区間ごとの開始位置+区間内オフセットに
+        ; している(区間はインストール時にFATチェーンの連続区間としてまとめた
+        ; もの。連続配置ならdic_nruns=1になり、従来の1本加算と同じ結果になる)。
         mov     ax, [cs:dic_quot_tmp]
-        xor     dx, dx
-        add     ax, [cs:dic_start_lba]
-        adc     dx, [cs:dic_start_lba+2]
+        call    dic_locate_run          ; -> dx:ax = 絶対セクタ番号
+        jnc     .loc_ok
+        ; 区間データと矛盾(想定外)。読み込み失敗扱いにしてnotfound扱いへ倒す。
+        mov     byte [cs:dic_read_failed], 1
+        mov     di, [cs:dic_within0]
+        pop     cx
+        ret
+.loc_ok:
         mov     [cs:dic_target_lba], ax
         mov     [cs:dic_target_lba+2], dx
 
@@ -2209,7 +2268,8 @@ install:
         ; 相対 ua=00〜03)試し、辞書のマジック(FEPDIC02)が実際に出た
         ; ものを採用する(候補テーブルは下記 8) 参照)。
         ; INT 18h ハンドラの中から DOS(INT 21h)は呼べないので、この解決は
-        ; インストール時にしかできない。断片化していたら常駐せず終了する。
+        ; インストール時にしかできない。区間数がMAXRUNS(32)を超えるほど
+        ; 断片化していたら常駐せず終了する。
 
         ; ---- 1) カレントドライブ番号 ----
         mov     ah, 0x19                ; カレントドライブ取得 (0=A, 1=B, ...)
@@ -2441,12 +2501,16 @@ install:
         cmp     byte [install_file_found], 0
         je      .err_not_found
 
-        ; ---- 6) FATチェーンを辿り、連続しているか確認する(FAT12/FAT16は
-        ; install_get_fat_entry が install_fat_type を見て内部で切り替える) ----
+        ; ---- 6) FATチェーンを辿り、連続する区間ごとにまとめる(段階E)。
+        ; 断片化していても、連続する区間が MAXRUNS(=32) 個以内に収まれば
+        ; 常駐する。install_get_fat_entry が install_fat_type を見て
+        ; FAT12/FAT16を内部で切り替える ----
         mov     ax, [install_file_clus]
         mov     [install_cur_clus], ax
+        mov     [install_run_start_clus], ax
+        mov     word [install_run_len], 1
+        mov     byte [install_nruns], 0
         mov     word [install_chain_count], 1
-        mov     byte [install_chain_contig], 1
         mov     word [install_safety], INSTALL_CHAIN_SAFETY
 
 .chain_loop:
@@ -2455,14 +2519,30 @@ install:
         jc      .err_fat_read
         mov     [install_next_clus], ax
         cmp     ax, [install_fat_term]
-        jae     .chain_done
+        jae     .chain_last             ; チェーン終端: 現在の区間を確定して終わる
 
         mov     ax, [install_cur_clus]
         inc     ax
         cmp     ax, [install_next_clus]
         je      .contig_ok
-        mov     byte [install_chain_contig], 0
+
+        ; 不連続: 現在の区間を確定し、次のクラスタから新しい区間を始める
+        call    install_push_run
+        cmp     al, 1
+        je      .err_too_fragmented
+        cmp     al, 2
+        je      .err_overflow
+        mov     ax, [install_next_clus]
+        mov     [install_run_start_clus], ax
+        mov     word [install_run_len], 1
+        jmp     .after_step
+
 .contig_ok:
+        mov     ax, [install_run_len]
+        inc     ax
+        mov     [install_run_len], ax
+
+.after_step:
         mov     ax, [install_chain_count]
         inc     ax
         mov     [install_chain_count], ax
@@ -2477,28 +2557,26 @@ install:
         je      .err_chain_runaway
         jmp     .chain_loop
 
-.chain_done:
-        cmp     byte [install_chain_contig], 0
-        je      .err_fragmented         ; 断片化した辞書は今回対象外
-
-        ; ---- 7) 辞書先頭の論理セクタ番号(BPBの論理セクタ単位) ----
-        mov     ax, [install_file_clus]
-        sub     ax, 2
-        mov     bl, [install_spc]
-        xor     bh, bh
-        mul     bx
-        cmp     dx, 0
-        jne     .err_overflow
-        add     ax, [install_data_start]
-        jc      .err_overflow
-        mov     [install_logical], ax
+.chain_last:
+        ; 最後の区間を確定する
+        call    install_push_run
+        cmp     al, 1
+        je      .err_too_fragmented
+        cmp     al, 2
+        je      .err_overflow
 
         ; ---- 8) 候補を順に試す。実際に読んで辞書のマジック(FEPDIC02)が
         ; 出た候補を採用する。決め打ちしない(環境で変わりうるため)。
         ;   候補1: FD (dic_da_ua=0x90+ドライブ番号。現行実装そのまま)
         ;   候補2〜5: HDD SASI相対 (dic_da_ua=0x00〜0x03、物理256バイト
         ;             セクタ、線形セクタ番号 = hidden + logical×(bps/256))
-        ; どれも当たらなければ常駐せずエラー終了する ----
+        ; 区間リスト(install_run_logical[]/install_run_sectors[]、計
+        ; install_nruns個)を候補の単位に変換して dic_run_start[]/
+        ; dic_run_sectors[]/dic_nruns へ控える。
+        ; どれも当たらなければ常駐せずエラー終了する。読み込み自体は
+        ; できたのにマジックが違う場合と、そもそもどの候補でも読めない
+        ; 場合を区別してメッセージを分ける(install_any_read_ok) ----
+        mov     byte [install_any_read_ok], 0
         mov     byte [install_cand_idx], 1
 .cand_loop:
         cmp     byte [install_cand_idx], 1
@@ -2515,9 +2593,26 @@ install:
         mov     al, [install_drive]
         add     al, 0x90
         mov     [dic_da_ua], al
-        mov     ax, [install_logical]
-        mov     word [dic_start_lba], ax
-        mov     word [dic_start_lba + 2], 0
+
+        ; --- FDの単位は install_run_logical[]/install_run_sectors[] と
+        ; 同じ(BPBの論理セクタ番号)なので、そのままword→dwordコピーする ---
+        mov     cl, [install_nruns]
+        mov     [dic_nruns], cl
+        xor     ch, ch
+        xor     si, si
+        xor     di, di
+.fdrun_loop:
+        jcxz    .fdrun_done
+        mov     ax, [install_run_logical + si]
+        mov     [dic_run_start + di], ax
+        mov     word [dic_run_start + di + 2], 0
+        mov     ax, [install_run_sectors + si]
+        mov     [dic_run_sectors + di], ax
+        mov     word [dic_run_sectors + di + 2], 0
+        add     si, 2
+        add     di, 4
+        loop    .fdrun_loop
+.fdrun_done:
         jmp     .cand_try
 
 .cand_setup_hdd:
@@ -2528,17 +2623,35 @@ install:
         sub     al, 2
         mov     [dic_da_ua], al
 
-        ; dic_start_lba(32bit) = hidden(32bit) + logical(word,0拡張) × (bpb_bps/256)(word)
+        ; mul = bpb_bps/256 (256/512/1024/2048はすべて256の倍数)
         mov     ax, [install_bpb_bps]
         mov     cl, 8
-        shr     ax, cl                  ; ax = bpb_bps/256 (256/512/1024/2048はすべて256の倍数)
+        shr     ax, cl
         mov     [install_bps_mul], ax
-        mov     ax, [install_logical]
+
+        ; 各区間: start(32bit) = hidden(32bit) + install_run_logical[i]×mul
+        ;         sectors(32bit) = install_run_sectors[i]×mul
+        mov     cl, [install_nruns]
+        mov     [dic_nruns], cl
+        xor     ch, ch
+        xor     si, si
+        xor     di, di
+.hddrun_loop:
+        jcxz    .hddrun_done
+        mov     ax, [install_run_logical + si]
         mul     word [install_bps_mul]  ; dx:ax = logical*mul(32bit)
         add     ax, [install_hidden]
         adc     dx, [install_hidden + 2]
-        mov     [dic_start_lba], ax
-        mov     [dic_start_lba + 2], dx
+        mov     [dic_run_start + di], ax
+        mov     [dic_run_start + di + 2], dx
+        mov     ax, [install_run_sectors + si]
+        mul     word [install_bps_mul]  ; dx:ax = sectors*mul(32bit)
+        mov     [dic_run_sectors + di], ax
+        mov     [dic_run_sectors + di + 2], dx
+        add     si, 2
+        add     di, 4
+        loop    .hddrun_loop
+.hddrun_done:
 
 .cand_try:
         mov     word [dic_buf_lba], 0xFFFF
@@ -2554,6 +2667,7 @@ install:
         call    read_dict_range         ; -> di = dic_read_buf内オフセット
         cmp     byte [dic_read_failed], 0
         jne     .cand_skip
+        mov     byte [install_any_read_ok], 1  ; 読み込み自体は成功した
 
         mov     bx, di
         mov     si, install_dic_magic
@@ -2571,6 +2685,8 @@ install:
         inc     byte [install_cand_idx]
         cmp     byte [install_cand_idx], 5
         jbe     .cand_loop
+        cmp     byte [install_any_read_ok], 0
+        jne     .err_bad_magic
         jmp     .err_all_candidates_failed
 
 .cand_found:
@@ -2662,14 +2778,17 @@ install:
 .err_chain_runaway:
         mov     dx, msg_err_chain_runaway
         jmp     .abort
-.err_fragmented:
-        mov     dx, msg_err_fragmented
+.err_too_fragmented:
+        mov     dx, msg_err_too_fragmented
         jmp     .abort
 .err_header_read:
         mov     dx, msg_err_header_read
         jmp     .abort
 .err_too_many_blocks:
         mov     dx, msg_err_too_many_blocks
+        jmp     .abort
+.err_bad_magic:
+        mov     dx, msg_err_bad_magic
         jmp     .abort
 .err_all_candidates_failed:
         mov     dx, msg_err_all_candidates_failed
@@ -2822,6 +2941,50 @@ install_get_fat_entry:
         stc
         ret
 
+; 段階E: 現在の区間(install_run_start_clus, install_run_len クラスタ数)を
+; install_run_logical[]/install_run_sectors[](BPBの論理セクタ単位、word)
+; へ install_nruns 番目の要素として追加する。
+;   logical = (run_start_clus - 2) * spc + data_start
+;   sectors = run_len(クラスタ数) * spc
+; OUT: AL = 0(成功) / 1(区間数がMAXRUNSを超える) / 2(計算オーバーフロー)
+; 破壊: AX,BX,DX
+install_push_run:
+        cmp     byte [install_nruns], MAXRUNS
+        jae     .full
+        mov     al, [install_nruns]
+        xor     ah, ah
+        mov     bx, ax
+        add     bx, bx                  ; bx = インデックス×2 (word配列オフセット)
+
+        mov     ax, [install_run_start_clus]
+        sub     ax, 2
+        mov     dl, [install_spc]
+        xor     dh, dh
+        mul     dx
+        cmp     dx, 0
+        jne     .overflow
+        add     ax, [install_data_start]
+        jc      .overflow
+        mov     [install_run_logical + bx], ax
+
+        mov     ax, [install_run_len]
+        mov     dl, [install_spc]
+        xor     dh, dh
+        mul     dx
+        cmp     dx, 0
+        jne     .overflow
+        mov     [install_run_sectors + bx], ax
+
+        inc     byte [install_nruns]
+        mov     al, 0
+        ret
+.full:
+        mov     al, 1
+        ret
+.overflow:
+        mov     al, 2
+        ret
+
 ; どの候補で常駐したかを表示する(例: "Tsukushi FEP resident (dict: FD ua=91)."
 ; / "(dict: SASI ua=00)."。dic_kind/dic_da_uaは候補確定時に設定済み)
 ; 破壊: AX,DX
@@ -2890,12 +3053,14 @@ msg_err_boot_read:      db 'TSUKUSHI: boot sector read failed (int25h).', 0x0D, 
 msg_err_overflow:       db 'TSUKUSHI: value overflow while resolving TSUKUSHI.DIC location.', 0x0D, 0x0A, '$'
 msg_err_fat_read:       db 'TSUKUSHI: FAT read failed (int25h).', 0x0D, 0x0A, '$'
 msg_err_root_read:      db 'TSUKUSHI: root directory read failed (int25h).', 0x0D, 0x0A, '$'
-msg_err_not_found:      db 'TSUKUSHI: TSUKUSHI.DIC not found in root directory.', 0x0D, 0x0A, '$'
+msg_err_not_found:      db 'TSUKUSHI: TSUKUSHI.DIC not found on the current drive.', 0x0D, 0x0A, '$'
 msg_err_chain_runaway:  db 'TSUKUSHI: FAT chain too long (possible loop).', 0x0D, 0x0A, '$'
-msg_err_fragmented:     db 'TSUKUSHI: TSUKUSHI.DIC is fragmented (not defragmented). Defragment the disk and try again.', 0x0D, 0x0A, '$'
+msg_err_too_fragmented: db 'TSUKUSHI: TSUKUSHI.DIC is too fragmented (over 32 runs). Please defragment.', 0x0D, 0x0A, '$'
 msg_err_header_read:    db 'TSUKUSHI: dictionary header read failed (int1Bh).', 0x0D, 0x0A, '$'
 msg_err_too_many_blocks: db 'TSUKUSHI: dictionary sparse index has too many blocks (>65535).', 0x0D, 0x0A, '$'
-msg_err_all_candidates_failed: db 'TSUKUSHI: TSUKUSHI.DIC not readable (tried FD and HDD/SASI ua=00-03).', 0x0D, 0x0A, '$'
+msg_err_bad_magic:      db 'TSUKUSHI: TSUKUSHI.DIC is not a valid dictionary (bad magic).', 0x0D, 0x0A, '$'
+msg_err_all_candidates_failed: db 'TSUKUSHI: Cannot read TSUKUSHI.DIC via disk BIOS.', 0x0D, 0x0A
+                        db 'Supported: floppy disk, or SASI hard disk. SCSI is not supported.', 0x0D, 0x0A, '$'
 
 ; --- インストール時のみ使うデータ(常駐後は破棄される) ---
 INSTALL_CHAIN_SAFETY   equ     8192    ; FATチェーンの暴走(循環等)検出用の上限反復回数
@@ -2935,13 +3100,22 @@ install_entry_in_sec:        dw 0
 install_cur_clus:        dw     0
 install_next_clus:       dw     0
 install_chain_count:     dw     0
-install_chain_contig:    db     0
 install_safety:          dw     0
 install_fat_odd:           db   0
 
-install_logical:            dw  0      ; 辞書先頭の論理セクタ番号(BPBの論理セクタ単位)
+; --- 段階E: FATチェーンを辿りながら集めた「連続する区間」のリスト。
+; install_run_start_clus/install_run_len は走査中の現在の区間、
+; install_run_logical[]/install_run_sectors[] は install_push_run で
+; 確定した区間(BPBの論理セクタ単位、word。旧 install_logical と同じ単位)。
+install_run_start_clus: dw     0      ; 現在の区間の開始クラスタ番号
+install_run_len:        dw     0      ; 現在の区間のクラスタ数
+install_nruns:           db    0      ; 確定した区間数(<=MAXRUNS)
+install_run_logical:    times MAXRUNS dw 0
+install_run_sectors:    times MAXRUNS dw 0
+
 install_bps_mul:              dw 0      ; HDD候補用: bpb_bps/256
 install_cand_idx:               db 0    ; 1=FD, 2〜5=HDD(ua=idx-2)
+install_any_read_ok:            db 0    ; 候補のうちどれか1つでもディスク読み込み自体は成功したか
 
 install_data_len:        dd     0
 
