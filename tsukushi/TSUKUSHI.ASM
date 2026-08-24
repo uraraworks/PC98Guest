@@ -158,18 +158,30 @@ dic_data_end:       dd   0      ; data_off + data_len (データ部終端。同�
 dic_sparse_off:     dd   0      ; ヘッダ+0x10: 疎索引先頭(ファイル先頭からの相対バイト)
 dic_sparse_count:   dw   0      ; ヘッダ+0x0C下位ワード: 疎索引レコード数(65536件以上は対象外)
 dic_sparse:         dw   0      ; ヘッダ+0x1C: 疎索引の間隔(ブロックあたりの最大エントリ数)
-dic_start_lba:      dw   0      ; FEP.DIC の開始LBA(DICLOC.ASMと同じ手順で解決)
-dic_da_ua:          db   0      ; INT 1Bh の DA/UA。現在のドライブ番号から
-                                 ; 0x90+ドライブ番号 で作る(FD前提の暫定。
-                                 ; HDD等では別のDA/UA体系になるはずで未対応)
-dic_bps:            dw   0      ; BPBのバイト/セクタ
-dic_spt:            dw   0      ; BPBのセクタ/トラック
-dic_heads:          dw   0      ; BPBのヘッド数
-dic_sector_n:       db   0      ; INT 1BhのCH用セクタ長コード(1024→3/512→2/256→1)
+
+; --- 段階D: 辞書はFDでもHDDでもディスク上に置ける。インストール時に
+; 5通りの読み出し方式を順に試し、実際に読めた方式をここへ控える。
+; dic_kind = 0: FD(INT 1Bh CHS。MF/f0/SEEK1固定=AH 0x76)
+;            1: HDD SASI相対アドレス指定(AH 0x06、DA/UA=0x00〜0x03)
+dic_kind:           db   0
+; dic_start_lba: 辞書先頭セクタの位置。単位は dic_kind によって違う:
+;   FD  : BPBの論理セクタ番号(BPBのbps単位)。従来どおり0〜65535に収まる前提。
+;   HDD : ディスク先頭からの物理256バイトセクタの線形番号。
+;         hidden(BPBのhidden sectors、物理セクタ単位) + 論理セクタ番号×(BPBのbps/256)。
+;         実測した33MB級HDDイメージで既に65536を超えるため32bitにした。
+dic_start_lba:      dd   0
+dic_da_ua:          db   0      ; INT 1Bh の DA/UA。FDなら 0x90+ドライブ番号、
+                                 ; HDD(SASI相対)なら 0x00〜0x03(候補ごと)
+dic_bps:            dw   0      ; 転送に使う物理セクタ長。FDはBPBのbps、HDDは256固定
+dic_spt:            dw   0      ; BPBのセクタ/トラック(FD候補のCHS計算専用)
+dic_heads:          dw   0      ; BPBのヘッド数(同上)
+dic_sector_n:       db   0      ; FD専用: INT 1BhのCH用セクタ長コード(1024→3/512→2/256→1)
 
 ; 1〜2セクタ読み込みキャッシュ(直近に読んだセクタを覚えておき、同じ
-; セクタへの再アクセスでは INT 1Bh を呼び直さない)
-dic_buf_lba:        dw   0xFFFF ; ロード済みの先頭LBA(0xFFFFは「未ロード」の印)
+; セクタへの再アクセスでは INT 1Bh を呼び直さない)。dic_start_lbaを32bit化
+; したのに合わせて、キャッシュのタグとなる先頭セクタ番号(dic_buf_lba)と
+; 対象セクタ番号(dic_target_lba)も32bitにした。
+dic_buf_lba:        dd   0xFFFFFFFF ; ロード済みの先頭セクタ番号(0xFFFFFFFFは「未ロード」の印)
 dic_buf_sectors:    db   0      ; ロード済みセクタ数(1 or 2)
 dic_read_failed:    db   0      ; INT 1Bh が失敗したら1を立てる(以後notfound扱い)
 dic_read_buf:       times DIC_READBUF_SIZE db 0
@@ -188,8 +200,9 @@ dic_skip_cnt:       dw   0
 
 ; read_dict_range の作業用スクラッチ
 dic_within0:        dw   0
-dic_target_lba:     dw   0
+dic_target_lba:     dd   0      ; dic_start_lbaと同じ単位の32bit
 dic_need2:          db   0
+dic_quot_tmp:       dw   0      ; オフセット/dic_bps の商(word)。32bit加算の一時置き場
 
 ; read_entry_at の結果置き場
 dic_cur_yomi_len:   db   0      ; エントリの実際のよみバイト長
@@ -940,10 +953,10 @@ vram_put_decimal:
         ret
 
 ;--------------------------------------------------------------------
-; 段階C: LBA→CHS変換・ディスク読み込みヘルパ
+; 段階C/D: LBA→CHS変換(FD用)・LBA→相対アドレス変換(HDD用)・ディスク読み込み
 ;--------------------------------------------------------------------
 
-; IN: AX = LBA(word)
+; IN: AX = LBA(word。FD候補はBPBの論理セクタ数に収まる前提で下位16bitのみ使う)
 ; OUT: CL=シリンダ(下位8bit。FD前提で77以下のため安全), DH=ヘッド, DL=セクタ(1起点)
 ;      (CHは書かない。CH=セクタ長Nは呼び出し側が別途 dic_sector_n からセットする)
 ; 破壊: AX,BX,DX。CL,DH,DLへ出力する関係でCXの下位バイトも書き換わる。
@@ -967,6 +980,22 @@ lba_to_chs:
 
 chs_sector_tmp: db      0
 
+; IN: DX:AX = 線形セクタ番号(32bit)
+; OUT: CF=0のとき CL=bit0-7, CH=bit8-15, DL=bit16-23 (書籍2-9-4のHDD相対
+;      アドレス指定形式そのまま。DL,CH,CLの24bitに線形セクタ番号、DLが
+;      最上位バイト・CLが最下位バイト)。CF=1のとき24bitに収まらない(異常)。
+; 破壊: AX,DX(DHは0であることを確認するだけで書き換えない)
+lba_to_rel24:
+        cmp     dh, 0
+        jne     .overflow
+        mov     cl, al
+        mov     ch, ah
+        clc
+        ret
+.overflow:
+        stc
+        ret
+
 ; IN: DX:AX = 辞書ファイル先頭からの絶対バイトオフセット(32bit), CX = 必要バイト数
 ;     (CX は dic_bps を超えないこと。呼び出し側はすべてこの前提で使う)
 ; OUT: DI = dic_read_buf 内のオフセット。そこから CX バイト連続で有効データがある
@@ -975,10 +1004,19 @@ chs_sector_tmp: db      0
 read_dict_range:
         push    cx
         mov     bx, [cs:dic_bps]
-        div     bx                      ; ax = lba相対(オフセット/bps), dx = セクタ内オフセット
+        div     bx                      ; ax = 相対セクタ番号(オフセット/bps,word), dx = セクタ内オフセット
         mov     [cs:dic_within0], dx
+        mov     [cs:dic_quot_tmp], ax
+
+        ; dic_target_lba(32bit) = dic_start_lba(32bit) + dic_quot_tmp(word,0拡張)。
+        ; dic_start_lba はFDでもHDDでも65536を超えうる(実測した33MB級HDD
+        ; イメージで既に超える)ため32bit加算にした。
+        mov     ax, [cs:dic_quot_tmp]
+        xor     dx, dx
         add     ax, [cs:dic_start_lba]
+        adc     dx, [cs:dic_start_lba+2]
         mov     [cs:dic_target_lba], ax
+        mov     [cs:dic_target_lba+2], dx
 
         pop     cx
         push    cx
@@ -993,8 +1031,11 @@ read_dict_range:
 .need_set:
         pop     cx
 
-        ; --- キャッシュ判定 ---
+        ; --- キャッシュ判定(32bit比較) ---
         mov     ax, [cs:dic_target_lba]
+        mov     dx, [cs:dic_target_lba+2]
+        cmp     dx, [cs:dic_buf_lba+2]
+        jne     .miss
         cmp     ax, [cs:dic_buf_lba]
         jne     .miss
         cmp     byte [cs:dic_need2], 0
@@ -1013,11 +1054,15 @@ read_dict_range:
         push    cx
         push    dx
 
+        cmp     byte [cs:dic_kind], 0
+        jne     .hdd1
+
+        ; --- FD: CHS指定(MF1/f0/SEEK1/コマンド6。実測(fep-measure-06)で確定) ---
         mov     ax, [cs:dic_target_lba]
         call    lba_to_chs              ; -> cl=cyl, dh=head, dl=sector
         mov     ch, [cs:dic_sector_n]
         mov     al, [cs:dic_da_ua]
-        mov     ah, 0x76                ; MF1/f0/SEEK1/コマンド6(読み出し)。実測(fep-measure-06)で確定
+        mov     ah, 0x76
         mov     bx, [cs:dic_bps]
         mov     bp, dic_read_buf
         int     0x1B
@@ -1037,20 +1082,56 @@ read_dict_range:
         add     bp, [cs:dic_bps]
         int     0x1B
         jc      .read_err
+        jmp     .two_sectors
 
-        mov     byte [cs:dic_buf_sectors], 2
-        jmp     .read_ok
+.hdd1:
+        ; --- HDD: SASI相対アドレス指定(書籍2-9-4。MT/MF/SEEKビットは無い) ---
+        mov     ax, [cs:dic_target_lba]
+        mov     dx, [cs:dic_target_lba+2]
+        call    lba_to_rel24            ; -> cl/ch/dl。CF=1なら24bit超過(異常)
+        jc      .read_err
+        mov     al, [cs:dic_da_ua]
+        mov     ah, 0x06                ; コマンド6(読み出し)・r=0(リトライあり)
+        mov     bx, [cs:dic_bps]
+        mov     bp, dic_read_buf
+        int     0x1B
+        jc      .read_err
+
+        cmp     byte [cs:dic_need2], 0
+        je      .one_sector
+
+        mov     ax, [cs:dic_target_lba]
+        mov     dx, [cs:dic_target_lba+2]
+        add     ax, 1
+        adc     dx, 0
+        call    lba_to_rel24
+        jc      .read_err
+        mov     al, [cs:dic_da_ua]
+        mov     ah, 0x06
+        mov     bx, [cs:dic_bps]
+        mov     bp, dic_read_buf
+        add     bp, [cs:dic_bps]
+        int     0x1B
+        jc      .read_err
+        jmp     .two_sectors
+
 .one_sector:
         mov     byte [cs:dic_buf_sectors], 1
+        jmp     .read_ok
+.two_sectors:
+        mov     byte [cs:dic_buf_sectors], 2
 .read_ok:
         mov     ax, [cs:dic_target_lba]
+        mov     dx, [cs:dic_target_lba+2]
         mov     [cs:dic_buf_lba], ax
+        mov     [cs:dic_buf_lba+2], dx
         jmp     .do_read_ret
 .read_err:
         ; 読み取り失敗: キャッシュを無効化し、以後 dict_lookup 側で
         ; dic_read_failed を見て notfound 扱いにする(ハンドラ内で
         ; エラーメッセージを出す手段が無いため。未検証の異常系)。
         mov     word [cs:dic_buf_lba], 0xFFFF
+        mov     word [cs:dic_buf_lba+2], 0xFFFF
         mov     byte [cs:dic_read_failed], 1
 .do_read_ret:
         pop     dx
@@ -2121,25 +2202,19 @@ install:
         int     0x21
 
 .install_now:
-        ; --- 段階C: FEP.DIC のディスク上の位置を解決する ---
-        ; DICLOC.ASM で確立した手順(BPB→FAT→ルートディレクトリ→FAT12
-        ; チェーン)と同じ考え方をここで行う(DICLOC.ASM 自体は変更しない。
-        ; 同じ手順を本ファイル内に独立して書く)。INT 18h ハンドラの中から
-        ; DOS(INT 21h)は呼べないので、この解決はインストール時にしか
-        ; できない。断片化していたら常駐せず終了する。
+        ; --- 段階D: FEP.DIC のディスク上の位置を解決し、FDとHDDの両方に
+        ; 対応する。BPB→FAT→ルートディレクトリでファイルの論理位置を
+        ; 求める手順自体はFAT12/FAT16で共通(DICLOC.ASMで確立した考え方)。
+        ; そのあと「その論理位置を実際にどう読むか」を5通り(FD/HDD SASI
+        ; 相対 ua=00〜03)試し、辞書のマジック(FEPDIC02)が実際に出た
+        ; ものを採用する(候補テーブルは下記 8) 参照)。
+        ; INT 18h ハンドラの中から DOS(INT 21h)は呼べないので、この解決は
+        ; インストール時にしかできない。断片化していたら常駐せず終了する。
 
         ; ---- 1) カレントドライブ番号 ----
         mov     ah, 0x19                ; カレントドライブ取得 (0=A, 1=B, ...)
         int     0x21
         mov     [install_drive], al
-
-        ; DA/UA = 0x90 + ドライブ番号。FD専用の暫定(下記コメント参照)。
-        ; INT 1Bh の DA/UA は「1MBインターフェース・ユニット番号」であり、
-        ; HDD等では別の体系になるはずだが未対応・未検証(このTSUKUSHIは
-        ; FD起動を前提にした暫定実装であることをここに明記する)。
-        mov     al, [install_drive]
-        add     al, 0x90
-        mov     [dic_da_ua], al
 
         ; ---- 2) ブートセクタ(論理セクタ0)をINT 25hで読む ----
         mov     cx, 1
@@ -2153,7 +2228,7 @@ install:
 
         ; ---- 3) BPB解析 ----
         mov     ax, [install_bootsec_buf + 0x0B]
-        mov     [dic_bps], ax
+        mov     [install_bpb_bps], ax
         mov     al, [install_bootsec_buf + 0x0D]
         mov     [install_spc], al
         mov     ax, [install_bootsec_buf + 0x0E]
@@ -2168,30 +2243,38 @@ install:
         mov     [dic_spt], ax
         mov     ax, [install_bootsec_buf + 0x1A]
         mov     [dic_heads], ax
+        mov     ax, [install_bootsec_buf + 0x1C]
+        mov     [install_hidden], ax
+        mov     ax, [install_bootsec_buf + 0x1E]
+        mov     [install_hidden + 2], ax
 
-        ; セクタ長コード(INT 1Bh の CH用): 1024→3 / 512→2 / 256→1。
-        ; ハードコードせず BPB のバイト/セクタから求める。それ以外の値は
-        ; このTSUKUSHIでは対応していないので常駐せず終了する。
-        mov     ax, [dic_bps]
+        ; セクタ長コード(候補1=FD専用。INT 1BhのCH用): 1024→3/512→2/256→1。
+        ; これ以外のbps(HDDの論理セクタは2048等)は候補1(FD形式アクセス)
+        ; を単に使えないだけとし、install全体は中止しない
+        ; (HDD候補2〜5は独立して試す。「1は既に動いているので、FDの場合の
+        ; 挙動を壊さないこと」を守るため、1024/512/256のときの動作は
+        ; 従来の err_bps 相当のチェックも含め変えていない)。
+        mov     byte [install_sector_n_valid], 0
+        mov     ax, [install_bpb_bps]
         cmp     ax, 1024
         jne     .chk512
-        mov     byte [dic_sector_n], 3
+        mov     byte [install_sector_n], 3
+        mov     byte [install_sector_n_valid], 1
         jmp     .n_done
 .chk512:
         cmp     ax, 512
         jne     .chk256
-        mov     byte [dic_sector_n], 2
+        mov     byte [install_sector_n], 2
+        mov     byte [install_sector_n_valid], 1
         jmp     .n_done
 .chk256:
         cmp     ax, 256
-        jne     .err_bps
-        mov     byte [dic_sector_n], 1
+        jne     .n_done
+        mov     byte [install_sector_n], 1
+        mov     byte [install_sector_n_valid], 1
 .n_done:
-        ; 2セクタぶんの読み込みバッファ(DIC_READBUF_SIZE)に収まるか確認
-        mov     ax, [dic_bps]
-        add     ax, ax                  ; ax = 2*bps
-        cmp     ax, DIC_READBUF_SIZE
-        ja      .err_bps
+        ; (2セクタぶんがDIC_READBUF_SIZEに収まるかは、上のbpsが1024/512/256の
+        ; いずれかである時点で 2*bps<=2048 は自動的に成り立つので個別検査は不要)
 
         ; ---- 4) 位置計算 ----
         ; fat_start = rsvd
@@ -2216,11 +2299,11 @@ install:
         mov     ax, [install_rootent]
         mov     cx, 32
         mul     cx
-        add     ax, [dic_bps]
+        add     ax, [install_bpb_bps]
         adc     dx, 0
         sub     ax, 1
         sbb     dx, 0
-        mov     cx, [dic_bps]
+        mov     cx, [install_bpb_bps]
         cmp     cx, 0
         je      .err_overflow
         div     cx
@@ -2232,55 +2315,95 @@ install:
         jc      .err_overflow
         mov     [install_data_start], ax
 
-        ; ---- 5a) FAT全体を読む ----
-        mov     ax, [install_spf]
-        mov     cx, [dic_bps]
-        mul     cx
-        cmp     dx, 0
-        jne     .err_fat_too_big
-        cmp     ax, INSTALL_FAT_BUF_SIZE
-        ja      .err_fat_too_big
+        ; ---- 4b) 総セクタ数(totsec16が0ならtotsec32を使う) ----
+        mov     ax, [install_bootsec_buf + 0x13]
+        or      ax, ax
+        jnz     .totsec_word
+        mov     ax, [install_bootsec_buf + 0x20]
+        mov     dx, [install_bootsec_buf + 0x22]
+        jmp     .totsec_done
+.totsec_word:
+        xor     dx, dx
+.totsec_done:
+        mov     [install_totsec], ax
+        mov     [install_totsec + 2], dx
 
-        mov     cx, [install_spf]
-        mov     dx, [install_fat_start]
-        mov     bx, install_fat_buf
-        mov     al, [install_drive]
-        xor     ah, ah
-        int     0x25
-        popf
-        jc      .err_fat_read
+        ; ---- 4c) FAT12/FAT16判定 ----
+        ; data_sectors = totsec - data_start
+        ;   (data_start = rsvd + nfat*spf + root_sects なので、この1回の
+        ;   引き算で「総セクタ数-予約-FAT×個数-ルート領域」を兼ねる)
+        ; clusters = data_sectors / spc
+        ; クラスタ数 < 4085 なら FAT12、それ以上なら FAT16 (指示どおりの式)
+        mov     ax, [install_totsec]
+        mov     dx, [install_totsec + 2]
+        sub     ax, [install_data_start]
+        sbb     dx, 0
+        jc      .err_overflow
+        mov     [install_data_sectors], ax
+        mov     [install_data_sectors + 2], dx
 
-        ; ---- 5b) ルートディレクトリ全体を読む ----
-        mov     ax, [install_root_sects]
-        mov     cx, [dic_bps]
-        mul     cx
-        cmp     dx, 0
-        jne     .err_root_too_big
-        cmp     ax, INSTALL_ROOT_BUF_SIZE
-        ja      .err_root_too_big
+        mov     ax, [install_data_sectors]
+        mov     dx, [install_data_sectors + 2]
+        xor     ch, ch
+        mov     cl, [install_spc]
+        cmp     cl, 0
+        je      .err_overflow
+        call    install_divide_dword32  ; dx:ax = clusters(32bit)
+        mov     [install_clusters], ax
+        mov     [install_clusters + 2], dx
 
-        mov     cx, [install_root_sects]
-        mov     dx, [install_root_start]
-        mov     bx, install_root_buf
-        mov     al, [install_drive]
-        xor     ah, ah
-        int     0x25
-        popf
-        jc      .err_root_read
+        cmp     word [install_clusters + 2], 0
+        jne     .is_fat16
+        cmp     word [install_clusters], 4085
+        jae     .is_fat16
+        mov     byte [install_fat_type], 0
+        mov     word [install_fat_term], 0x0FF8
+        jmp     .fat_type_done
+.is_fat16:
+        mov     byte [install_fat_type], 1
+        mov     word [install_fat_term], 0xFFF8
+.fat_type_done:
 
-        ; ---- 5c) "FEP     DIC" を探す ----
+        ; ---- 5) ルートディレクトリを1セクタずつ読みながら "FEP     DIC"
+        ; を探す(ルートエントリが多いHDDでも1バッファに収めなくて済む
+        ; ようにする。ディレクトリエントリ32バイトはBPBのbpsが32の倍数
+        ; である限りセクタをまたがない) ----
+        mov     word [install_root_sec_idx], 0
         mov     ax, [install_rootent]
         mov     [install_entries_left], ax
-        mov     si, install_root_buf
         mov     byte [install_file_found], 0
+
+.root_sector_loop:
+        mov     ax, [install_entries_left]
+        cmp     ax, 0
+        je      .search_done
+        mov     ax, [install_root_sec_idx]
+        cmp     ax, [install_root_sects]
+        jae     .search_done
+
+        add     ax, [install_root_start]
+        mov     bx, install_root_buf
+        call    install_read_sector_raw
+        jc      .err_root_read
+
+        mov     ax, [install_bpb_bps]
+        mov     cl, 5
+        shr     ax, cl                  ; ax = bps/32 (1セクタあたりのエントリ数)
+        mov     [install_entries_in_sec], ax
+        mov     si, install_root_buf
+        mov     word [install_entry_in_sec], 0
 
 .search_loop:
         mov     ax, [install_entries_left]
         cmp     ax, 0
         je      .search_done
+        mov     ax, [install_entry_in_sec]
+        cmp     ax, [install_entries_in_sec]
+        jae     .next_sector
+
         mov     al, [si]
         cmp     al, 0
-        je      .search_done
+        je      .search_done            ; 0x00: これ以降エントリなし
         cmp     al, 0xE5
         je      .next_entry
 
@@ -2300,16 +2423,26 @@ install:
 
 .next_entry:
         add     si, 32
+        mov     ax, [install_entry_in_sec]
+        inc     ax
+        mov     [install_entry_in_sec], ax
         mov     ax, [install_entries_left]
         dec     ax
         mov     [install_entries_left], ax
         jmp     .search_loop
 
+.next_sector:
+        mov     ax, [install_root_sec_idx]
+        inc     ax
+        mov     [install_root_sec_idx], ax
+        jmp     .root_sector_loop
+
 .search_done:
         cmp     byte [install_file_found], 0
         je      .err_not_found
 
-        ; ---- 6) FAT12チェーンを辿り、連続しているか確認する ----
+        ; ---- 6) FATチェーンを辿り、連続しているか確認する(FAT12/FAT16は
+        ; install_get_fat_entry が install_fat_type を見て内部で切り替える) ----
         mov     ax, [install_file_clus]
         mov     [install_cur_clus], ax
         mov     word [install_chain_count], 1
@@ -2318,9 +2451,10 @@ install:
 
 .chain_loop:
         mov     ax, [install_cur_clus]
-        call    install_get_fat12_entry ; -> ax = FATエントリ値(12bit)
+        call    install_get_fat_entry   ; -> ax = FATエントリ値, CF=1なら読み込み失敗
+        jc      .err_fat_read
         mov     [install_next_clus], ax
-        cmp     ax, 0x0FF8
+        cmp     ax, [install_fat_term]
         jae     .chain_done
 
         mov     ax, [install_cur_clus]
@@ -2347,7 +2481,7 @@ install:
         cmp     byte [install_chain_contig], 0
         je      .err_fragmented         ; 断片化した辞書は今回対象外
 
-        ; ---- 7) 開始LBAを計算する ----
+        ; ---- 7) 辞書先頭の論理セクタ番号(BPBの論理セクタ単位) ----
         mov     ax, [install_file_clus]
         sub     ax, 2
         mov     bl, [install_spc]
@@ -2357,45 +2491,113 @@ install:
         jne     .err_overflow
         add     ax, [install_data_start]
         jc      .err_overflow
-        mov     [dic_start_lba], ax
+        mov     [install_logical], ax
 
-        ; ---- ヘッダ(32バイト)を INT 1Bh 経由で読み、マジックを確認する ----
-        ; (read_dict_range は常駐ルーチンだが、install: からもそのまま
-        ; 呼べる。dic_start_lba/dic_bps/dic_spt/dic_heads/dic_da_ua/
-        ; dic_sector_n は上でセット済み)
+        ; ---- 8) 候補を順に試す。実際に読んで辞書のマジック(FEPDIC02)が
+        ; 出た候補を採用する。決め打ちしない(環境で変わりうるため)。
+        ;   候補1: FD (dic_da_ua=0x90+ドライブ番号。現行実装そのまま)
+        ;   候補2〜5: HDD SASI相対 (dic_da_ua=0x00〜0x03、物理256バイト
+        ;             セクタ、線形セクタ番号 = hidden + logical×(bps/256))
+        ; どれも当たらなければ常駐せずエラー終了する ----
+        mov     byte [install_cand_idx], 1
+.cand_loop:
+        cmp     byte [install_cand_idx], 1
+        jne     .cand_setup_hdd
+
+        ; --- 候補1: FD ---
+        cmp     byte [install_sector_n_valid], 0
+        je      .cand_skip              ; このBPBのbpsはFD向けの値ではない
+        mov     byte [dic_kind], 0
+        mov     ax, [install_bpb_bps]
+        mov     [dic_bps], ax
+        mov     al, [install_sector_n]
+        mov     [dic_sector_n], al
+        mov     al, [install_drive]
+        add     al, 0x90
+        mov     [dic_da_ua], al
+        mov     ax, [install_logical]
+        mov     word [dic_start_lba], ax
+        mov     word [dic_start_lba + 2], 0
+        jmp     .cand_try
+
+.cand_setup_hdd:
+        ; --- 候補2〜5: HDD SASI相対 (ua = cand_idx-2) ---
+        mov     byte [dic_kind], 1
+        mov     word [dic_bps], 256
+        mov     al, [install_cand_idx]
+        sub     al, 2
+        mov     [dic_da_ua], al
+
+        ; dic_start_lba(32bit) = hidden(32bit) + logical(word,0拡張) × (bpb_bps/256)(word)
+        mov     ax, [install_bpb_bps]
+        mov     cl, 8
+        shr     ax, cl                  ; ax = bpb_bps/256 (256/512/1024/2048はすべて256の倍数)
+        mov     [install_bps_mul], ax
+        mov     ax, [install_logical]
+        mul     word [install_bps_mul]  ; dx:ax = logical*mul(32bit)
+        add     ax, [install_hidden]
+        adc     dx, [install_hidden + 2]
+        mov     [dic_start_lba], ax
+        mov     [dic_start_lba + 2], dx
+
+.cand_try:
+        mov     word [dic_buf_lba], 0xFFFF
+        mov     word [dic_buf_lba + 2], 0xFFFF
+        mov     byte [dic_buf_sectors], 0
+        mov     byte [dic_read_failed], 0
+
+        mov     ax, cs
+        mov     es, ax
+        mov     ax, 0
+        mov     dx, 0
+        mov     cx, 8
+        call    read_dict_range         ; -> di = dic_read_buf内オフセット
+        cmp     byte [dic_read_failed], 0
+        jne     .cand_skip
+
+        mov     bx, di
+        mov     si, install_dic_magic
+        mov     cx, 8
+.cand_magic_loop:
+        mov     al, [dic_read_buf + bx]
+        cmp     al, [si]
+        jne     .cand_skip
+        inc     bx
+        inc     si
+        loop    .cand_magic_loop
+        jmp     .cand_found
+
+.cand_skip:
+        inc     byte [install_cand_idx]
+        cmp     byte [install_cand_idx], 5
+        jbe     .cand_loop
+        jmp     .err_all_candidates_failed
+
+.cand_found:
+        ; --- 当たった候補の設定(dic_kind/dic_bps/dic_da_ua/dic_start_lba等)
+        ; はそのまま常駐データに残っている。ヘッダ(32バイト)をあらためて
+        ; 読み、各フィールドを控える ---
         mov     ax, cs
         mov     es, ax
         mov     ax, 0
         mov     dx, 0
         mov     cx, 32
         call    read_dict_range         ; -> di = dic_read_buf内オフセット
-        cmp     byte [cs:dic_read_failed], 0
+        cmp     byte [dic_read_failed], 0
         jne     .err_header_read
 
         mov     bx, di
-        mov     si, install_dic_magic
-        mov     cx, 8
-.magic_loop:
-        mov     al, [cs:dic_read_buf + bx]
-        cmp     al, [si]
-        jne     .err_magic
-        inc     bx
-        inc     si
-        loop    .magic_loop
-
-        ; --- ヘッダの各フィールドを常駐データへ控える ---
-        mov     bx, di
         add     bx, 0x14                ; data_off (u32)
-        mov     ax, [cs:dic_read_buf + bx]
+        mov     ax, [dic_read_buf + bx]
         mov     [dic_data_off], ax
-        mov     ax, [cs:dic_read_buf + bx + 2]
+        mov     ax, [dic_read_buf + bx + 2]
         mov     [dic_data_off + 2], ax
 
         mov     bx, di
         add     bx, 0x18                ; data_len (u32)
-        mov     ax, [cs:dic_read_buf + bx]
+        mov     ax, [dic_read_buf + bx]
         mov     [install_data_len], ax
-        mov     ax, [cs:dic_read_buf + bx + 2]
+        mov     ax, [dic_read_buf + bx + 2]
         mov     [install_data_len + 2], ax
 
         ; dic_data_end = dic_data_off + install_data_len
@@ -2408,22 +2610,22 @@ install:
 
         mov     bx, di
         add     bx, 0x10                ; sparse_off (u32)
-        mov     ax, [cs:dic_read_buf + bx]
+        mov     ax, [dic_read_buf + bx]
         mov     [dic_sparse_off], ax
-        mov     ax, [cs:dic_read_buf + bx + 2]
+        mov     ax, [dic_read_buf + bx + 2]
         mov     [dic_sparse_off + 2], ax
 
         mov     bx, di
         add     bx, 0x0C                ; sparse_count (u32)
-        mov     ax, [cs:dic_read_buf + bx]
+        mov     ax, [dic_read_buf + bx]
         mov     [dic_sparse_count], ax
-        mov     ax, [cs:dic_read_buf + bx + 2]
+        mov     ax, [dic_read_buf + bx + 2]
         or      ax, ax
         jnz     .err_too_many_blocks    ; 疎索引が65536レコード以上は対象外
 
         mov     bx, di
         add     bx, 0x1C                ; sparse (u16)
-        mov     ax, [cs:dic_read_buf + bx]
+        mov     ax, [dic_read_buf + bx]
         mov     [dic_sparse], ax
 
         ; --- 辞書ロード成功。INT 18h をフックして常駐する ---
@@ -2436,9 +2638,7 @@ install:
         mov     ax, 0x2518
         int     0x21
 
-        mov     dx, msg_ok
-        mov     ah, 0x09
-        int     0x21
+        call    print_resident_message
 
         mov     dx, (resident_end - start + 0x100 + 15) / 16 ; PSPを含む常駐パラグラフ数
         mov     ax, 0x3100              ; 常駐終了
@@ -2447,20 +2647,11 @@ install:
 .err_boot_read:
         mov     dx, msg_err_boot_read
         jmp     .abort
-.err_bps:
-        mov     dx, msg_err_bps
-        jmp     .abort
 .err_overflow:
         mov     dx, msg_err_overflow
         jmp     .abort
-.err_fat_too_big:
-        mov     dx, msg_err_fat_too_big
-        jmp     .abort
 .err_fat_read:
         mov     dx, msg_err_fat_read
-        jmp     .abort
-.err_root_too_big:
-        mov     dx, msg_err_root_too_big
         jmp     .abort
 .err_root_read:
         mov     dx, msg_err_root_read
@@ -2477,11 +2668,11 @@ install:
 .err_header_read:
         mov     dx, msg_err_header_read
         jmp     .abort
-.err_magic:
-        mov     dx, msg_err_magic
-        jmp     .abort
 .err_too_many_blocks:
         mov     dx, msg_err_too_many_blocks
+        jmp     .abort
+.err_all_candidates_failed:
+        mov     dx, msg_err_all_candidates_failed
         jmp     .abort
 
 .abort:
@@ -2491,80 +2682,278 @@ install:
         int     0x21
 
 ;--------------------------------------------------------------------
-; FAT12エントリ取得 (install時のみ使用。DICLOC.ASM の get_fat12_entry と
-; 同じ考え方を本ファイル内に独立して書いたもの)
-;   in:  ax = クラスタ番号
-;   out: ax = 12bit FATエントリ値
+; インストール時ディスクI/Oヘルパ (常駐後は破棄される)
 ;--------------------------------------------------------------------
-install_get_fat12_entry:
+
+; IN: AX = 論理セクタ番号(word。BPBの論理セクタ単位), BX = 読み込み先アドレス(DS:BX)
+; OUT: CF=0で成功/CF=1で失敗(INT 25hの異常)
+; 破壊: AX,CX,DX
+install_read_sector_raw:
+        mov     dx, ax
+        mov     cx, 1
+        mov     al, [install_drive]
+        xor     ah, ah
+        int     0x25
+        popf
+        ret
+
+; 32bit除算: dx:ax(被除数) / cx(除数) -> dx:ax = 商, bx = 余り
+; (DICLOC.ASM の divide_dword32 と同じ考え方)
+; 破壊: AX,BX,DX
+install_divide_dword32:
+        mov     [install_dd_hi], dx
+        mov     [install_dd_lo], ax
+        mov     ax, [install_dd_hi]
+        xor     dx, dx
+        div     cx
+        mov     [install_dd_qhi], ax
+        mov     ax, [install_dd_lo]
+        div     cx
+        mov     bx, dx
+        mov     dx, [install_dd_qhi]
+        ret
+
+; FAT領域を1〜2セクタぶんの窓(install_win_buf)にキャッシュしながら読む。
+; ルートディレクトリと違い、FAT12のエントリ(3バイト/2クラスタ)はセクタ
+; 境界をまたぐことがあるので2セクタぶんの窓を持つ(dict_lookupのread_dict_range
+; と同じ考え方。ただしFAT/ルート領域はINT 25h、辞書本体はINT 1Bhと経路が違う
+; ので別実装にした)。
+; IN: DX:AX = FAT領域先頭からの絶対バイトオフセット(32bit), CX = 必要バイト数(1か2)
+; OUT: CF=0のとき BX = install_win_buf内オフセット(そこからCXバイト連続で有効)
+;      CF=1のとき読み込み失敗
+; 破壊: AX,BX,CX,DX
+install_fat_win_read:
         push    cx
-        push    dx
-        push    bx
+        mov     bx, [install_bpb_bps]
+        div     bx                      ; ax=セクタ相対番号(word), dx=セクタ内オフセット
+        mov     [install_win_within], dx
+        add     ax, [install_fat_start]
+        mov     [install_win_target], ax
+
+        pop     cx
+        mov     ax, [install_win_within]
+        add     ax, cx
+        cmp     ax, [install_bpb_bps]
+        jbe     .need1
+        mov     byte [install_win_need2], 1
+        jmp     .need_set
+.need1:
+        mov     byte [install_win_need2], 0
+.need_set:
+
+        mov     ax, [install_win_target]
+        cmp     ax, [install_win_base]
+        jne     .miss
+        cmp     byte [install_win_need2], 0
+        je      .hit
+        cmp     byte [install_win_sectors], 2
+        jae     .hit
+.miss:
+        mov     ax, [install_win_target]
+        mov     bx, install_win_buf
+        call    install_read_sector_raw
+        jc      .err
+        cmp     byte [install_win_need2], 0
+        je      .one
+        mov     ax, [install_win_target]
+        inc     ax
+        mov     bx, install_win_buf
+        add     bx, [install_bpb_bps]
+        call    install_read_sector_raw
+        jc      .err
+        mov     byte [install_win_sectors], 2
+        jmp     .loaded
+.one:
+        mov     byte [install_win_sectors], 1
+.loaded:
+        mov     ax, [install_win_target]
+        mov     [install_win_base], ax
+.hit:
+        mov     bx, [install_win_within]
+        clc
+        ret
+.err:
+        mov     word [install_win_base], 0xFFFF
+        stc
+        ret
+
+; FATエントリ取得(install_fat_typeに応じてFAT12/FAT16を切り替える。
+; DICLOC.ASM の get_fat12_entry と同じ考え方に、指示どおりFAT16(2バイト
+; そのまま・終端0xFFF8以上)を追加したもの)
+;   in:  ax = クラスタ番号
+;   out: ax = FATエントリ値(FAT12なら12bit/FAT16なら16bit)、CF=1なら読み込み失敗
+; 破壊: AX,BX,CX,DX
+install_get_fat_entry:
+        cmp     byte [install_fat_type], 0
+        jne     .f16
+
+        ; --- FAT12: byte_off = cluster*3/2 ---
         mov     cx, 3
         mul     cx                      ; dx:ax = cluster*3
         mov     cx, 2
-        div     cx                      ; ax = offset, dx = cluster mod 2
-        mov     bx, ax
-        mov     ax, [install_fat_buf + bx]
-        cmp     dx, 0
-        je      .even
-        mov     cx, 4
+        div     cx                      ; ax=byte_off(word), dx=cluster mod 2(3*c mod 2と同じ)
+        mov     [install_fat_odd], dl
+        xor     dx, dx                  ; byte_offの上位ワード=0
+        mov     cx, 2
+        call    install_fat_win_read
+        jc      .fail
+        mov     ax, [install_win_buf + bx]
+        cmp     byte [install_fat_odd], 0
+        je      .f12even
+        mov     cl, 4
         shr     ax, cl
-        jmp     .done
-.even:
+        jmp     .ok
+.f12even:
         and     ax, 0x0FFF
-.done:
-        pop     bx
-        pop     dx
-        pop     cx
+        jmp     .ok
+
+.f16:
+        ; --- FAT16: byte_off = cluster*2 ---
+        mov     cx, 2
+        mul     cx                      ; dx:ax = cluster*2 (32bit。clusterが32767超でも正しい)
+        mov     cx, 2
+        call    install_fat_win_read
+        jc      .fail
+        mov     ax, [install_win_buf + bx]
+.ok:
+        clc
+        ret
+.fail:
+        stc
         ret
 
-msg_ok:                 db 'Tsukushi FEP resident (dictionary on disk).', 0x0D, 0x0A
+; どの候補で常駐したかを表示する(例: "Tsukushi FEP resident (dict: FD ua=91)."
+; / "(dict: SASI ua=00)."。dic_kind/dic_da_uaは候補確定時に設定済み)
+; 破壊: AX,DX
+print_resident_message:
+        mov     dx, msg_ok_prefix
+        mov     ah, 0x09
+        int     0x21
+
+        cmp     byte [dic_kind], 0
+        jne     .p_sasi
+        mov     dx, msg_kind_fd
+        jmp     .p_ua
+.p_sasi:
+        mov     dx, msg_kind_sasi
+.p_ua:
+        mov     ah, 0x09
+        int     0x21
+
+        mov     al, [dic_da_ua]
+        call    install_print_hex8
+
+        mov     dx, msg_ok_suffix
+        mov     ah, 0x09
+        int     0x21
+        ret
+
+; AL = 8bit値を16進2桁でAH=02出力(install時専用。DICLOC.ASM/HDDRD.ASMと同じ考え方)
+; 破壊: なし(AX,CX,DXは呼び出し前の値に復元する)
+install_print_hex8:
+        push    ax
+        push    cx
+        push    dx
+        mov     ah, al
+        mov     cl, 4
+        shr     al, cl
+        call    .nib
+        mov     al, ah
+        and     al, 0x0F
+        call    .nib
+        pop     dx
+        pop     cx
+        pop     ax
+        ret
+.nib:
+        push    ax
+        cmp     al, 10
+        jb      .digit
+        add     al, 'A' - 10 - '0'
+        jmp     .out
+.digit:
+        add     al, '0'
+.out:
+        mov     dl, al
+        mov     ah, 0x02
+        int     0x21
+        pop     ax
+        ret
+
+msg_ok_prefix:          db 'Tsukushi FEP resident (dict: $'
+msg_kind_fd:            db 'FD ua=$'
+msg_kind_sasi:          db 'SASI ua=$'
+msg_ok_suffix:          db ').', 0x0D, 0x0A
                         db 'Ctrl+XFER or Ctrl-K toggles kana, Space converts, Enter commits.', 0x0D, 0x0A, '$'
 msg_already:            db 'Tsukushi FEP already resident.', 0x0D, 0x0A, '$'
 msg_err_boot_read:      db 'TSUKUSHI: boot sector read failed (int25h).', 0x0D, 0x0A, '$'
-msg_err_bps:            db 'TSUKUSHI: unsupported bytes/sector (must be 1024, 512 or 256).', 0x0D, 0x0A, '$'
 msg_err_overflow:       db 'TSUKUSHI: value overflow while resolving FEP.DIC location.', 0x0D, 0x0A, '$'
-msg_err_fat_too_big:    db 'TSUKUSHI: FAT does not fit in the install-time buffer.', 0x0D, 0x0A, '$'
 msg_err_fat_read:       db 'TSUKUSHI: FAT read failed (int25h).', 0x0D, 0x0A, '$'
-msg_err_root_too_big:   db 'TSUKUSHI: root directory does not fit in the install-time buffer.', 0x0D, 0x0A, '$'
 msg_err_root_read:      db 'TSUKUSHI: root directory read failed (int25h).', 0x0D, 0x0A, '$'
 msg_err_not_found:      db 'TSUKUSHI: FEP.DIC not found in root directory.', 0x0D, 0x0A, '$'
 msg_err_chain_runaway:  db 'TSUKUSHI: FAT chain too long (possible loop).', 0x0D, 0x0A, '$'
 msg_err_fragmented:     db 'TSUKUSHI: FEP.DIC is fragmented (not defragmented). Defragment the disk and try again.', 0x0D, 0x0A, '$'
 msg_err_header_read:    db 'TSUKUSHI: dictionary header read failed (int1Bh).', 0x0D, 0x0A, '$'
-msg_err_magic:          db 'TSUKUSHI: dictionary magic mismatch (not a FEPDIC02 file).', 0x0D, 0x0A, '$'
 msg_err_too_many_blocks: db 'TSUKUSHI: dictionary sparse index has too many blocks (>65535).', 0x0D, 0x0A, '$'
+msg_err_all_candidates_failed: db 'TSUKUSHI: FEP.DIC not readable (tried FD and HDD/SASI ua=00-03).', 0x0D, 0x0A, '$'
 
 ; --- インストール時のみ使うデータ(常駐後は破棄される) ---
-INSTALL_FAT_BUF_SIZE   equ     4096    ; FATがこのバイト数に収まらなければエラー終了
-INSTALL_ROOT_BUF_SIZE  equ     8192    ; ルートディレクトリがこのバイト数に収まらなければエラー終了
 INSTALL_CHAIN_SAFETY   equ     8192    ; FATチェーンの暴走(循環等)検出用の上限反復回数
 
 install_drive:          db      0
 
+install_bpb_bps:         dw     0      ; BPBそのもののバイト/セクタ(候補ごとの dic_bps とは別)
 install_spc:            db      0
 install_rsvd:            dw     0
 install_nfat:            db     0
 install_rootent:         dw     0
 install_spf:              dw    0
+install_hidden:            dd   0      ; BPB+0x1C: hidden sectors(物理セクタ単位、u32)
+install_totsec:             dd  0      ; 総セクタ数(totsec16が0ならtotsec32を使う)
 
 install_fat_start:       dw     0
 install_root_start:      dw     0
 install_root_sects:      dw     0
 install_data_start:      dw     0
 
+install_data_sectors:      dd   0
+install_clusters:           dd  0
+install_fat_type:            db 0      ; 0=FAT12 / 1=FAT16
+install_fat_term:             dw 0      ; チェーン終端しきい値(FAT12=0x0FF8/FAT16=0xFFF8)
+
+install_sector_n:              db 0     ; FD候補用セクタ長コード(有効なのは下のvalid=1のときのみ)
+install_sector_n_valid:         db 0
+
 install_entries_left:    dw     0
 install_file_found:      db     0
 install_file_clus:       dw     0
+
+install_root_sec_idx:      dw   0
+install_entries_in_sec:     dw  0
+install_entry_in_sec:        dw 0
 
 install_cur_clus:        dw     0
 install_next_clus:       dw     0
 install_chain_count:     dw     0
 install_chain_contig:    db     0
 install_safety:          dw     0
+install_fat_odd:           db   0
+
+install_logical:            dw  0      ; 辞書先頭の論理セクタ番号(BPBの論理セクタ単位)
+install_bps_mul:              dw 0      ; HDD候補用: bpb_bps/256
+install_cand_idx:               db 0    ; 1=FD, 2〜5=HDD(ua=idx-2)
 
 install_data_len:        dd     0
+
+install_dd_hi:           dw     0
+install_dd_lo:           dw     0
+install_dd_qhi:          dw     0
+
+install_win_base:          dw   0xFFFF ; FAT窓のロード済み先頭セクタ(未ロード=0xFFFF)
+install_win_sectors:        db  0
+install_win_within:          dw 0
+install_win_target:           dw 0
+install_win_need2:             db 0
 
 install_dic_magic:      db      'FEPDIC02'
 install_target_name:    db      'FEP     DIC'   ; 8.3の生の形(11バイト、スペース埋め)
@@ -2575,7 +2964,7 @@ install_target_name:    db      'FEP     DIC'   ; 8.3の生の形(11バイト、
 ; からのみ使い、常駐後は破棄される)
 ;--------------------------------------------------------------------
 install_bootsec_buf:   times 2048 db 0
-install_fat_buf:       times INSTALL_FAT_BUF_SIZE db 0
-install_root_buf:      times INSTALL_ROOT_BUF_SIZE db 0
+install_root_buf:      times 2048 db 0        ; ルートディレクトリは1セクタずつ読む(エントリはまたがない)
+install_win_buf:       times 4096 db 0        ; FAT領域の2セクタぶんの窓(FAT12の境界またぎ対策)
 
 image_end:
