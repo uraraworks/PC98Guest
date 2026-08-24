@@ -12,6 +12,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = dirname(HERE);
+const PROBES = join(REPO_ROOT, 'probes');
+const TSUKUSHI = join(REPO_ROOT, 'tsukushi');
+const OUT_DIR = join(REPO_ROOT, 'out');
 
 const BYTES_PER_SECTOR = 1024;
 const SECTORS_PER_CLUSTER = 1;
@@ -66,22 +70,22 @@ setFatEntry(0, 0xf00 | MEDIA);
 setFatEntry(1, 0xfff);
 
 // --- ファイル配置 ---
-// 測定用プログラム一式。FreeDOS(98) 側での確認にも使うので FEP 本体と辞書も入れる。
+// 測定用プログラム一式。FreeDOS(98) 側での確認にも使うので つくし本体と辞書も入れる。
 const files = [
-  { name: 'ESCT1   ', ext: 'COM', path: join(HERE, 'ESCT1.COM') },
-  { name: 'ESCT2   ', ext: 'COM', path: join(HERE, 'ESCT2.COM') },
-  { name: 'FEP     ', ext: 'COM', path: join(HERE, 'FEP.COM') },
-  { name: 'FEP18   ', ext: 'COM', path: join(HERE, 'FEP18.COM') },
-  // DICTEST.COM は v1辞書(FEPDIC01)専用。FEP18は v2(FEPDIC02, ディスク版)を
+  { name: 'ESCT1   ', ext: 'COM', path: join(PROBES, 'ESCT1.COM') },
+  { name: 'ESCT2   ', ext: 'COM', path: join(PROBES, 'ESCT2.COM') },
+  { name: 'FEP     ', ext: 'COM', path: join(PROBES, 'FEP.COM') },
+  { name: 'TSUKUSHI', ext: 'COM', path: join(TSUKUSHI, 'TSUKUSHI.COM') },
+  // DICTEST.COM は v1辞書(FEPDIC01)専用。TSUKUSHIは v2(FEPDIC02, ディスク版)を
   // 使うようになったため、DICTEST.COM 自体はリポジトリに残すがイメージには
   // 収録しない(source of confusion を避けるため)。
-  { name: 'FEP     ', ext: 'DIC', path: join(HERE, 'out', 'FEP.DIC') },
-  { name: 'AHSPY   ', ext: 'COM', path: join(HERE, 'AHSPY.COM') },
-  { name: 'INTEST  ', ext: 'COM', path: join(HERE, 'INTEST.COM') },
-  { name: 'K18SPY  ', ext: 'COM', path: join(HERE, 'K18SPY.COM') },
-  { name: 'RAWRD   ', ext: 'COM', path: join(HERE, 'RAWRD.COM') },
-  { name: 'RAWRD18 ', ext: 'COM', path: join(HERE, 'RAWRD18.COM') },
-  { name: 'DICLOC  ', ext: 'COM', path: join(HERE, 'DICLOC.COM') },
+  { name: 'FEP     ', ext: 'DIC', path: join(OUT_DIR, 'FEP.DIC') },
+  { name: 'AHSPY   ', ext: 'COM', path: join(PROBES, 'AHSPY.COM') },
+  { name: 'INTEST  ', ext: 'COM', path: join(PROBES, 'INTEST.COM') },
+  { name: 'K18SPY  ', ext: 'COM', path: join(PROBES, 'K18SPY.COM') },
+  { name: 'RAWRD   ', ext: 'COM', path: join(PROBES, 'RAWRD.COM') },
+  { name: 'RAWRD18 ', ext: 'COM', path: join(PROBES, 'RAWRD18.COM') },
+  { name: 'DICLOC  ', ext: 'COM', path: join(PROBES, 'DICLOC.COM') },
 ];
 
 const root = Buffer.alloc(ROOT_SECTORS * BYTES_PER_SECTOR, 0);
@@ -121,8 +125,7 @@ for (let i = 0; i < FAT_COUNT; i++) {
 }
 root.copy(image, ROOT_START * BYTES_PER_SECTOR);
 
-const outDir = join(HERE, 'out');
-mkdirSync(outDir, { recursive: true });
-const outPath = join(outDir, 'esctest.xdf');
+mkdirSync(OUT_DIR, { recursive: true });
+const outPath = join(OUT_DIR, 'esctest.xdf');
 writeFileSync(outPath, image);
 console.log(`wrote ${outPath} (${image.length} bytes)`);

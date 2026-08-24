@@ -15,9 +15,10 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-FEP_DIR = HERE.parent
+FEP_DIR = HERE.parent           # tsukushi/
+REPO_ROOT = FEP_DIR.parent       # リポジトリルート
 SRC_TXT = FEP_DIR / 'dic' / 'base.txt'
-OUT_DIC = FEP_DIR / 'out' / 'FEP.DIC'
+OUT_DIC = REPO_ROOT / 'out' / 'FEP.DIC'
 
 sys.path.insert(0, str(HERE))
 import dic_ref  # noqa: E402

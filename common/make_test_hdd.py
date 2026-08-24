@@ -18,26 +18,28 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-FEP_DIR = HERE.parent
-SRC_THD = FEP_DIR.parent.parent / 'WebNP2' / 'public' / 'test' / 'HDDimage.thd'
-OUT_DIR = FEP_DIR / 'out'
+REPO_ROOT = HERE.parent
+PROBES = REPO_ROOT / 'probes'
+TSUKUSHI = REPO_ROOT / 'tsukushi'
+SRC_THD = REPO_ROOT.parent / 'WebNP2' / 'public' / 'test' / 'HDDimage.thd'
+OUT_DIR = REPO_ROOT / 'out'
 OUT_THD = OUT_DIR / 'msdos620.thd'
 
-# ルートディレクトリへ収録するファイル一覧(FEP_DIR からの相対名で ROOT_FILES に足す)
+# ルートディレクトリへ収録するファイル一覧
 ROOT_FILES = [
-    FEP_DIR / 'ESCT1.COM',
-    FEP_DIR / 'ESCT2.COM',
-    FEP_DIR / 'FEP.COM',
-    FEP_DIR / 'FEP18.COM',
-    # DICTEST.COM は v1辞書(FEPDIC01)専用。FEP18は v2(FEPDIC02, ディスク版)を
+    PROBES / 'ESCT1.COM',
+    PROBES / 'ESCT2.COM',
+    PROBES / 'FEP.COM',
+    TSUKUSHI / 'TSUKUSHI.COM',
+    # DICTEST.COM は v1辞書(FEPDIC01)専用。TSUKUSHIは v2(FEPDIC02, ディスク版)を
     # 使うため、DICTEST.COM自体はリポジトリに残すがイメージには収録しない。
     OUT_DIR / 'FEP.DIC',   # ビルド成果物ではなく辞書データだが、収録手順は同じ
-    FEP_DIR / 'AHSPY.COM',
-    FEP_DIR / 'INTEST.COM',
-    FEP_DIR / 'K18SPY.COM',
-    FEP_DIR / 'RAWRD.COM',
-    FEP_DIR / 'RAWRD18.COM',
-    FEP_DIR / 'DICLOC.COM',
+    PROBES / 'AHSPY.COM',
+    PROBES / 'INTEST.COM',
+    PROBES / 'K18SPY.COM',
+    PROBES / 'RAWRD.COM',
+    PROBES / 'RAWRD18.COM',
+    PROBES / 'DICLOC.COM',
 ]
 
 THD_HEADER = 0x100

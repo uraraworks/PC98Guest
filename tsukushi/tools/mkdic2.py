@@ -55,9 +55,10 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-FEP_DIR = HERE.parent
+FEP_DIR = HERE.parent           # tsukushi/
+REPO_ROOT = FEP_DIR.parent       # リポジトリルート
 DEFAULT_SRC = FEP_DIR / 'dic' / 'upstream' / 'SKK-JISYO.L'
-DEFAULT_OUT = FEP_DIR / 'out' / 'FEPL.DIC'
+DEFAULT_OUT = REPO_ROOT / 'out' / 'FEPL.DIC'
 
 MAGIC = b'FEPDIC02'
 HEADER_LEN = 0x20

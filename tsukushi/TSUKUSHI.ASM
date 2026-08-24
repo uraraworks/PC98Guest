@@ -1,4 +1,4 @@
-; FEP18.COM - PC-98 / MS-DOS 用 常駐ローマ字かな漢字変換 FEP (段階B: 辞書あり)
+; TSUKUSHI.COM - PC-98 / MS-DOS 用 常駐ローマ字かな漢字変換 FEP (段階B: 辞書あり)
 ;
 ; 目的:
 ;   INT 18h(キーボードBIOS) の AH=00h(キー入力待ち)/AH=01h(キーセンス) を
@@ -57,7 +57,7 @@
 ;
 ; 多重常駐チェック: INT 18h を AX=E7ECh で呼ぶと AX=4638h('F8') を返す。
 ;
-; ビルド: nasm -f bin FEP18.ASM -o FEP18.COM
+; ビルド: nasm -f bin TSUKUSHI.ASM -o TSUKUSHI.COM
 
         cpu     8086
         org     0x100
@@ -74,7 +74,7 @@ CANDMAX         equ     16
 
 ; --- キーボードBIOSの作業領域 (物理アドレス。セグメント0000h) ---
 ; CON ドライバは INT 18h AH=00h を呼ぶ前に 0x528(件数) を見て「入力が
-; あるか」を判断している。FEP18 の outq は自前バッファなので 0x528 が
+; あるか」を判断している。TSUKUSHI の outq は自前バッファなので 0x528 が
 ; 増えず、CON が待ち続けてしまう(実測で確定)。確定したバイトはここへ
 ; 直接積む。レイアウトは NP2kai sdl/webnp2api.c の
 ; webnp2_push_key_buffer() と同一 (bios/bios09.c 準拠)。
@@ -84,7 +84,7 @@ KBBUF_END       equ     0x522          ; 0x502-0x521 が実データ(排他上�
 KBCOUNT         equ     0x528
 KBTAIL          equ     0x526
 
-; FEP18 が積んだバイトの印。AH=00h ハンドラが oldint18 から読み戻した
+; TSUKUSHI が積んだバイトの印。AH=00h ハンドラが oldint18 から読み戻した
 ; ときにこのキーコードを見て「自分が積んだものだから再変換しない」と
 ; 判定する。0xFF は実測した実キー(0x00-0x7F、修飾付きで0xA5/0xB1/0xB5)
 ; とは衝突しないが、これはあくまで実測範囲内での仮定であり未証明。
@@ -203,7 +203,7 @@ outq_tail:      db      0
 outq_count:     db      0
 
 ; --- ステータス行(25行目)の退避領域。文字160+属性160=320バイト。
-; FEP18は常駐したままなので今回は復元しないが、将来の常駐解除に備えて
+; TSUKUSHIは常駐したままなので今回は復元しないが、将来の常駐解除に備えて
 ; 退避だけは行う(仕様指定通り)。
 status_save:    times   320 db 0
 status_col:     db      0       ; draw_status 作業用: 使用済み桁数
@@ -1996,7 +1996,7 @@ newint18:
 ; ハンドラ (find_exact/find_prefix) から参照されるため、常駐領域
 ; (install: より前) に置く必要がある。
 ;--------------------------------------------------------------------
-%include "ROMAJI.INC"
+%include "tsukushi/ROMAJI.INC"
 
 ;--------------------------------------------------------------------
 ; 常駐領域の終端 (常駐サイズはここまでで計算する)
@@ -2039,7 +2039,7 @@ install:
 
         ; DA/UA = 0x90 + ドライブ番号。FD専用の暫定(下記コメント参照)。
         ; INT 1Bh の DA/UA は「1MBインターフェース・ユニット番号」であり、
-        ; HDD等では別の体系になるはずだが未対応・未検証(このFEP18は
+        ; HDD等では別の体系になるはずだが未対応・未検証(このTSUKUSHIは
         ; FD起動を前提にした暫定実装であることをここに明記する)。
         mov     al, [install_drive]
         add     al, 0x90
@@ -2075,7 +2075,7 @@ install:
 
         ; セクタ長コード(INT 1Bh の CH用): 1024→3 / 512→2 / 256→1。
         ; ハードコードせず BPB のバイト/セクタから求める。それ以外の値は
-        ; このFEP18では対応していないので常駐せず終了する。
+        ; このTSUKUSHIでは対応していないので常駐せず終了する。
         mov     ax, [dic_bps]
         cmp     ax, 1024
         jne     .chk512
@@ -2423,21 +2423,22 @@ install_get_fat12_entry:
         pop     cx
         ret
 
-msg_ok:                 db 'FEP18 resident (dictionary on disk). Ctrl+XFER or Ctrl-K toggles kana.', 0x0D, 0x0A, '$'
-msg_already:            db 'FEP18 already resident.', 0x0D, 0x0A, '$'
-msg_err_boot_read:      db 'FEP18: boot sector read failed (int25h).', 0x0D, 0x0A, '$'
-msg_err_bps:            db 'FEP18: unsupported bytes/sector (must be 1024, 512 or 256).', 0x0D, 0x0A, '$'
-msg_err_overflow:       db 'FEP18: value overflow while resolving FEP.DIC location.', 0x0D, 0x0A, '$'
-msg_err_fat_too_big:    db 'FEP18: FAT does not fit in the install-time buffer.', 0x0D, 0x0A, '$'
-msg_err_fat_read:       db 'FEP18: FAT read failed (int25h).', 0x0D, 0x0A, '$'
-msg_err_root_too_big:   db 'FEP18: root directory does not fit in the install-time buffer.', 0x0D, 0x0A, '$'
-msg_err_root_read:      db 'FEP18: root directory read failed (int25h).', 0x0D, 0x0A, '$'
-msg_err_not_found:      db 'FEP18: FEP.DIC not found in root directory.', 0x0D, 0x0A, '$'
-msg_err_chain_runaway:  db 'FEP18: FAT chain too long (possible loop).', 0x0D, 0x0A, '$'
-msg_err_fragmented:     db 'FEP18: FEP.DIC is fragmented (not defragmented). Defragment the disk and try again.', 0x0D, 0x0A, '$'
-msg_err_header_read:    db 'FEP18: dictionary header read failed (int1Bh).', 0x0D, 0x0A, '$'
-msg_err_magic:          db 'FEP18: dictionary magic mismatch (not a FEPDIC02 file).', 0x0D, 0x0A, '$'
-msg_err_too_many_blocks: db 'FEP18: dictionary sparse index has too many blocks (>65535).', 0x0D, 0x0A, '$'
+msg_ok:                 db 'Tsukushi FEP resident (dictionary on disk).', 0x0D, 0x0A
+                        db 'Ctrl+XFER or Ctrl-K toggles kana, Space converts, Enter commits.', 0x0D, 0x0A, '$'
+msg_already:            db 'Tsukushi FEP already resident.', 0x0D, 0x0A, '$'
+msg_err_boot_read:      db 'TSUKUSHI: boot sector read failed (int25h).', 0x0D, 0x0A, '$'
+msg_err_bps:            db 'TSUKUSHI: unsupported bytes/sector (must be 1024, 512 or 256).', 0x0D, 0x0A, '$'
+msg_err_overflow:       db 'TSUKUSHI: value overflow while resolving FEP.DIC location.', 0x0D, 0x0A, '$'
+msg_err_fat_too_big:    db 'TSUKUSHI: FAT does not fit in the install-time buffer.', 0x0D, 0x0A, '$'
+msg_err_fat_read:       db 'TSUKUSHI: FAT read failed (int25h).', 0x0D, 0x0A, '$'
+msg_err_root_too_big:   db 'TSUKUSHI: root directory does not fit in the install-time buffer.', 0x0D, 0x0A, '$'
+msg_err_root_read:      db 'TSUKUSHI: root directory read failed (int25h).', 0x0D, 0x0A, '$'
+msg_err_not_found:      db 'TSUKUSHI: FEP.DIC not found in root directory.', 0x0D, 0x0A, '$'
+msg_err_chain_runaway:  db 'TSUKUSHI: FAT chain too long (possible loop).', 0x0D, 0x0A, '$'
+msg_err_fragmented:     db 'TSUKUSHI: FEP.DIC is fragmented (not defragmented). Defragment the disk and try again.', 0x0D, 0x0A, '$'
+msg_err_header_read:    db 'TSUKUSHI: dictionary header read failed (int1Bh).', 0x0D, 0x0A, '$'
+msg_err_magic:          db 'TSUKUSHI: dictionary magic mismatch (not a FEPDIC02 file).', 0x0D, 0x0A, '$'
+msg_err_too_many_blocks: db 'TSUKUSHI: dictionary sparse index has too many blocks (>65535).', 0x0D, 0x0A, '$'
 
 ; --- インストール時のみ使うデータ(常駐後は破棄される) ---
 INSTALL_FAT_BUF_SIZE   equ     4096    ; FATがこのバイト数に収まらなければエラー終了

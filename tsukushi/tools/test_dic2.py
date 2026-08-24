@@ -19,11 +19,12 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-FEP_DIR = HERE.parent
+FEP_DIR = HERE.parent           # tsukushi/
+REPO_ROOT = FEP_DIR.parent       # リポジトリルート
 BASE_TXT = FEP_DIR / 'dic' / 'base.txt'
 UPSTREAM_L = FEP_DIR / 'dic' / 'upstream' / 'SKK-JISYO.L'
-OUT_BASE2 = FEP_DIR / 'out' / 'TESTBASE2.DIC'
-OUT_L2 = FEP_DIR / 'out' / 'TESTL2.DIC'
+OUT_BASE2 = REPO_ROOT / 'out' / 'TESTBASE2.DIC'
+OUT_L2 = REPO_ROOT / 'out' / 'TESTL2.DIC'
 
 sys.path.insert(0, str(HERE))
 import dic2_ref  # noqa: E402
@@ -97,7 +98,7 @@ def test_base():
 def positive_control(src, expected):
     """疎索引レコードが2未満だと入れ替えが組めないので、
     --sparse を小さくして確実に複数レコードにしたコピーで陽性対照を取る。"""
-    out = FEP_DIR / 'out' / 'TESTBASE2_SPARSE.DIC'
+    out = REPO_ROOT / 'out' / 'TESTBASE2_SPARSE.DIC'
     run_mkdic2(src, out, extra_args=['--sparse', '4'])
     dic = dic2_ref.load(out)
     check(dic.sparse_count >= 2, f'--sparse 4 でも疎索引が2レコード未満: {dic.sparse_count}')
