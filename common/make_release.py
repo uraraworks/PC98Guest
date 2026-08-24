@@ -24,7 +24,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 TSUKUSHI_DIR = REPO_ROOT / 'tsukushi'
-UPSTREAM_DIC = TSUKUSHI_DIR / 'dic' / 'upstream' / 'SKK-JISYO.L'
+# FD 用: SKK-JISYO.ML (Medium-Large)。読みの長さを切らずに FD(1232KB)へ
+# 収めるための語彙量が絞られた辞書。
+UPSTREAM_DIC_ML = TSUKUSHI_DIR / 'dic' / 'upstream' / 'SKK-JISYO.ML'
+# zip 用: SKK-JISYO.L (Large)。全語彙、容量制限なし。
+UPSTREAM_DIC_L = TSUKUSHI_DIR / 'dic' / 'upstream' / 'SKK-JISYO.L'
 GPL2_TXT = TSUKUSHI_DIR / 'dic' / 'COPYING-GPL2.txt'
 LICENSE_TXT = REPO_ROOT / 'LICENSE'
 READ_ME_TEMPLATE = TSUKUSHI_DIR / 'READ.ME.md'
@@ -34,9 +38,6 @@ TSUKUSHI_ASM = TSUKUSHI_DIR / 'TSUKUSHI.ASM'
 OUT_RELEASE = REPO_ROOT / 'out' / 'release'
 
 MAX_LINE_WIDTH = 80
-
-# FD 用辞書の読みかな数上限。zip 用はこの制限を付けず全語彙を収録する。
-FD_MAX_YOMI_KANA = 4
 
 # 以下は common/build-disk.mjs --release モードの FAT12 レイアウト定数の
 # 写し(このスクリプト側で「辞書が収まるか」を build-disk.mjs 実行前に
@@ -97,20 +98,34 @@ def build_com(tmp_dir: Path) -> Path:
 # 手順2: TSUKUSHI.DIC の再生成
 # ---------------------------------------------------------------------------
 
-def build_dic(tmp_dir: Path, out_name: str, max_yomi_kana: int | None) -> Path:
-    if not UPSTREAM_DIC.exists():
-        die(
-            f'上流辞書が見つからない: {UPSTREAM_DIC}\n'
-            '  SKK-JISYO.L (GPL v2 以降) を下記から取得して上記の場所に置いてください:\n'
-            '    https://skk-dev.github.io/dict/\n'
-            '  (直接ファイル: https://github.com/skk-dev/dict/raw/master/SKK-JISYO.L)\n'
-            '  リポジトリには含まれません(.gitignore対象、数MBのため)。'
+def check_upstream_dics_exist() -> None:
+    missing = []
+    if not UPSTREAM_DIC_ML.exists():
+        missing.append(
+            f'  - {UPSTREAM_DIC_ML} (FD 用)\n'
+            '    SKK-JISYO.ML (Medium-Large, GPL v2 以降) を下記から取得して\n'
+            '    上記の場所に置いてください:\n'
+            '      https://skk-dev.github.io/dict/\n'
+            '    (直接ファイル: https://github.com/skk-dev/dict/raw/master/SKK-JISYO.ML)'
         )
+    if not UPSTREAM_DIC_L.exists():
+        missing.append(
+            f'  - {UPSTREAM_DIC_L} (zip 用)\n'
+            '    SKK-JISYO.L (Large, GPL v2 以降) を下記から取得して\n'
+            '    上記の場所に置いてください:\n'
+            '      https://skk-dev.github.io/dict/\n'
+            '    (直接ファイル: https://github.com/skk-dev/dict/raw/master/SKK-JISYO.L)'
+        )
+    if missing:
+        die(
+            '上流辞書が見つからない:\n' + '\n'.join(missing) + '\n'
+            'どちらもリポジトリには含まれません(.gitignore対象、数MBのため)。'
+        )
+
+
+def build_dic(tmp_dir: Path, out_name: str, src: Path) -> Path:
     out_dic = tmp_dir / out_name
-    cmd = [sys.executable, str(MKDIC2_PY)]
-    if max_yomi_kana is not None:
-        cmd += ['--max-yomi-kana', str(max_yomi_kana)]
-    cmd += ['--out', str(out_dic)]
+    cmd = [sys.executable, str(MKDIC2_PY), '--src', str(src), '--out', str(out_dic)]
     run(cmd, cwd=REPO_ROOT)
     if not out_dic.exists():
         die(f'mkdic2.py はエラーを返さなかったが {out_name} が生成されなかった')
@@ -178,7 +193,9 @@ def check_fd_capacity(com: Path, dic: Path, readme: Path) -> None:
             f'FD の辞書用空き容量は約 {free_for_dic} bytes '
             f'(全データ領域 {data_bytes} bytes から COM/READ.ME/LICENSE/GPL2 の '
             f'{other_bytes} bytes を引いた残り)。'
-            f'--max-yomi-kana を絞るか、FD に同梱するファイルを減らしてください。'
+            f'語彙のより少ない上流辞書に差し替える'
+            f'(または mkdic2.py --max-yomi-kana で読みの長さを絞る)か、'
+            f'FD に同梱するファイルを減らしてください。'
         )
     print(f'  FD 容量検査: 辞書 {dic_size} bytes / 空き容量 {free_for_dic} bytes (OK)')
 
@@ -261,8 +278,8 @@ def check_dic_contiguous(xdf_path: Path) -> int:
 # 手順5: DICTIONARY-LICENSE.txt
 # ---------------------------------------------------------------------------
 
-def extract_skk_header() -> str:
-    raw = UPSTREAM_DIC.read_bytes()
+def extract_skk_header(src: Path) -> str:
+    raw = src.read_bytes()
     text = raw.decode('euc-jp')
     lines = text.split('\n')
     header_lines = []
@@ -274,13 +291,15 @@ def extract_skk_header() -> str:
     return '\n'.join(header_lines)
 
 
-def build_dictionary_license_txt() -> str:
-    header = extract_skk_header()
+def build_dictionary_license_txt(src: Path) -> str:
+    header = extract_skk_header(src)
+    upstream_name = src.name
     return f"""TSUKUSHI.DIC のライセンスについて (DICTIONARY-LICENSE)
 
-TSUKUSHI.DIC は SKK-JISYO.L から生成した派生物であり、SKK-JISYO.L 自体が
-GNU General Public License version 2 (またはそれ以降) で配布されている
-ため、TSUKUSHI.DIC も同様に GPL v2 以降が適用されます。
+この配布物の TSUKUSHI.DIC は {upstream_name} から生成した派生物であり、
+{upstream_name} 自体が GNU General Public License version 2
+(またはそれ以降) で配布されているため、TSUKUSHI.DIC も同様に
+GPL v2 以降が適用されます。
 ライセンス全文は同梱の COPYING-GPL2.txt を参照してください。
 
 入手元:
@@ -289,7 +308,7 @@ GNU General Public License version 2 (またはそれ以降) で配布されて�
 生成に使ったスクリプト:
   tsukushi/tools/mkdic2.py (このリポジトリに含まれる MIT License のコード)
 
---- SKK-JISYO.L 冒頭の著作権表示 (EUC-JP から変換) ---
+--- {upstream_name} 冒頭の著作権表示 (EUC-JP から変換) ---
 
 {header}
 
@@ -311,12 +330,12 @@ def build_zip_readme_text(fd_entry_count: int, zip_entry_count: int) -> str:
     base_text = READ_ME_TEMPLATE.read_text(encoding='utf-8')
 
     dic_note = f"""■ 辞書について(zip 版)
-  この zip に同梱した TSUKUSHI.DIC は全語彙版です({zip_entry_count}語)。
-  容量制限が無い zip だけの特典で、「ありがとう」「東京」「入力」のような
-  読み5かな以上の語も変換できます。
-  配布 FD イメージ(.xdf)側の辞書は、FD(1232KB)の容量に収まる読み4かな
-  以内版です({fd_entry_count}語)。より語彙の多いこの zip 版の辞書に
-  差し替えて使うこともできます。
+  この zip に同梱した TSUKUSHI.DIC は SKK-JISYO.L から作った全語彙版です
+  ({zip_entry_count}語)。容量制限が無い zip だけの特典です。
+  配布 FD イメージ(.xdf)側の辞書は、FD(1232KB)の容量に収まるよう
+  SKK-JISYO.ML から作った版です({fd_entry_count}語)。読みの長さでは
+  絞っていないので「ありがとう」「東京」のような語も変換できますが、
+  より語彙の多いこの zip 版の辞書に差し替えて使うこともできます。
 
 ■ HDD へのコピー方法
   TSUKUSHI.COM と TSUKUSHI.DIC を、常駐させたいドライブのルート
@@ -333,7 +352,7 @@ def build_zip_readme_text(fd_entry_count: int, zip_entry_count: int) -> str:
 
 def build_zip(version: str, com: Path, dic: Path, fd_entry_count: int, zip_entry_count: int) -> Path:
     readme_text = build_zip_readme_text(fd_entry_count, zip_entry_count)
-    dict_license_text = build_dictionary_license_txt()
+    dict_license_text = build_dictionary_license_txt(UPSTREAM_DIC_L)
 
     zip_path = OUT_RELEASE / f'tsukushi-v{version}.zip'
     root_name = f'tsukushi-v{version}'
@@ -367,9 +386,10 @@ def main():
         print('[1/7] TSUKUSHI.COM をアセンブル中...')
         com = build_com(tmp_dir)
 
-        print('[2/7] TSUKUSHI.DIC (FD用/zip用の2種) を生成中...')
-        fd_dic = build_dic(tmp_dir, 'TSUKUSHI.DIC.fd', FD_MAX_YOMI_KANA)
-        zip_dic = build_dic(tmp_dir, 'TSUKUSHI.DIC.zip', None)
+        check_upstream_dics_exist()
+        print('[2/7] TSUKUSHI.DIC (FD用=SKK-JISYO.ML/zip用=SKK-JISYO.L) を生成中...')
+        fd_dic = build_dic(tmp_dir, 'TSUKUSHI.DIC.fd', UPSTREAM_DIC_ML)
+        zip_dic = build_dic(tmp_dir, 'TSUKUSHI.DIC.zip', UPSTREAM_DIC_L)
         fd_entry_count = dic_entry_count(fd_dic)
         zip_entry_count = dic_entry_count(zip_dic)
 

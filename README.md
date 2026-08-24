@@ -75,7 +75,7 @@ node common/build-disk.mjs
 ## リリース物の作り方
 
 配布用の FD イメージ(`.xdf`)と zip をまとめて作るには次を実行します
-(SKK-JISYO.L が `tsukushi/dic/upstream/` にある場合):
+(SKK-JISYO.L と SKK-JISYO.ML が `tsukushi/dic/upstream/` にある場合):
 
 ```sh
 python3 common/make_release.py --version 0.1.0
@@ -87,9 +87,11 @@ python3 common/make_release.py --version 0.1.0
 本体・辞書・`READ.ME`・`LICENSE.TXT`・`GPL2.TXT` の5ファイルのみで、
 probes は含みません。
 
-同梱する `TSUKUSHI.DIC` は FD 版と zip 版で語彙数が異なります。FD 版は
-1232KB の容量制限のため読み4かな以内(43,859語)、zip 版には容量制限が
-無いため全語彙(131,835語)を収録します。
+同梱する `TSUKUSHI.DIC` は FD 版と zip 版で元にする上流辞書が異なります。
+FD 版は容量制限(1232KB)に収めるため語彙の少ない SKK-JISYO.ML から
+作った版(41,573語)、zip 版には容量制限が無いため SKK-JISYO.L から
+作った全語彙版(131,835語)を収録します。どちらも読みの長さでは
+絞っていません。
 
 ## 受け取りポリシー
 
