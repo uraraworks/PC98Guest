@@ -34,7 +34,9 @@ IDENT_REPLY       equ     0x5231
 SECTOR_LEN_N      equ     3          ; 1024バイト
 SECTOR_BYTES      equ     1024
 DA_UA             equ     0x91       ; 1MBインターフェース・ユニット1 (FDD2/B:)
-READ_AH           equ     0x66       ; MT0/MF1/f0/SEEK1/コマンド6(読み出し)
+READ_AH           equ     0x76       ; MT0/MF1/f1(リトライなし)/SEEK1/コマンド6(読み出し)
+                                     ; SEEKビット(D4)は必須。0x66(SEEK=0)だと実測で
+                                     ; バッファに1バイトも書かれない(0xCC埋めのまま)。
 
 start:  jmp     install
 
