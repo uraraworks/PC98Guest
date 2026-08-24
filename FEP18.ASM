@@ -16,15 +16,29 @@
 ;   へ積む。
 ;
 ;   段階B = かな漢字変換を追加する。INT 18h ハンドラの中から辞書ファイルを
-;   開くことはできない(下記の絶対厳守事項)ため、辞書は**インストール時に
-;   丸ごとメモリへ読み込む**。.COM は起動時点で使用可能なメモリを全部
-;   所有しているため AH=48h の追加確保は必ず失敗する。そこで別ブロックは
-;   確保せず、自分のメモリ空間の中、ファイル像(インストールコード込み)の
-;   直後の未使用領域 DIC_BUF に読み込む。ハンドラは ES=CS にして
-;   CS:DIC_BUF からメモリ上の辞書を直接二分探索する
-;   FEP.ASM(INT 21h版 v1)の cand_*/confirm_candidate/dict_lookup を移植した
-;   ものだが、確定先が lbuf ではなく outq である点、辞書がファイルではなく
-;   常駐メモリである点が異なる。
+;   DOS 経由(INT 21h)で開くことはできない(下記の絶対厳守事項)。当初は
+;   辞書をインストール時に丸ごとメモリへ読み込んでいたが、実辞書
+;   (SKK-JISYO.L 由来)は数百KB〜数MBあり常駐には載らない。
+;
+;   段階C(現在) = guest/docs/fep-measure-06-int1b.md の実測により、
+;   INT 18h ハンドラの中からでも INT 1Bh(ディスクBIOS生セクタ読み込み)
+;   なら呼べることが分かった。そこで辞書は**ディスク上に置いたまま**にし、
+;   変換のたびに必要なセクタだけ INT 1Bh で読む。辞書サイズの上限は
+;   事実上なくなり、常駐に載せる必要も無い。
+;
+;   辞書の位置解決(FEP.DIC がディスクのどこにあるか)は DICLOC.ASM で
+;   確立した手順(BPB・FAT・ルートディレクトリを読んでFAT12クラスタ
+;   チェーンを辿る)と同じ考え方をインストール時に行う(DICLOC.ASM
+;   自体は変更しない。同じ手順を本ファイル内に書く)。断片化した辞書
+;   ファイルは対象外とし、連続していなければ常駐せずに終了する。
+;
+;   辞書形式は v2(疎索引。tools/mkdic2.py が生成する FEPDIC02)。
+;   検索は tools/dic2_ref.py の docstring の手順(疎索引を二分探索して
+;   ブロックを絞り、ブロック内を最大 SPARSE 件だけ線形走査する)を
+;   そのままディスクI/O版にしたもの。
+;
+;   確定先が lbuf ではなく outq である点は段階Bと同じ
+;   (FEP.ASM(INT 21h版 v1)の cand_*/confirm_candidate の考え方を踏襲)。
 ;
 ;   *** 絶対厳守: INT 18h のハンドラの中から INT 21h を呼んではいけない ***
 ;   INT 18h は DOS の CON ドライバから呼ばれることがあるため、ハンドラは
@@ -116,25 +130,71 @@ scratchch:      db      0       ; kana_append_ascii が1バイトを指すため
 sound_n:        db      0x82, 0xF1      ; "ん"
 sound_sokuon:   db      0x82, 0xC1      ; "っ"
 
-; --- 段階B: 辞書はこの.COMのメモリの中(CS:DIC_BUFから)にインストール時に
-; 丸ごと読み込む。DIC_BUF はファイル像末尾から計算する定数(ファイル末尾の
-; image_end/DIC_BUF 定義を参照)であり、常駐時の実行時状態は不要。
+; --- 段階C: 辞書はディスク上(FEP.DIC)に置いたまま。常駐データには
+; ディスク上の位置・BPB情報・1〜2セクタ分の読み込みバッファだけを持つ。
+; インストール時に DICLOC.ASM と同じ手順で解決する(下記 install: 参照。
+; DICLOC.ASM 自体は変更しない)。
 
-; --- 段階B: 変換候補の状態 (FEP.ASM v1 の cand_* と同一の考え方) ---
+; --- 段階B/C共通: 変換候補の状態 (FEP.ASM v1 の cand_* と同一の考え方) ---
 cand_count:     db      0       ; 0 = 変換していない
 cand_index:     db      0       ; 0起点
 cand_buf:       times   CANDBUFSIZE db 0
 cand_off:       times   CANDMAX dw 0    ; 各候補の cand_buf 内オフセット
 cand_len:       times   CANDMAX db 0    ; 各候補のバイト数
 
-; dict_lookup の作業用スクラッチ
-yomi_field:     times   16 db 0
-search_lo:      dw      0
-search_hi:      dw      0
-search_mid:     dw      0
+; dict_lookup(v2, ディスク版)の作業用スクラッチ
 cand_read_i:    db      0
 cand_cur_len:   db      0
 cb_pos:         dw      0
+
+;--------------------------------------------------------------------
+; 段階C: 辞書のディスク上の位置・アクセス情報 (インストール時に解決)
+;--------------------------------------------------------------------
+DIC_READBUF_SIZE equ    2048    ; 2セクタ分。bps<=1024を前提とする
+                                 ; (install時に 2*bps がこれを超えないか検査する)
+
+dic_data_off:       dd   0      ; ヘッダ+0x14: データ部先頭(ファイル先頭からの相対バイト)
+dic_data_end:       dd   0      ; data_off + data_len (データ部終端。同上)
+dic_sparse_off:     dd   0      ; ヘッダ+0x10: 疎索引先頭(ファイル先頭からの相対バイト)
+dic_sparse_count:   dw   0      ; ヘッダ+0x0C下位ワード: 疎索引レコード数(65536件以上は対象外)
+dic_sparse:         dw   0      ; ヘッダ+0x1C: 疎索引の間隔(ブロックあたりの最大エントリ数)
+dic_start_lba:      dw   0      ; FEP.DIC の開始LBA(DICLOC.ASMと同じ手順で解決)
+dic_da_ua:          db   0      ; INT 1Bh の DA/UA。現在のドライブ番号から
+                                 ; 0x90+ドライブ番号 で作る(FD前提の暫定。
+                                 ; HDD等では別のDA/UA体系になるはずで未対応)
+dic_bps:            dw   0      ; BPBのバイト/セクタ
+dic_spt:            dw   0      ; BPBのセクタ/トラック
+dic_heads:          dw   0      ; BPBのヘッド数
+dic_sector_n:       db   0      ; INT 1BhのCH用セクタ長コード(1024→3/512→2/256→1)
+
+; 1〜2セクタ読み込みキャッシュ(直近に読んだセクタを覚えておき、同じ
+; セクタへの再アクセスでは INT 1Bh を呼び直さない)
+dic_buf_lba:        dw   0xFFFF ; ロード済みの先頭LBA(0xFFFFは「未ロード」の印)
+dic_buf_sectors:    db   0      ; ロード済みセクタ数(1 or 2)
+dic_read_failed:    db   0      ; INT 1Bh が失敗したら1を立てる(以後notfound扱い)
+dic_read_buf:       times DIC_READBUF_SIZE db 0
+
+; dict_lookup(v2)本体の作業用スクラッチ
+dic_lo:             dw   0
+dic_hi:             dw   0
+dic_mid:            dw   0
+dic_best_block:     dw   0
+dic_entry_off:      dd   0      ; エントリの絶対(ファイル先頭からの)バイトオフセット
+dic_pos:            dd   0      ; 現在読んでいる位置(同上)
+dic_block_end:      dd   0      ; 現在のブロックの終端位置(同上、排他上限)
+dic_steps_left:     dw   0
+dic_cand_count_off: dd   0      ; 現在のエントリの候補数バイトの絶対位置
+dic_skip_cnt:       dw   0
+
+; read_dict_range の作業用スクラッチ
+dic_within0:        dw   0
+dic_target_lba:     dw   0
+dic_need2:          db   0
+
+; read_entry_at の結果置き場
+dic_cur_yomi_len:   db   0      ; エントリの実際のよみバイト長
+dic_cur_cmp_len:    db   0      ; 比較に使ったバイト数 = min(よみ長, kanalen)
+dic_entry_yomi_buf: times 64 db 0 ; よみの比較用コピー(先頭 dic_cur_cmp_len バイトのみ有効)
 
 ; --- 確定済みバイトの待ち行列 (AH=00h/01h がここから返す) ---
 outq:           times   OUTQSIZE db 0
@@ -790,10 +850,11 @@ resolve_romaji:
         ret
 
 ;--------------------------------------------------------------------
-; 段階B: かな漢字変換 (FEP.ASM v1 の confirm_candidate/cancel_conversion/
+; 段階C: かな漢字変換 (FEP.ASM v1 の confirm_candidate/cancel_conversion/
 ; dict_lookup を移植したもの。ただし:
 ;   - 確定先は lbuf ではなく outq(kb_ring_push経由でキーボードBIOSへ)
-;   - 辞書はファイルではなく CS:DIC_BUF の常駐メモリ(ファイルI/Oを一切しない)
+;   - 辞書はディスク上(FEP.DIC, v2/FEPDIC02形式)にあり、INT 1Bh で
+;     必要なセクタだけをそのつど読む(常駐メモリには載せない)
 ;--------------------------------------------------------------------
 
 ; 現在の候補(cand_buf の cand_off[cand_index] から cand_len[cand_index]
@@ -875,115 +936,316 @@ vram_put_decimal:
         pop     ax
         ret
 
-; kanabuf(kanalen バイト)をよみとして、常駐辞書(CS:DIC_BUF)を直接二分探索する。
-; 見つかれば cand_count>0, cand_index=0 とし cand_buf/cand_off/cand_len を
-; 設定する。見つからない・よみが長すぎる・辞書が無い場合は cand_count=0の
-; まま(kanabuf は変えない)。ファイルI/Oは一切しない。
-dict_lookup:
+;--------------------------------------------------------------------
+; 段階C: LBA→CHS変換・ディスク読み込みヘルパ
+;--------------------------------------------------------------------
+
+; IN: AX = LBA(word)
+; OUT: CL=シリンダ(下位8bit。FD前提で77以下のため安全), DH=ヘッド, DL=セクタ(1起点)
+;      (CHは書かない。CH=セクタ長Nは呼び出し側が別途 dic_sector_n からセットする)
+; 破壊: AX,BX,DX。CL,DH,DLへ出力する関係でCXの下位バイトも書き換わる。
+lba_to_chs:
+        push    ax
+        push    bx
+        xor     dx, dx
+        div     word [cs:dic_spt]       ; ax = lba/spt (トラック通番), dx = lba mod spt
+        mov     bx, ax                  ; bx = トラック通番
+        inc     dx
+        mov     [cs:chs_sector_tmp], dl ; セクタ(1起点)
+        xor     dx, dx
+        mov     ax, bx
+        div     word [cs:dic_heads]     ; ax = シリンダ, dx = ヘッド
+        mov     cl, al                  ; シリンダ(下位8bit)
+        mov     dh, dl                  ; ヘッド
+        mov     dl, [cs:chs_sector_tmp] ; セクタ
+        pop     bx
+        pop     ax
+        ret
+
+chs_sector_tmp: db      0
+
+; IN: DX:AX = 辞書ファイル先頭からの絶対バイトオフセット(32bit), CX = 必要バイト数
+;     (CX は dic_bps を超えないこと。呼び出し側はすべてこの前提で使う)
+; OUT: DI = dic_read_buf 内のオフセット。そこから CX バイト連続で有効データがある
+; 前提: 呼び出し側が ES=CS を設定済みであること(INT 1Bh の ES:BP用)
+; 破壊: AX,BX,CX,DX,SI,DI,BP
+read_dict_range:
+        push    cx
+        mov     bx, [cs:dic_bps]
+        div     bx                      ; ax = lba相対(オフセット/bps), dx = セクタ内オフセット
+        mov     [cs:dic_within0], dx
+        add     ax, [cs:dic_start_lba]
+        mov     [cs:dic_target_lba], ax
+
+        pop     cx
+        push    cx
+        mov     ax, [cs:dic_within0]
+        add     ax, cx
+        cmp     ax, [cs:dic_bps]
+        jbe     .need1
+        mov     byte [cs:dic_need2], 1
+        jmp     .need_set
+.need1:
+        mov     byte [cs:dic_need2], 0
+.need_set:
+        pop     cx
+
+        ; --- キャッシュ判定 ---
+        mov     ax, [cs:dic_target_lba]
+        cmp     ax, [cs:dic_buf_lba]
+        jne     .miss
+        cmp     byte [cs:dic_need2], 0
+        je      .hit
+        cmp     byte [cs:dic_buf_sectors], 2
+        jae     .hit
+.miss:
+        call    .do_read
+.hit:
+        mov     di, [cs:dic_within0]
+        ret
+
+.do_read:
         push    ax
         push    bx
         push    cx
         push    dx
+
+        mov     ax, [cs:dic_target_lba]
+        call    lba_to_chs              ; -> cl=cyl, dh=head, dl=sector
+        mov     ch, [cs:dic_sector_n]
+        mov     al, [cs:dic_da_ua]
+        mov     ah, 0x76                ; MF1/f0/SEEK1/コマンド6(読み出し)。実測(fep-measure-06)で確定
+        mov     bx, [cs:dic_bps]
+        mov     bp, dic_read_buf
+        int     0x1B
+        jc      .read_err
+
+        cmp     byte [cs:dic_need2], 0
+        je      .one_sector
+
+        mov     ax, [cs:dic_target_lba]
+        inc     ax
+        call    lba_to_chs
+        mov     ch, [cs:dic_sector_n]
+        mov     al, [cs:dic_da_ua]
+        mov     ah, 0x76
+        mov     bx, [cs:dic_bps]
+        mov     bp, dic_read_buf
+        add     bp, [cs:dic_bps]
+        int     0x1B
+        jc      .read_err
+
+        mov     byte [cs:dic_buf_sectors], 2
+        jmp     .read_ok
+.one_sector:
+        mov     byte [cs:dic_buf_sectors], 1
+.read_ok:
+        mov     ax, [cs:dic_target_lba]
+        mov     [cs:dic_buf_lba], ax
+        jmp     .do_read_ret
+.read_err:
+        ; 読み取り失敗: キャッシュを無効化し、以後 dict_lookup 側で
+        ; dic_read_failed を見て notfound 扱いにする(ハンドラ内で
+        ; エラーメッセージを出す手段が無いため。未検証の異常系)。
+        mov     word [cs:dic_buf_lba], 0xFFFF
+        mov     byte [cs:dic_read_failed], 1
+.do_read_ret:
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        ret
+
+; 比較: dic_entry_yomi_buf[0..dic_cur_cmp_len) と kanabuf[0..kanalen) を
+; バイト列として memcmp 順で比較する(tools/mkdic2.py のソート順と同じ:
+; 短い方が小さい)。
+; OUT: AL = 0(一致) / 1(エントリ側が大きい) / 2(エントリ側が小さい)
+compare_yomi_to_target:
+        push    bx
+        push    cx
         push    si
         push    di
-        push    bp
-        push    es
 
-        mov     byte [cs:cand_count], 0
-        mov     byte [cs:cand_index], 0
-
-        mov     al, [cs:kanalen]
-        cmp     al, 16
-        ja      .notfound
-
-        ; --- よみフィールド(16バイト、0埋め)を作る ---
-        mov     di, yomi_field
-        mov     cx, 16
-.zero_loop:
-        mov     byte [cs:di], 0
-        inc     di
-        loop    .zero_loop
-
-        mov     al, [cs:kanalen]
-        mov     cl, al
+        mov     cl, [cs:dic_cur_cmp_len]
         xor     ch, ch
-        mov     si, kanabuf
-        mov     di, yomi_field
-.copy_loop:
-        jcxz    .copy_done
+        mov     si, dic_entry_yomi_buf
+        mov     di, kanabuf
+.cmp_loop:
+        jcxz    .cmp_prefix_equal
         mov     al, [cs:si]
+        mov     bl, [cs:di]
+        cmp     al, bl
+        jb      .entry_less
+        ja      .entry_greater
+        inc     si
+        inc     di
+        loop    .cmp_loop
+.cmp_prefix_equal:
+        mov     al, [cs:dic_cur_yomi_len]
+        xor     ah, ah
+        mov     bl, [cs:kanalen]
+        xor     bh, bh
+        cmp     ax, bx
+        je      .equal
+        jb      .entry_less
+        jmp     .entry_greater
+.equal:
+        mov     al, 0
+        jmp     .cmp_done
+.entry_less:
+        mov     al, 2
+        jmp     .cmp_done
+.entry_greater:
+        mov     al, 1
+.cmp_done:
+        pop     di
+        pop     si
+        pop     cx
+        pop     bx
+        ret
+
+; IN: DX:AX = エントリの絶対バイトオフセット(32bit)
+; OUT: dic_cur_yomi_len = よみの実バイト長
+;      dic_cur_cmp_len  = 比較に使うバイト数 = min(よみ長, kanalen)
+;      dic_entry_yomi_buf の先頭 dic_cur_cmp_len バイトによみをコピー済み
+;      dic_cand_count_off = このエントリの「候補数」バイトの絶対位置
+; 前提: ES=CS(呼び出し側が設定済み)
+; 破壊: AX,BX,CX,DX,SI,DI
+read_entry_at:
+        push    bx
+        push    cx
+        push    si
+        push    di
+
+        mov     [cs:dic_pos], ax
+        mov     [cs:dic_pos+2], dx
+
+        mov     cx, 1
+        call    read_dict_range         ; -> di = dic_read_buf内オフセット
+        mov     bx, di
+        mov     al, [cs:dic_read_buf + bx]
+        mov     [cs:dic_cur_yomi_len], al
+
+        ; cmp_len = min(yomi_len, kanalen)
+        xor     ah, ah
+        mov     bl, [cs:kanalen]
+        xor     bh, bh
+        cmp     ax, bx
+        jbe     .cmplen_is_yomi
+        mov     ax, bx
+.cmplen_is_yomi:
+        mov     [cs:dic_cur_cmp_len], al
+
+        cmp     byte [cs:dic_cur_cmp_len], 0
+        je      .no_yomi_bytes
+
+        mov     ax, [cs:dic_pos]
+        mov     dx, [cs:dic_pos+2]
+        add     ax, 1
+        adc     dx, 0
+        mov     cl, [cs:dic_cur_cmp_len]
+        xor     ch, ch
+        push    cx
+        call    read_dict_range
+        pop     cx
+        mov     si, di
+        mov     di, dic_entry_yomi_buf
+.copy_yomi:
+        jcxz    .copy_yomi_done
+        mov     al, [cs:dic_read_buf + si]
         mov     [cs:di], al
         inc     si
         inc     di
-        loop    .copy_loop
-.copy_done:
+        loop    .copy_yomi
+.copy_yomi_done:
+.no_yomi_bytes:
 
-        mov     ax, cs
-        mov     es, ax                  ; 辞書は自分のセグメント内 CS:DIC_BUF にある
+        ; dic_cand_count_off = dic_pos + 1 + yomi_len(実長)
+        mov     ax, [cs:dic_pos]
+        mov     dx, [cs:dic_pos+2]
+        add     ax, 1
+        adc     dx, 0
+        mov     bx, ax
+        mov     al, [cs:dic_cur_yomi_len]
+        xor     ah, ah
+        add     bx, ax
+        adc     dx, 0
+        mov     [cs:dic_cand_count_off], bx
+        mov     [cs:dic_cand_count_off+2], dx
 
-        mov     ax, [es:DIC_BUF+8]      ; エントリ数 (ヘッダ +0008, u16)
-        or      ax, ax
-        jz      .notfound
-        dec     ax
-        mov     [cs:search_hi], ax
-        mov     word [cs:search_lo], 0
-        mov     bx, [es:DIC_BUF+10]     ; 索引開始オフセット (ヘッダ +000A, u16。
-                                         ; ファイル先頭からの相対値なので DIC_BUF を足して
-                                         ; 実アドレスへ変換する)
-        add     bx, DIC_BUF
+        pop     di
+        pop     si
+        pop     cx
+        pop     bx
+        ret
 
-.search_loop:
-        mov     ax, [cs:search_lo]
-        cmp     ax, [cs:search_hi]
-        jg      .notfound               ; lo > hi (signed) -> 見つからない
+; dic_cand_count_off にある候補群(候補数1バイト+各候補の長さ+本体)を
+; 読み飛ばし、その直後(=次エントリの先頭)を dic_pos にセットする。
+; 前提: ES=CS
+; 破壊: AX,BX,CX,DX,SI,DI
+skip_candidates_get_next:
+        push    bx
 
-        mov     ax, [cs:search_lo]
-        add     ax, [cs:search_hi]
-        shr     ax, 1
-        mov     [cs:search_mid], ax
+        mov     ax, [cs:dic_cand_count_off]
+        mov     dx, [cs:dic_cand_count_off+2]
+        mov     cx, 1
+        call    read_dict_range
+        mov     bx, di
+        mov     al, [cs:dic_read_buf + bx]
+        xor     ah, ah
+        mov     [cs:dic_skip_cnt], ax
 
-        mov     cx, 20
-        mul     cx                      ; dx:ax = mid*20
-        add     ax, bx
-        mov     di, ax                  ; es:di -> エントリ先頭(よみ16 + 候補off u32)
+        mov     ax, [cs:dic_cand_count_off]
+        mov     dx, [cs:dic_cand_count_off+2]
+        add     ax, 1
+        adc     dx, 0
+        mov     [cs:dic_pos], ax
+        mov     [cs:dic_pos+2], dx
 
-        mov     si, yomi_field
-        mov     cx, 16
-.cmp16:
-        mov     al, [es:di]
-        cmp     al, [cs:si]
-        jne     .cmp16_diff
-        inc     di
-        inc     si
-        loop    .cmp16
-        jmp     .found                  ; 16バイト全一致 (di はエントリ+16=候補off位置)
-.cmp16_diff:
-        cmp     al, [cs:si]             ; al=辞書側バイト, [cs:si]=目的側バイト
-        jb      .go_upper               ; 辞書側が小さい -> 後半を探す
-        mov     ax, [cs:search_mid]
-        dec     ax
-        mov     [cs:search_hi], ax
-        jmp     .search_loop
-.go_upper:
-        mov     ax, [cs:search_mid]
-        inc     ax
-        mov     [cs:search_lo], ax
-        jmp     .search_loop
+.skip_loop:
+        cmp     word [cs:dic_skip_cnt], 0
+        je      .skip_done
+        mov     ax, [cs:dic_pos]
+        mov     dx, [cs:dic_pos+2]
+        mov     cx, 1
+        call    read_dict_range
+        mov     bx, di
+        mov     al, [cs:dic_read_buf + bx]      ; 候補のバイト長
+        xor     ah, ah
+        inc     ax                              ; +1(長さバイト自身のぶん)
+        add     [cs:dic_pos], ax
+        adc     word [cs:dic_pos+2], 0
+        dec     word [cs:dic_skip_cnt]
+        jmp     .skip_loop
+.skip_done:
+        pop     bx
+        ret
 
-.found:
-        mov     si, [es:di]             ; si = 候補ブロックのファイル先頭からの相対オフセット
-                                         ; (下位ワード。辞書は64KB未満前提なので上位ワードは
-                                         ; 見ない)。DIC_BUF を足して実アドレスへ変換する
-        add     si, DIC_BUF
-
-        mov     al, [es:si]             ; 候補数
+; dic_cand_count_off にある候補群を cand_buf/cand_off/cand_len へ読み込み、
+; cand_count/cand_index を設定する(旧・常駐辞書版 dict_lookup の候補コピー
+; ループと同じ考え方。CANDMAX/CANDBUFSIZEを超えたら安全側で打ち切る)。
+; 前提: ES=CS
+; 破壊: AX,BX,CX,DX,SI,DI,BP
+load_candidates_from_dic:
+        mov     ax, [cs:dic_cand_count_off]
+        mov     dx, [cs:dic_cand_count_off+2]
+        mov     cx, 1
+        call    read_dict_range
+        mov     bx, di
+        mov     al, [cs:dic_read_buf + bx]
         cmp     al, CANDMAX
         jbe     .cc_ok
         mov     al, CANDMAX
 .cc_ok:
         mov     [cs:cand_count], al
         mov     byte [cs:cand_index], 0
-        inc     si                      ; si -> 候補データ先頭 (es:si)
+
+        mov     ax, [cs:dic_cand_count_off]
+        mov     dx, [cs:dic_cand_count_off+2]
+        add     ax, 1
+        adc     dx, 0
+        mov     [cs:dic_pos], ax
+        mov     [cs:dic_pos+2], dx
 
         mov     word [cs:cb_pos], 0
         mov     byte [cs:cand_read_i], 0
@@ -993,8 +1255,12 @@ dict_lookup:
         cmp     al, [cs:cand_count]
         jae     .cand_done
 
-        mov     al, [es:si]             ; 候補のバイト長
-        inc     si
+        mov     ax, [cs:dic_pos]
+        mov     dx, [cs:dic_pos+2]
+        mov     cx, 1
+        call    read_dict_range
+        mov     bx, di
+        mov     al, [cs:dic_read_buf + bx]      ; 候補のバイト長
         mov     [cs:cand_cur_len], al
 
         mov     ax, [cs:cb_pos]
@@ -1014,14 +1280,22 @@ dict_lookup:
         mov     al, [cs:cand_cur_len]
         mov     [cs:cand_len + di], al
 
-        ; 候補本体を cand_buf + cb_pos へコピー (es:si -> cs:bx)
-        mov     bx, cand_buf
-        add     bx, [cs:cb_pos]
+        ; 候補本体を読んで cand_buf + cb_pos へコピーする
+        mov     ax, [cs:dic_pos]
+        mov     dx, [cs:dic_pos+2]
+        add     ax, 1
+        adc     dx, 0                   ; 候補本体の開始位置(長さバイトの次)
         mov     cl, [cs:cand_cur_len]
         xor     ch, ch
+        push    cx
+        call    read_dict_range         ; -> di = dic_read_buf内オフセット
+        pop     cx
+        mov     si, di
+        mov     bx, cand_buf
+        add     bx, [cs:cb_pos]
 .copy_cand:
         jcxz    .copy_cand_done
-        mov     al, [es:si]
+        mov     al, [cs:dic_read_buf + si]
         mov     [cs:bx], al
         inc     si
         inc     bx
@@ -1032,17 +1306,191 @@ dict_lookup:
         xor     ah, ah
         add     [cs:cb_pos], ax
 
+        ; dic_pos を候補ぶん進める(長さバイト1 + 本体)
+        mov     al, [cs:cand_cur_len]
+        xor     ah, ah
+        inc     ax
+        add     [cs:dic_pos], ax
+        adc     word [cs:dic_pos+2], 0
+
         inc     byte [cs:cand_read_i]
         jmp     .cand_loop
 
 .cand_overflow:
         mov     al, [cs:cand_read_i]
         mov     [cs:cand_count], al
+.cand_done:
+        ret
+
+; kanabuf(kanalen バイト)をよみとして、ディスク上の辞書(FEP.DIC, v2形式)を
+; 「疎索引を二分探索 -> ブロック内を最大SPARSE件だけ線形走査」で引く
+; (手順は tools/dic2_ref.py の docstring と同一)。
+; 見つかれば cand_count>0, cand_index=0 とし cand_buf/cand_off/cand_len を
+; 設定する。見つからない・よみが空・ディスク読み取りに失敗した場合は
+; cand_count=0 のまま(kanabuf は変えない)。
+dict_lookup:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        push    si
+        push    di
+        push    bp
+        push    es
+
+        mov     byte [cs:cand_count], 0
+        mov     byte [cs:cand_index], 0
+        mov     byte [cs:dic_read_failed], 0
+
+        mov     al, [cs:kanalen]
+        or      al, al
+        jz      .notfound               ; 空のよみは引かない
+
+        mov     ax, cs
+        mov     es, ax                  ; 以降 INT 1Bh の ES:BP はこの ES を使う
+
+        ; --- 1) 疎索引を二分探索: 「先頭エントリの読み <= target」である
+        ;        最後のブロックを探す ---
+        mov     word [cs:dic_lo], 0
+        mov     ax, [cs:dic_sparse_count]
+        dec     ax
+        mov     [cs:dic_hi], ax
+        mov     word [cs:dic_best_block], 0xFFFF
+
+.bsearch_loop:
+        cmp     byte [cs:dic_read_failed], 0
+        jne     .notfound
+
+        mov     ax, [cs:dic_lo]
+        cmp     ax, [cs:dic_hi]         ; 符号あり比較(hi=-1=0xFFFFの折返しも正しく扱える)
+        jg      .bsearch_done
+
+        mov     ax, [cs:dic_lo]
+        add     ax, [cs:dic_hi]
+        shr     ax, 1
+        mov     [cs:dic_mid], ax
+
+        ; sparse_entry_off(32bit) = dic_sparse_off + mid*4
+        mov     ax, [cs:dic_mid]
+        shl     ax, 1
+        shl     ax, 1                   ; ax = mid*4 (mid<=65535/4なので安全)
+        xor     dx, dx
+        add     ax, [cs:dic_sparse_off]
+        adc     dx, [cs:dic_sparse_off+2]
+        mov     cx, 4
+        call    read_dict_range         ; -> di = dic_read_buf内オフセット
+        mov     bx, di
+        mov     ax, [cs:dic_read_buf + bx]
+        mov     [cs:dic_entry_off], ax
+        mov     ax, [cs:dic_read_buf + bx + 2]
+        mov     [cs:dic_entry_off+2], ax
+
+        mov     ax, [cs:dic_entry_off]
+        mov     dx, [cs:dic_entry_off+2]
+        call    read_entry_at
+        call    compare_yomi_to_target
+        cmp     al, 1
+        je      .go_lower
+
+        ; entry <= target
+        mov     ax, [cs:dic_mid]
+        mov     [cs:dic_best_block], ax
+        inc     ax
+        mov     [cs:dic_lo], ax
+        jmp     .bsearch_loop
+.go_lower:
+        mov     ax, [cs:dic_mid]
+        dec     ax
+        mov     [cs:dic_hi], ax
+        jmp     .bsearch_loop
+
+.bsearch_done:
+        cmp     byte [cs:dic_read_failed], 0
+        jne     .notfound
+        cmp     word [cs:dic_best_block], 0xFFFF
+        je      .notfound
+
+        ; --- 2) ブロック内を最大SPARSE件だけ線形走査 ---
+        mov     ax, [cs:dic_best_block]
+        shl     ax, 1
+        shl     ax, 1
+        xor     dx, dx
+        add     ax, [cs:dic_sparse_off]
+        adc     dx, [cs:dic_sparse_off+2]
+        mov     cx, 4
+        call    read_dict_range
+        mov     bx, di
+        mov     ax, [cs:dic_read_buf + bx]
+        mov     [cs:dic_pos], ax
+        mov     ax, [cs:dic_read_buf + bx + 2]
+        mov     [cs:dic_pos+2], ax
+
+        ; ブロック終端: best_block+1 < sparse_count なら sparse[best_block+1]、
+        ; そうでなければ dic_data_end
+        mov     ax, [cs:dic_best_block]
+        inc     ax
+        cmp     ax, [cs:dic_sparse_count]
+        jae     .use_data_end
+
+        shl     ax, 1
+        shl     ax, 1
+        xor     dx, dx
+        add     ax, [cs:dic_sparse_off]
+        adc     dx, [cs:dic_sparse_off+2]
+        mov     cx, 4
+        call    read_dict_range
+        mov     bx, di
+        mov     ax, [cs:dic_read_buf + bx]
+        mov     [cs:dic_block_end], ax
+        mov     ax, [cs:dic_read_buf + bx + 2]
+        mov     [cs:dic_block_end+2], ax
+        jmp     .have_end
+.use_data_end:
+        mov     ax, [cs:dic_data_end]
+        mov     [cs:dic_block_end], ax
+        mov     ax, [cs:dic_data_end+2]
+        mov     [cs:dic_block_end+2], ax
+.have_end:
+
+        mov     ax, [cs:dic_sparse]
+        mov     [cs:dic_steps_left], ax
+
+.lin_loop:
+        cmp     byte [cs:dic_read_failed], 0
+        jne     .notfound
+        cmp     word [cs:dic_steps_left], 0
+        je      .notfound
+
+        ; pos >= block_end なら打ち切り(32bit比較)
+        mov     ax, [cs:dic_pos]
+        mov     dx, [cs:dic_pos+2]
+        cmp     dx, [cs:dic_block_end+2]
+        ja      .notfound
+        jb      .pos_ok
+        cmp     ax, [cs:dic_block_end]
+        jae     .notfound
+.pos_ok:
+        dec     word [cs:dic_steps_left]
+
+        mov     ax, [cs:dic_pos]
+        mov     dx, [cs:dic_pos+2]
+        call    read_entry_at
+        call    compare_yomi_to_target
+        cmp     al, 0
+        je      .match
+        cmp     al, 1
+        je      .notfound               ; entry > target: これ以上進んでも見つからない
+
+        ; entry < target: 候補群を読み飛ばして次のエントリへ
+        call    skip_candidates_get_next
+        jmp     .lin_loop
+
+.match:
+        cmp     byte [cs:dic_read_failed], 0
+        jne     .notfound
+        call    load_candidates_from_dic
         cmp     byte [cs:cand_count], 0
         je      .notfound
-        jmp     .cand_done
-
-.cand_done:
         pop     es
         pop     bp
         pop     di
@@ -1562,6 +2010,9 @@ resident_end:
 ;--------------------------------------------------------------------
 ; インストール処理 (常駐後は破棄される)
 ;--------------------------------------------------------------------
+;--------------------------------------------------------------------
+; インストール処理 (常駐後は破棄される)
+;--------------------------------------------------------------------
 install:
         mov     ax, IDENT_FUNC
         int     0x21
@@ -1574,87 +2025,310 @@ install:
         int     0x21
 
 .install_now:
-        ; --- 段階B: 辞書ファイルを丸ごとメモリへ読み込む ---
-        ; INT 18h ハンドラの中からは INT 21h を呼べない(絶対厳守事項)ため、
-        ; ファイルI/Oが自由にできるこのインストール時に一度だけ読み込む。
-        ;
-        ; .COM は起動時点で使用可能なメモリを全部所有しているため、AH=48h で
-        ; 追加のブロックを確保しようとすると空きが無く必ず失敗する
-        ; (実機/FreeDOS(98)で実測: "FEP18: memory allocation for dictionary
-        ; failed." で常駐に失敗する)。そこで別ブロックは確保せず、自分の
-        ; メモリ空間の中、ファイル像(インストールコード込み)の直後の
-        ; まだ誰も使っていない領域 CS:DIC_BUF に辞書を読み込む。
-        ; 失敗したらどの段階で失敗したかが分かるメッセージを出して常駐せずに
-        ; 終了する。
+        ; --- 段階C: FEP.DIC のディスク上の位置を解決する ---
+        ; DICLOC.ASM で確立した手順(BPB→FAT→ルートディレクトリ→FAT12
+        ; チェーン)と同じ考え方をここで行う(DICLOC.ASM 自体は変更しない。
+        ; 同じ手順を本ファイル内に独立して書く)。INT 18h ハンドラの中から
+        ; DOS(INT 21h)は呼べないので、この解決はインストール時にしか
+        ; できない。断片化していたら常駐せず終了する。
 
-        ; 辞書ファイル名を確定する ("X:\FEP.DIC" の X を現在のドライブへ)
+        ; ---- 1) カレントドライブ番号 ----
         mov     ah, 0x19                ; カレントドライブ取得 (0=A, 1=B, ...)
         int     0x21
-        add     al, 'A'
-        mov     [install_dic_path], al
+        mov     [install_drive], al
 
-        ; open (読み込み専用)
-        mov     dx, install_dic_path
-        mov     ax, 0x3D00
-        int     0x21
-        jc      .err_open
-        mov     [install_handle], ax
+        ; DA/UA = 0x90 + ドライブ番号。FD専用の暫定(下記コメント参照)。
+        ; INT 1Bh の DA/UA は「1MBインターフェース・ユニット番号」であり、
+        ; HDD等では別の体系になるはずだが未対応・未検証(このFEP18は
+        ; FD起動を前提にした暫定実装であることをここに明記する)。
+        mov     al, [install_drive]
+        add     al, 0x90
+        mov     [dic_da_ua], al
 
-        ; seek end でサイズを得る (DX:AX = 絶対オフセット)
-        mov     bx, [install_handle]
-        xor     cx, cx
-        xor     dx, dx
-        mov     ax, 0x4202              ; seek, SEEK_END, offset=0
-        int     0x21
-        jc      .err_seek
-        or      dx, dx
-        jnz     .err_toolarge           ; 64KB以上は今回は対象外
-        or      ax, ax
-        jz      .err_toolarge           ; 空ファイルも辞書として不正
-        mov     [install_size], ax
+        ; ---- 2) ブートセクタ(論理セクタ0)をINT 25hで読む ----
+        mov     cx, 1
+        mov     dx, 0
+        mov     bx, install_bootsec_buf
+        mov     al, [install_drive]
+        xor     ah, ah
+        int     0x25
+        popf
+        jc      .err_boot_read
 
-        ; seek を先頭へ戻す
-        mov     bx, [install_handle]
-        xor     cx, cx
-        xor     dx, dx
-        mov     ax, 0x4200              ; seek, SEEK_SET
-        int     0x21
-        jc      .err_seek
+        ; ---- 3) BPB解析 ----
+        mov     ax, [install_bootsec_buf + 0x0B]
+        mov     [dic_bps], ax
+        mov     al, [install_bootsec_buf + 0x0D]
+        mov     [install_spc], al
+        mov     ax, [install_bootsec_buf + 0x0E]
+        mov     [install_rsvd], ax
+        mov     al, [install_bootsec_buf + 0x10]
+        mov     [install_nfat], al
+        mov     ax, [install_bootsec_buf + 0x11]
+        mov     [install_rootent], ax
+        mov     ax, [install_bootsec_buf + 0x16]
+        mov     [install_spf], ax
+        mov     ax, [install_bootsec_buf + 0x18]
+        mov     [dic_spt], ax
+        mov     ax, [install_bootsec_buf + 0x1A]
+        mov     [dic_heads], ax
 
-        ; DIC_BUF + size がこのセグメント(オフセット 0-0xFFFF)に収まるか
-        ; 確認する(16bit加算のキャリーで判定)。収まらなければ常駐せず終了。
-        mov     ax, [install_size]
-        add     ax, DIC_BUF
-        jc      .err_alloc
+        ; セクタ長コード(INT 1Bh の CH用): 1024→3 / 512→2 / 256→1。
+        ; ハードコードせず BPB のバイト/セクタから求める。それ以外の値は
+        ; このFEP18では対応していないので常駐せず終了する。
+        mov     ax, [dic_bps]
+        cmp     ax, 1024
+        jne     .chk512
+        mov     byte [dic_sector_n], 3
+        jmp     .n_done
+.chk512:
+        cmp     ax, 512
+        jne     .chk256
+        mov     byte [dic_sector_n], 2
+        jmp     .n_done
+.chk256:
+        cmp     ax, 256
+        jne     .err_bps
+        mov     byte [dic_sector_n], 1
+.n_done:
+        ; 2セクタぶんの読み込みバッファ(DIC_READBUF_SIZE)に収まるか確認
+        mov     ax, [dic_bps]
+        add     ax, ax                  ; ax = 2*bps
+        cmp     ax, DIC_READBUF_SIZE
+        ja      .err_bps
 
-        ; 自分のメモリの CS:DIC_BUF へ全体を読み込む (.COM なので DS=CS)
-        mov     bx, [install_handle]
-        mov     cx, [install_size]
-        mov     dx, DIC_BUF
-        mov     ah, 0x3F
-        int     0x21
-        jc      .err_read
-        cmp     ax, [install_size]
-        jne     .err_read
+        ; ---- 4) 位置計算 ----
+        ; fat_start = rsvd
+        mov     ax, [install_rsvd]
+        mov     [install_fat_start], ax
 
-        ; close
-        mov     bx, [install_handle]
-        mov     ah, 0x3E
-        int     0x21
+        ; root_start = fat_start + nfat * spf
+        xor     ah, ah
+        mov     al, [install_nfat]
+        mov     bx, ax
+        mov     ax, [install_spf]
+        mul     bx
+        cmp     dx, 0
+        jne     .err_overflow
+        mov     bx, ax
+        mov     ax, [install_fat_start]
+        add     ax, bx
+        jc      .err_overflow
+        mov     [install_root_start], ax
 
-        ; マジック確認 ("FEPDIC01", 8バイト)
+        ; root_sects = ceil(rootent * 32 / bps)
+        mov     ax, [install_rootent]
+        mov     cx, 32
+        mul     cx
+        add     ax, [dic_bps]
+        adc     dx, 0
+        sub     ax, 1
+        sbb     dx, 0
+        mov     cx, [dic_bps]
+        cmp     cx, 0
+        je      .err_overflow
+        div     cx
+        mov     [install_root_sects], ax
+
+        ; data_start = root_start + root_sects
+        mov     ax, [install_root_start]
+        add     ax, [install_root_sects]
+        jc      .err_overflow
+        mov     [install_data_start], ax
+
+        ; ---- 5a) FAT全体を読む ----
+        mov     ax, [install_spf]
+        mov     cx, [dic_bps]
+        mul     cx
+        cmp     dx, 0
+        jne     .err_fat_too_big
+        cmp     ax, INSTALL_FAT_BUF_SIZE
+        ja      .err_fat_too_big
+
+        mov     cx, [install_spf]
+        mov     dx, [install_fat_start]
+        mov     bx, install_fat_buf
+        mov     al, [install_drive]
+        xor     ah, ah
+        int     0x25
+        popf
+        jc      .err_fat_read
+
+        ; ---- 5b) ルートディレクトリ全体を読む ----
+        mov     ax, [install_root_sects]
+        mov     cx, [dic_bps]
+        mul     cx
+        cmp     dx, 0
+        jne     .err_root_too_big
+        cmp     ax, INSTALL_ROOT_BUF_SIZE
+        ja      .err_root_too_big
+
+        mov     cx, [install_root_sects]
+        mov     dx, [install_root_start]
+        mov     bx, install_root_buf
+        mov     al, [install_drive]
+        xor     ah, ah
+        int     0x25
+        popf
+        jc      .err_root_read
+
+        ; ---- 5c) "FEP     DIC" を探す ----
+        mov     ax, [install_rootent]
+        mov     [install_entries_left], ax
+        mov     si, install_root_buf
+        mov     byte [install_file_found], 0
+
+.search_loop:
+        mov     ax, [install_entries_left]
+        cmp     ax, 0
+        je      .search_done
+        mov     al, [si]
+        cmp     al, 0
+        je      .search_done
+        cmp     al, 0xE5
+        je      .next_entry
+
+        push    si
+        mov     di, install_target_name
+        mov     cx, 11
+        repe    cmpsb
+        pop     si
+        je      .found_entry
+        jmp     .next_entry
+
+.found_entry:
+        mov     ax, [si + 0x1A]
+        mov     [install_file_clus], ax
+        mov     byte [install_file_found], 1
+        jmp     .search_done
+
+.next_entry:
+        add     si, 32
+        mov     ax, [install_entries_left]
+        dec     ax
+        mov     [install_entries_left], ax
+        jmp     .search_loop
+
+.search_done:
+        cmp     byte [install_file_found], 0
+        je      .err_not_found
+
+        ; ---- 6) FAT12チェーンを辿り、連続しているか確認する ----
+        mov     ax, [install_file_clus]
+        mov     [install_cur_clus], ax
+        mov     word [install_chain_count], 1
+        mov     byte [install_chain_contig], 1
+        mov     word [install_safety], INSTALL_CHAIN_SAFETY
+
+.chain_loop:
+        mov     ax, [install_cur_clus]
+        call    install_get_fat12_entry ; -> ax = FATエントリ値(12bit)
+        mov     [install_next_clus], ax
+        cmp     ax, 0x0FF8
+        jae     .chain_done
+
+        mov     ax, [install_cur_clus]
+        inc     ax
+        cmp     ax, [install_next_clus]
+        je      .contig_ok
+        mov     byte [install_chain_contig], 0
+.contig_ok:
+        mov     ax, [install_chain_count]
+        inc     ax
+        mov     [install_chain_count], ax
+
+        mov     ax, [install_next_clus]
+        mov     [install_cur_clus], ax
+
+        mov     ax, [install_safety]
+        dec     ax
+        mov     [install_safety], ax
+        cmp     ax, 0
+        je      .err_chain_runaway
+        jmp     .chain_loop
+
+.chain_done:
+        cmp     byte [install_chain_contig], 0
+        je      .err_fragmented         ; 断片化した辞書は今回対象外
+
+        ; ---- 7) 開始LBAを計算する ----
+        mov     ax, [install_file_clus]
+        sub     ax, 2
+        mov     bl, [install_spc]
+        xor     bh, bh
+        mul     bx
+        cmp     dx, 0
+        jne     .err_overflow
+        add     ax, [install_data_start]
+        jc      .err_overflow
+        mov     [dic_start_lba], ax
+
+        ; ---- ヘッダ(32バイト)を INT 1Bh 経由で読み、マジックを確認する ----
+        ; (read_dict_range は常駐ルーチンだが、install: からもそのまま
+        ; 呼べる。dic_start_lba/dic_bps/dic_spt/dic_heads/dic_da_ua/
+        ; dic_sector_n は上でセット済み)
         mov     ax, cs
         mov     es, ax
+        mov     ax, 0
+        mov     dx, 0
+        mov     cx, 32
+        call    read_dict_range         ; -> di = dic_read_buf内オフセット
+        cmp     byte [cs:dic_read_failed], 0
+        jne     .err_header_read
+
+        mov     bx, di
         mov     si, install_dic_magic
-        mov     di, DIC_BUF
         mov     cx, 8
 .magic_loop:
-        mov     al, [cs:si]
-        cmp     al, [es:di]
+        mov     al, [cs:dic_read_buf + bx]
+        cmp     al, [si]
         jne     .err_magic
+        inc     bx
         inc     si
-        inc     di
         loop    .magic_loop
+
+        ; --- ヘッダの各フィールドを常駐データへ控える ---
+        mov     bx, di
+        add     bx, 0x14                ; data_off (u32)
+        mov     ax, [cs:dic_read_buf + bx]
+        mov     [dic_data_off], ax
+        mov     ax, [cs:dic_read_buf + bx + 2]
+        mov     [dic_data_off + 2], ax
+
+        mov     bx, di
+        add     bx, 0x18                ; data_len (u32)
+        mov     ax, [cs:dic_read_buf + bx]
+        mov     [install_data_len], ax
+        mov     ax, [cs:dic_read_buf + bx + 2]
+        mov     [install_data_len + 2], ax
+
+        ; dic_data_end = dic_data_off + install_data_len
+        mov     ax, [dic_data_off]
+        add     ax, [install_data_len]
+        mov     [dic_data_end], ax
+        mov     ax, [dic_data_off + 2]
+        adc     ax, [install_data_len + 2]
+        mov     [dic_data_end + 2], ax
+
+        mov     bx, di
+        add     bx, 0x10                ; sparse_off (u32)
+        mov     ax, [cs:dic_read_buf + bx]
+        mov     [dic_sparse_off], ax
+        mov     ax, [cs:dic_read_buf + bx + 2]
+        mov     [dic_sparse_off + 2], ax
+
+        mov     bx, di
+        add     bx, 0x0C                ; sparse_count (u32)
+        mov     ax, [cs:dic_read_buf + bx]
+        mov     [dic_sparse_count], ax
+        mov     ax, [cs:dic_read_buf + bx + 2]
+        or      ax, ax
+        jnz     .err_too_many_blocks    ; 疎索引が65536レコード以上は対象外
+
+        mov     bx, di
+        add     bx, 0x1C                ; sparse (u16)
+        mov     ax, [cs:dic_read_buf + bx]
+        mov     [dic_sparse], ax
 
         ; --- 辞書ロード成功。INT 18h をフックして常駐する ---
         mov     ax, 0x3518              ; 元の INT 18h ベクタを取得
@@ -1670,75 +2344,141 @@ install:
         mov     ah, 0x09
         int     0x21
 
-        ; 常駐パラグラフ数 = ceil((DIC_BUF + 辞書サイズ) / 16)。DIC_BUF は
-        ; org 0x100 によりラベル値がそのまま PSP 先頭からのオフセットに
-        ; なっているため、+0x100 は不要(そのまま足すだけでPSPを含む)。
-        ; 32bit演算(DIC_BUF+size+15 が16bitに収まらない境界があり得るため
-        ; dx:ax で計算する)。
-        mov     ax, [install_size]
-        xor     dx, dx
-        add     ax, DIC_BUF + 15
-        adc     dx, 0
-        mov     cx, 16
-        div     cx                      ; dx:ax / 16 -> ax=パラグラフ数
-        mov     dx, ax
+        mov     dx, (resident_end - start + 0x100 + 15) / 16 ; PSPを含む常駐パラグラフ数
         mov     ax, 0x3100              ; 常駐終了
         int     0x21
 
-.err_open:
-        mov     dx, msg_err_open
+.err_boot_read:
+        mov     dx, msg_err_boot_read
         jmp     .abort
-.err_seek:
-        mov     dx, msg_err_seek
-        jmp     .abort_close
-.err_toolarge:
-        mov     dx, msg_err_toolarge
-        jmp     .abort_close
-.err_alloc:
-        mov     dx, msg_err_alloc
-        jmp     .abort_close
-.err_read:
-        mov     dx, msg_err_read
-        jmp     .abort_close
+.err_bps:
+        mov     dx, msg_err_bps
+        jmp     .abort
+.err_overflow:
+        mov     dx, msg_err_overflow
+        jmp     .abort
+.err_fat_too_big:
+        mov     dx, msg_err_fat_too_big
+        jmp     .abort
+.err_fat_read:
+        mov     dx, msg_err_fat_read
+        jmp     .abort
+.err_root_too_big:
+        mov     dx, msg_err_root_too_big
+        jmp     .abort
+.err_root_read:
+        mov     dx, msg_err_root_read
+        jmp     .abort
+.err_not_found:
+        mov     dx, msg_err_not_found
+        jmp     .abort
+.err_chain_runaway:
+        mov     dx, msg_err_chain_runaway
+        jmp     .abort
+.err_fragmented:
+        mov     dx, msg_err_fragmented
+        jmp     .abort
+.err_header_read:
+        mov     dx, msg_err_header_read
+        jmp     .abort
 .err_magic:
         mov     dx, msg_err_magic
         jmp     .abort
+.err_too_many_blocks:
+        mov     dx, msg_err_too_many_blocks
+        jmp     .abort
 
-.abort_close:
-        push    dx
-        mov     bx, [install_handle]
-        mov     ah, 0x3E
-        int     0x21
-        pop     dx
 .abort:
         mov     ah, 0x09
         int     0x21
         mov     ax, 0x4C01
         int     0x21
 
-msg_ok:         db      'FEP18 resident (dictionary loaded). Ctrl+XFER or Ctrl-K toggles kana.', 0x0D, 0x0A, '$'
-msg_already:    db      'FEP18 already resident.', 0x0D, 0x0A, '$'
-msg_err_open:   db      'FEP18: dictionary open failed (FEP.DIC not found?).', 0x0D, 0x0A, '$'
-msg_err_seek:   db      'FEP18: dictionary seek failed.', 0x0D, 0x0A, '$'
-msg_err_toolarge: db    'FEP18: dictionary is empty or too large (must be <64KB).', 0x0D, 0x0A, '$'
-msg_err_alloc:  db      'FEP18: dictionary too large to fit in the resident segment.', 0x0D, 0x0A, '$'
-msg_err_read:   db      'FEP18: dictionary read failed.', 0x0D, 0x0A, '$'
-msg_err_magic:  db      'FEP18: dictionary magic mismatch (not a FEPDIC01 file).', 0x0D, 0x0A, '$'
+;--------------------------------------------------------------------
+; FAT12エントリ取得 (install時のみ使用。DICLOC.ASM の get_fat12_entry と
+; 同じ考え方を本ファイル内に独立して書いたもの)
+;   in:  ax = クラスタ番号
+;   out: ax = 12bit FATエントリ値
+;--------------------------------------------------------------------
+install_get_fat12_entry:
+        push    cx
+        push    dx
+        push    bx
+        mov     cx, 3
+        mul     cx                      ; dx:ax = cluster*3
+        mov     cx, 2
+        div     cx                      ; ax = offset, dx = cluster mod 2
+        mov     bx, ax
+        mov     ax, [install_fat_buf + bx]
+        cmp     dx, 0
+        je      .even
+        mov     cx, 4
+        shr     ax, cl
+        jmp     .done
+.even:
+        and     ax, 0x0FFF
+.done:
+        pop     bx
+        pop     dx
+        pop     cx
+        ret
+
+msg_ok:                 db 'FEP18 resident (dictionary on disk). Ctrl+XFER or Ctrl-K toggles kana.', 0x0D, 0x0A, '$'
+msg_already:            db 'FEP18 already resident.', 0x0D, 0x0A, '$'
+msg_err_boot_read:      db 'FEP18: boot sector read failed (int25h).', 0x0D, 0x0A, '$'
+msg_err_bps:            db 'FEP18: unsupported bytes/sector (must be 1024, 512 or 256).', 0x0D, 0x0A, '$'
+msg_err_overflow:       db 'FEP18: value overflow while resolving FEP.DIC location.', 0x0D, 0x0A, '$'
+msg_err_fat_too_big:    db 'FEP18: FAT does not fit in the install-time buffer.', 0x0D, 0x0A, '$'
+msg_err_fat_read:       db 'FEP18: FAT read failed (int25h).', 0x0D, 0x0A, '$'
+msg_err_root_too_big:   db 'FEP18: root directory does not fit in the install-time buffer.', 0x0D, 0x0A, '$'
+msg_err_root_read:      db 'FEP18: root directory read failed (int25h).', 0x0D, 0x0A, '$'
+msg_err_not_found:      db 'FEP18: FEP.DIC not found in root directory.', 0x0D, 0x0A, '$'
+msg_err_chain_runaway:  db 'FEP18: FAT chain too long (possible loop).', 0x0D, 0x0A, '$'
+msg_err_fragmented:     db 'FEP18: FEP.DIC is fragmented (not defragmented). Defragment the disk and try again.', 0x0D, 0x0A, '$'
+msg_err_header_read:    db 'FEP18: dictionary header read failed (int1Bh).', 0x0D, 0x0A, '$'
+msg_err_magic:          db 'FEP18: dictionary magic mismatch (not a FEPDIC02 file).', 0x0D, 0x0A, '$'
+msg_err_too_many_blocks: db 'FEP18: dictionary sparse index has too many blocks (>65535).', 0x0D, 0x0A, '$'
 
 ; --- インストール時のみ使うデータ(常駐後は破棄される) ---
-install_dic_path:      db      'X:\FEP.DIC', 0 ; 先頭のXはインストール時に実ドライブへ書き換える
-install_dic_magic:     db      'FEPDIC01'
-install_handle:        dw      0
-install_size:           dw      0
+INSTALL_FAT_BUF_SIZE   equ     4096    ; FATがこのバイト数に収まらなければエラー終了
+INSTALL_ROOT_BUF_SIZE  equ     8192    ; ルートディレクトリがこのバイト数に収まらなければエラー終了
+INSTALL_CHAIN_SAFETY   equ     8192    ; FATチェーンの暴走(循環等)検出用の上限反復回数
+
+install_drive:          db      0
+
+install_spc:            db      0
+install_rsvd:            dw     0
+install_nfat:            db     0
+install_rootent:         dw     0
+install_spf:              dw    0
+
+install_fat_start:       dw     0
+install_root_start:      dw     0
+install_root_sects:      dw     0
+install_data_start:      dw     0
+
+install_entries_left:    dw     0
+install_file_found:      db     0
+install_file_clus:       dw     0
+
+install_cur_clus:        dw     0
+install_next_clus:       dw     0
+install_chain_count:     dw     0
+install_chain_contig:    db     0
+install_safety:          dw     0
+
+install_data_len:        dd     0
+
+install_dic_magic:      db      'FEPDIC02'
+install_target_name:    db      'FEP     DIC'   ; 8.3の生の形(11バイト、スペース埋め)
 
 ;--------------------------------------------------------------------
-; ファイル像の末尾 (インストールコード・メッセージ・上のデータも含めて
-; ここまでがファイルに出力される)。この直後は .COM の実行時には
-; まだ誰も使っていない自分のメモリなので、辞書バッファとして使う。
-; DIC_BUF は org 0x100 によりそのまま PSP 先頭からのオフセットになる
-; (image_end のラベル値が既に 0x100 起点で計算されているため)。
+; ファイル像の末尾 (インストールコード・メッセージ・上のデータ・下記の
+; バッファも含めてここまでがファイルに出力される。バッファは install:
+; からのみ使い、常駐後は破棄される)
 ;--------------------------------------------------------------------
+install_bootsec_buf:   times 2048 db 0
+install_fat_buf:       times INSTALL_FAT_BUF_SIZE db 0
+install_root_buf:      times INSTALL_ROOT_BUF_SIZE db 0
+
 image_end:
-        align   16, db 0        ; 16バイト境界へ切り上げ(division/&演算子は
-                                 ; forward参照のラベルに使えないため align で行う)
-DIC_BUF:

@@ -72,7 +72,9 @@ const files = [
   { name: 'ESCT2   ', ext: 'COM', path: join(HERE, 'ESCT2.COM') },
   { name: 'FEP     ', ext: 'COM', path: join(HERE, 'FEP.COM') },
   { name: 'FEP18   ', ext: 'COM', path: join(HERE, 'FEP18.COM') },
-  { name: 'DICTEST ', ext: 'COM', path: join(HERE, 'DICTEST.COM') },
+  // DICTEST.COM は v1辞書(FEPDIC01)専用。FEP18は v2(FEPDIC02, ディスク版)を
+  // 使うようになったため、DICTEST.COM 自体はリポジトリに残すがイメージには
+  // 収録しない(source of confusion を避けるため)。
   { name: 'FEP     ', ext: 'DIC', path: join(HERE, 'out', 'FEP.DIC') },
   { name: 'AHSPY   ', ext: 'COM', path: join(HERE, 'AHSPY.COM') },
   { name: 'INTEST  ', ext: 'COM', path: join(HERE, 'INTEST.COM') },
