@@ -131,6 +131,14 @@ assert len(FS_TYPE) == 8
 #     あとは単純な無限ループ(EB FE)だけ。このイメージは起動しない前提。
 IPL_STUB = bytes([0xEB, 0x0A, 0x90, 0x90]) + b'IPL1' + bytes([0xEB, 0xFE])
 
+# --- IPLセクタ末尾(オフセット0x0FE)の 0x55AA。
+#     **これが無いと FreeDOS(98) は HDD を一切認識しない**(実測)。
+#     領域確保テーブル・拡張BPB・FAT16のクラスタ数を全部実イメージに合わせても
+#     ドライブの行が1行も出ず、この2バイトを書いた瞬間に
+#     `C: SASI1:256 [TSUKUSHI DATA   ]` が出た。
+#     物理セクタは256バイトなので、末尾は0x1FEではなく0x0FE。
+IPL_BOOT_SIG_OFF = 0x0FE
+
 
 def build_part_table_entry(start_cyl: int, end_cyl: int, name: bytes) -> bytes:
     entry = bytearray(32)
@@ -238,6 +246,9 @@ def build():
     # --- 物理セクタ0: 自作の最小IPLスタブ(実イメージのIPLコードはコピーしない) ---
     ipl_off = THD_HEADER + 0 * PHYS_SECTOR
     data[ipl_off:ipl_off + len(IPL_STUB)] = IPL_STUB
+    # IPLセクタ末尾の 0x55AA。これが無いと FreeDOS(98) が HDD を認識しない(実測)
+    data[ipl_off + IPL_BOOT_SIG_OFF] = 0x55
+    data[ipl_off + IPL_BOOT_SIG_OFF + 1] = 0xAA
 
     # --- 領域確保テーブル(物理セクタ1) ---
     entry = build_part_table_entry(PART_START_CYL, N_CYLINDERS - 1, PART_NAME)
