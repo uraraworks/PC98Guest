@@ -32,6 +32,7 @@ ROOT_FILES = [
     OUT_DIR / 'FEP.DIC',   # ビルド成果物ではなく辞書データだが、収録手順は同じ
     FEP_DIR / 'AHSPY.COM',
     FEP_DIR / 'INTEST.COM',
+    FEP_DIR / 'K18SPY.COM',
 ]
 
 THD_HEADER = 0x100
