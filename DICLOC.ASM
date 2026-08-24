@@ -52,6 +52,9 @@ start:
         mov     dx, 0
         mov     bx, bootsec_buf
         mov     al, [drive]
+        xor     ah, ah                  ; AHはINT 25hの入力仕様に無いが、直前の
+                                         ; INT 21h呼び出しの残骸(AH=19h等)が
+                                         ; 混入しないよう明示的にクリアする
         int     0x25
         popf
         jc      err_boot_read
@@ -132,6 +135,8 @@ start:
         mov     dx, [fat_start]
         mov     bx, fat_buf
         mov     al, [drive]
+        xor     ah, ah                  ; 直前のAH=09h(DOS文字列出力)の残骸を
+                                         ; 混入させない(FAT読み込み失敗の原因)
         int     0x25
         popf
         jc      err_fat_read
@@ -149,6 +154,8 @@ start:
         mov     dx, [root_start]
         mov     bx, root_buf
         mov     al, [drive]
+        xor     ah, ah                  ; 同上(ルートディレクトリ読み込みも
+                                         ; 同じ原因で失敗しうる)
         int     0x25
         popf
         jc      err_root_read
@@ -310,8 +317,10 @@ fail_print_ax:
         push    ax
         mov     ah, 0x09
         int     0x21
-        pop     ax
-        mov     al, ah
+        pop     ax                      ; AL = INT 25h/26hのエラーコード(CF=1時の
+                                         ; 仕様どおり)。AHは追加情報でALではない
+                                         ; ので、ALをそのまま表示する(以前はAHを
+                                         ; 上書きして表示しており誤った値だった)
         call    print_hex8
         mov     dx, msg_close_crlf
         mov     ah, 0x09
@@ -381,7 +390,8 @@ print_dec32:
         push    dx
         push    si
         mov     si, dec32_buf + 10
-        mov     byte [si], 0
+        mov     byte [si], '$'          ; AH=09h は'$'終端が必須(0では止まらず
+                                         ; 後続の定数を巻き込んで暴走する)
         mov     cx, ax
         or      cx, dx
         jnz     .conv
