@@ -57,7 +57,23 @@ common/make_test_hdd.py (FAT16書き込みの考え方)を踏襲している。
 --dump-parttab <イメージ> で任意のTHDイメージの物理セクタ1(領域確保
 テーブル)の先頭64バイトを16進とパース結果で表示できる。実イメージと
 合成イメージを同じ目で見比べるための検証用オプション。
+
+--compare-bpb <イメージ> で合成イメージ(out/datahdd.thd)と指定イメージの
+BPB/拡張BPBフィールドを並べて表示する。
+
+2026-08-24 追記: FreeDOS(98) がこのイメージを認識しない不具合を修正した。
+原因は2つ:
+  1. 旧デフォルト(128シリンダ)ではデータ領域のクラスタ数が約2040しかなく、
+     FAT16のつもりで書いたFATエントリをDOSがFAT12として読んでいた
+     (クラスタ数4085未満はFAT12と判定される)。デフォルトを512シリンダに
+     増やしクラスタ数がFAT16域(4085以上)になることをビルド時に検査する。
+  2. 拡張BPB(オフセット0x24以降: ドライブ番号/拡張ブートシグネチャ0x29/
+     ボリュームシリアル/ボリュームラベル/ファイルシステム型)を書いていな
+     かった。実イメージ(WebNP2/public/test/HDDimage.thd)には全部入っている。
+  ついでに、論理セクタサイズが2048バイトなので実イメージには存在しない
+  0x1FEの0x55AAシグネチャも書くのをやめた。
 """
+import argparse
 import struct
 import sys
 from pathlib import Path
@@ -76,8 +92,10 @@ SPT = 33                       # セクタ/トラック(物理)
 PHYS_SECTOR = 256              # 物理セクタサイズ(バイト)
 CYL_BYTES = HEADS * SPT * PHYS_SECTOR  # 67584
 
-N_CYLINDERS = 128              # ヘッダに書くシリンダ数(≒8.6MB)
+DEFAULT_CYLINDERS = 512         # ヘッダに書くシリンダ数(既定。約33MB。FAT16成立に必要)
+N_CYLINDERS = DEFAULT_CYLINDERS  # build()実行前に --cylinders で上書きされうる
 PART_START_CYL = 1             # パーティションはシリンダ1から(実イメージと同じ)
+MIN_FAT16_CLUSTERS = 4085      # これ未満はDOSにFAT12として読まれる
 
 # --- BPB パラメータ(実イメージと同じ値) ---
 BPS = 2048                     # 論理セクタサイズ
@@ -98,6 +116,20 @@ PART_MID = 0xA1
 PART_SID = 0x91
 PART_NAME = b'TSUKUSHI DATA   '  # 16バイト固定長(スペース埋め)
 assert len(PART_NAME) == 16
+
+# --- 拡張BPB(オフセット0x24以降。実イメージの実測値と同じレイアウト) ---
+EXT_BOOT_SIG = 0x29
+# 実行のたびに変わる値を入れない(固定のダミーシリアル)
+VOLUME_SERIAL = 0x18031403
+VOLUME_LABEL = b'TSUKUSHI   '     # 11バイト固定長
+FS_TYPE = b'FAT16   '             # 8バイト固定長
+assert len(VOLUME_LABEL) == 11
+assert len(FS_TYPE) == 8
+
+# --- IPLスタブ(物理セクタ0)。実イメージのIPLコード(NEC/Microsoft製)は
+#     絶対にコピーしない。自作の最小スタブ: ジャンプ+NOP+'IPL1'の8バイトの
+#     あとは単純な無限ループ(EB FE)だけ。このイメージは起動しない前提。
+IPL_STUB = bytes([0xEB, 0x0A, 0x90, 0x90]) + b'IPL1' + bytes([0xEB, 0xFE])
 
 
 def build_part_table_entry(start_cyl: int, end_cyl: int, name: bytes) -> bytes:
@@ -203,7 +235,11 @@ def build():
     # --- THDヘッダ: 先頭ワード = シリンダ数 ---
     struct.pack_into('<H', data, 0, N_CYLINDERS)
 
-    # --- 領域確保テーブル(物理セクタ1)。物理セクタ0(IPL)は0埋めのまま ---
+    # --- 物理セクタ0: 自作の最小IPLスタブ(実イメージのIPLコードはコピーしない) ---
+    ipl_off = THD_HEADER + 0 * PHYS_SECTOR
+    data[ipl_off:ipl_off + len(IPL_STUB)] = IPL_STUB
+
+    # --- 領域確保テーブル(物理セクタ1) ---
     entry = build_part_table_entry(PART_START_CYL, N_CYLINDERS - 1, PART_NAME)
     part_tab_off = THD_HEADER + 1 * PHYS_SECTOR
     data[part_tab_off:part_tab_off + len(entry)] = entry
@@ -218,6 +254,15 @@ def build():
     total_logical = part_total_logical_sectors()
     if total_logical > 0xFFFF:
         sys.exit('総論理セクタ数が16bitに収まらない(N_CYLINDERSを減らすこと)')
+
+    n_clusters = max_clusters()
+    if n_clusters < MIN_FAT16_CLUSTERS:
+        sys.exit(
+            f'クラスタ数不足: {n_clusters} 個 (FAT16に必要な{MIN_FAT16_CLUSTERS}個未満)。\n'
+            'このままではDOSにFAT12として読まれて壊れるので中止する。'
+            '--cylinders を増やすこと。'
+        )
+    print(f'クラスタ数: {n_clusters} (FAT16域, 閾値{MIN_FAT16_CLUSTERS}以上)')
 
     # --- BPB(ブートセクタ) ---
     bs = bytearray(BPS)
@@ -237,8 +282,15 @@ def build():
     struct.pack_into('<H', bs, 26, HEADS)
     struct.pack_into('<I', bs, 28, HIDDEN)
     struct.pack_into('<I', bs, 32, 0)                # totsec32(totsec16を使うので0)
-    bs[510] = 0x55
-    bs[511] = 0xAA
+    # --- 拡張BPB(実イメージと同じレイアウト。オフセット0x24〜) ---
+    bs[0x24] = 0x80                                  # ドライブ番号
+    bs[0x25] = 0x00                                  # 予約
+    bs[0x26] = EXT_BOOT_SIG                           # 拡張ブートシグネチャ = 0x29
+    struct.pack_into('<I', bs, 0x27, VOLUME_SERIAL)   # ボリュームシリアル(固定値)
+    bs[0x2B:0x2B + 11] = VOLUME_LABEL                 # ボリュームラベル
+    bs[0x36:0x36 + 8] = FS_TYPE                       # ファイルシステム型
+    # 論理セクタが2048バイトのため0x1FEはセクタ途中にあたる。実イメージにも
+    # 0x55AAは無いのでここでは書かない。
     data[part:part + BPS] = bs
 
     # --- FAT領域(2セクタ目以降。両コピーとも同じ内容にする) ---
@@ -314,10 +366,69 @@ def build():
         print(f'{name:14s} {cluster:7d} {logical:8d} {phys:9d} {size:8d}')
 
 
+def read_bpb(image_path: Path) -> bytes:
+    """任意のTHDイメージのパーティション(シリンダ1開始)先頭の論理セクタ(BPB)を返す。
+    論理セクタサイズは不明な段階なので、BPB自体が入っている先頭2048バイトを読む
+    (BPS=2048が実イメージ/合成イメージ共通の前提)。"""
+    raw = image_path.read_bytes()
+    off = THD_HEADER + PART_START_CYL * CYL_BYTES
+    return raw[off:off + BPS]
+
+
+def parse_bpb(bs: bytes) -> dict:
+    return {
+        'jump': bs[0:3].hex(),
+        'oem': bs[3:11],
+        'bytes_per_sector': struct.unpack_from('<H', bs, 11)[0],
+        'sectors_per_cluster': bs[13],
+        'reserved_sectors': struct.unpack_from('<H', bs, 14)[0],
+        'num_fats': bs[16],
+        'root_entries': struct.unpack_from('<H', bs, 17)[0],
+        'total_sectors16': struct.unpack_from('<H', bs, 19)[0],
+        'media': bs[21],
+        'sectors_per_fat': struct.unpack_from('<H', bs, 22)[0],
+        'sectors_per_track': struct.unpack_from('<H', bs, 24)[0],
+        'heads': struct.unpack_from('<H', bs, 26)[0],
+        'hidden_sectors': struct.unpack_from('<I', bs, 28)[0],
+        'total_sectors32': struct.unpack_from('<I', bs, 32)[0],
+        'drive_number': bs[0x24],
+        'reserved1': bs[0x25],
+        'ext_boot_sig': bs[0x26],
+        'volume_serial': struct.unpack_from('<I', bs, 0x27)[0],
+        'volume_label': bs[0x2B:0x2B + 11],
+        'fs_type': bs[0x36:0x36 + 8],
+        'sig_55aa': bs[0x1FE:0x200].hex() if len(bs) >= 0x200 else '(セクタが2048バイト未満で0x1FEに届かない)',
+    }
+
+
+# サイズ依存で当然違う値になるフィールド(比較で「不一致」として警告しない)
+SIZE_DEPENDENT_FIELDS = {'total_sectors16', 'total_sectors32'}
+
+
+def compare_bpb(other_path: Path):
+    ours = parse_bpb(read_bpb(OUT_THD))
+    theirs = parse_bpb(read_bpb(other_path))
+    print(f'{"field":18s} {"datahdd.thd":30s} {other_path.name:30s} 判定')
+    for key in ours:
+        a, b = ours[key], theirs[key]
+        if key in SIZE_DEPENDENT_FIELDS:
+            mark = '(サイズ由来・比較対象外)'
+        else:
+            mark = '一致' if a == b else '★不一致'
+        print(f'{key:18s} {str(a):30s} {str(b):30s} {mark}')
+
+
 if __name__ == '__main__':
-    if len(sys.argv) >= 2 and sys.argv[1] == '--dump-parttab':
-        if len(sys.argv) != 3:
-            sys.exit('使い方: make_data_hdd.py --dump-parttab <イメージ.thd>')
-        dump_parttab(Path(sys.argv[2]))
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument('--dump-parttab', metavar='IMAGE', type=Path)
+    parser.add_argument('--compare-bpb', metavar='IMAGE', type=Path)
+    parser.add_argument('--cylinders', type=int, default=DEFAULT_CYLINDERS)
+    args = parser.parse_args()
+
+    if args.dump_parttab is not None:
+        dump_parttab(args.dump_parttab)
+    elif args.compare_bpb is not None:
+        compare_bpb(args.compare_bpb)
     else:
+        N_CYLINDERS = args.cylinders
         build()
