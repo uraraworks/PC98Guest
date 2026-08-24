@@ -86,6 +86,7 @@ const files = [
   { name: 'RAWRD   ', ext: 'COM', path: join(PROBES, 'RAWRD.COM') },
   { name: 'RAWRD18 ', ext: 'COM', path: join(PROBES, 'RAWRD18.COM') },
   { name: 'DICLOC  ', ext: 'COM', path: join(PROBES, 'DICLOC.COM') },
+  { name: 'HDDRD   ', ext: 'COM', path: join(PROBES, 'HDDRD.COM') },
 ];
 
 const root = Buffer.alloc(ROOT_SECTORS * BYTES_PER_SECTOR, 0);
