@@ -70,6 +70,9 @@ ROMABUFSIZE     equ     8
 KANABUFSIZE     equ     64
 OUTQSIZE        equ     64
 STATUSCOLS      equ     80             ; ステータス行の埋め幅(桁=画面上のカラム数)
+BODYCOLS        equ     64             ; 本文(prefix+かな/候補)を打ち切る桁数。
+                                        ; 桁64は区切り空白、桁65-79は製品名ラベル
+MSG_LABEL_LEN   equ     15             ; "FEP by Tsukushi" の桁数(桁65-79)
 CANDBUFSIZE     equ     128
 CANDMAX         equ     16
 
@@ -928,6 +931,7 @@ cancel_conversion:
 
 ; AL = 0-255 の値を10進数で vram_put_ascii により書く(DIはVRAMカーソル、
 ; 呼び出し側が維持する)。status_col の範囲を超える桁は書かずに捨てる。
+; (呼び出し元は draw_status の本文区間のみ。BODYCOLS で打ち切る)
 vram_put_decimal:
         push    ax
         push    bx
@@ -946,7 +950,7 @@ vram_put_decimal:
 .printloop:
         jcxz    .pdone
         pop     dx
-        cmp     byte [cs:status_col], STATUSCOLS
+        cmp     byte [cs:status_col], BODYCOLS
         jae     .skip
         mov     al, dl
         add     al, '0'
@@ -1752,7 +1756,7 @@ draw_status:
 .prefix_out:
 .prefix_loop:
         jcxz    .prefix_done
-        cmp     byte [cs:status_col], STATUSCOLS
+        cmp     byte [cs:status_col], BODYCOLS
         jae     .content_done
         mov     al, [cs:si]
         call    vram_put_ascii
@@ -1783,7 +1787,7 @@ draw_status:
         mov     al, [cs:si]
         call    sjis_width              ; al=1 or 2, CF=1なら幅2
         jc      .cand_wide2
-        cmp     byte [cs:status_col], STATUSCOLS
+        cmp     byte [cs:status_col], BODYCOLS
         jae     .cand_loop2_done
         mov     al, [cs:si]
         call    vram_put_ascii
@@ -1794,7 +1798,7 @@ draw_status:
 .cand_wide2:
         mov     al, [cs:status_col]
         add     al, 2
-        cmp     al, STATUSCOLS
+        cmp     al, BODYCOLS
         ja      .cand_loop2_done
         mov     bl, [cs:si]
         mov     bh, [cs:si+1]
@@ -1805,13 +1809,13 @@ draw_status:
         jmp     .cand_loop2
 .cand_loop2_done:
 
-        cmp     byte [cs:status_col], STATUSCOLS
+        cmp     byte [cs:status_col], BODYCOLS
         jae     .content_done
         mov     al, ' '
         call    vram_put_ascii
         inc     byte [cs:status_col]
 
-        cmp     byte [cs:status_col], STATUSCOLS
+        cmp     byte [cs:status_col], BODYCOLS
         jae     .content_done
         mov     al, '('
         call    vram_put_ascii
@@ -1821,7 +1825,7 @@ draw_status:
         inc     al
         call    vram_put_decimal
 
-        cmp     byte [cs:status_col], STATUSCOLS
+        cmp     byte [cs:status_col], BODYCOLS
         jae     .content_done
         mov     al, '/'
         call    vram_put_ascii
@@ -1830,7 +1834,7 @@ draw_status:
         mov     al, [cs:cand_count]
         call    vram_put_decimal
 
-        cmp     byte [cs:status_col], STATUSCOLS
+        cmp     byte [cs:status_col], BODYCOLS
         jae     .content_done
         mov     al, ')'
         call    vram_put_ascii
@@ -1850,7 +1854,7 @@ draw_status:
         cmp     al, 2
         je      .kb_wide
         ; 幅1(ASCII素通し文字)
-        cmp     byte [cs:status_col], STATUSCOLS
+        cmp     byte [cs:status_col], BODYCOLS
         jae     .kb_done
         mov     al, [cs:si]
         call    vram_put_ascii
@@ -1860,8 +1864,8 @@ draw_status:
 .kb_wide:
         mov     al, [cs:status_col]
         add     al, 2
-        cmp     al, STATUSCOLS
-        ja      .kb_done
+        cmp     al, BODYCOLS            ; 全角の途中で切らない: 現在桁+2がBODYCOLSを
+        ja      .kb_done                ; 超えるなら1文字手前で打ち切り、残りは空白パッドに任せる
         mov     bl, [cs:si]             ; bl = SJIS上位バイト(b1)
         mov     bh, [cs:si+1]           ; bh = SJIS下位バイト(b2)
         call    vram_put_wide
@@ -1878,7 +1882,7 @@ draw_status:
         mov     cl, [cs:romalen]
 .rb_loop:
         jcxz    .content_done
-        cmp     byte [cs:status_col], STATUSCOLS
+        cmp     byte [cs:status_col], BODYCOLS
         jae     .content_done
         mov     al, [cs:si]
         call    vram_put_ascii
@@ -1887,7 +1891,8 @@ draw_status:
         loop    .rb_loop
 
 .content_done:
-        mov     al, STATUSCOLS
+        ; --- 本文を桁BODYCOLS(64)まで空白で埋める ---
+        mov     al, BODYCOLS
         sub     al, [cs:status_col]
         jbe     .pad_done
         xor     ch, ch
@@ -1898,6 +1903,21 @@ draw_status:
         call    vram_put_ascii
         loop    .pad_loop
 .pad_done:
+
+        ; --- 桁64: 区切りの空白 ---
+        mov     al, ' '
+        call    vram_put_ascii
+
+        ; --- 桁65-79: 製品名ラベルを右詰めで表示(常にMSG_LABEL_LEN桁ぴったり) ---
+        mov     si, msg_label
+        mov     cx, MSG_LABEL_LEN
+.label_loop:
+        jcxz    .label_done
+        mov     al, [cs:si]
+        call    vram_put_ascii
+        inc     si
+        loop    .label_loop
+.label_done:
 
         ; --- 属性: 25行目全80桁を反転(0x05)にする ---
         mov     di, ATTR_BASE + STATUS_OFF
@@ -1972,6 +1992,7 @@ restore_status:
 ;--------------------------------------------------------------------
 msg_prefix_kana:        db      '[KANA] '
 msg_prefix_direct:      db      '[DIRECT] '
+msg_label:              db      'FEP by Tsukushi'       ; 桁65-79(MSG_LABEL_LEN=15桁)
 
 ;--------------------------------------------------------------------
 ; INT 18h ハンドラ
