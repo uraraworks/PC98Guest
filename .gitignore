@@ -7,3 +7,6 @@ __pycache__/
 
 # 上流辞書(SKK-JISYO.L)。GPL で再配布可だが 4.5MB あり再取得できるので置かない。
 tsukushi/dic/upstream/
+
+# macOS
+.DS_Store
