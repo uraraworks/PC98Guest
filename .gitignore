@@ -1,4 +1,9 @@
+# ビルド成果物とディスクイメージ
 out/
+
+# Python のバイトコードキャッシュ。
+# 故障注入から復旧してもテストが落ち続け、原因が古い .pyc だったことがある。
 __pycache__/
-__pycache__/
-dic/upstream/
+
+# 上流辞書(SKK-JISYO.L)。GPL で再配布可だが 4.5MB あり再取得できるので置かない。
+tsukushi/dic/upstream/
