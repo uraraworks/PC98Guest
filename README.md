@@ -56,8 +56,8 @@ guest/
 必要なもの: [nasm](https://www.nasm.us/)、Python 3、Node.js
 
 ```sh
-# つくし本体のアセンブル(リポジトリルートで実行すること)
-nasm -f bin tsukushi/TSUKUSHI.ASM -o tsukushi/TSUKUSHI.COM
+# つくし本体のアセンブル(リポジトリルートで実行すること。-I でインクルードパスを指定)
+nasm -I tsukushi/ -f bin tsukushi/TSUKUSHI.ASM -o tsukushi/TSUKUSHI.COM
 
 # 辞書の生成(SKK-JISYO.L が dic/upstream/ にある場合)
 python3 tsukushi/tools/mkdic2.py --out out/FEP.DIC

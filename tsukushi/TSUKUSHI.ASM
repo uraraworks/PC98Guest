@@ -1840,7 +1840,20 @@ newint18:
         cmp     al, 0x20
         je      .ah00_do_space
         cmp     al, 0x00
-        je      .ah00_direct_return     ; 文字コードを持たないキー(カーソル等)は殺さない
+        jne     .ah00_notcursor
+        ; --- 文字コードを持たないキー(カーソル等) ---
+        ; 変換中(cand_count>0)のときだけ↑/↓/Shift+XFERを候補選択に横取りする。
+        ; 変換中でなければ今までどおり素通し(DOS側のカーソル操作を壊さない)。
+        cmp     byte [cs:cand_count], 0
+        je      .ah00_direct_return
+        cmp     ah, 0x3A                ; ↑ = 前候補へ
+        je      .ah00_cand_prev
+        cmp     ah, 0x3D                ; ↓ = 次候補へ(Spaceと同じ)
+        je      .ah00_space_next
+        cmp     ah, 0xA5                ; Shift+XFER = 前候補へ
+        je      .ah00_cand_prev
+        jmp     .ah00_direct_return
+.ah00_notcursor:
 
         ; --- それ以外: ローマ字処理へ ---
         cmp     al, 'A'
@@ -1890,6 +1903,17 @@ newint18:
         jb      .ah00_space_set
         xor     al, al
 .ah00_space_set:
+        mov     [cs:cand_index], al
+        jmp     .ah00_redraw_continue
+
+.ah00_cand_prev:
+        ; 前候補へ(先頭で押したら末尾へ回る)。呼び出し元で cand_count>0 を保証済み。
+        mov     al, [cs:cand_index]
+        or      al, al
+        jnz     .ah00_cand_prev_dec
+        mov     al, [cs:cand_count]
+.ah00_cand_prev_dec:
+        dec     al
         mov     [cs:cand_index], al
         jmp     .ah00_redraw_continue
 
@@ -1996,7 +2020,7 @@ newint18:
 ; ハンドラ (find_exact/find_prefix) から参照されるため、常駐領域
 ; (install: より前) に置く必要がある。
 ;--------------------------------------------------------------------
-%include "tsukushi/ROMAJI.INC"
+%include "ROMAJI.INC"
 
 ;--------------------------------------------------------------------
 ; 常駐領域の終端 (常駐サイズはここまでで計算する)
