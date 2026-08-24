@@ -1,8 +1,8 @@
-; FEP18.COM - PC-98 / MS-DOS 用 常駐ローマ字かな変換 FEP (段階A: 辞書なし)
+; FEP18.COM - PC-98 / MS-DOS 用 常駐ローマ字かな漢字変換 FEP (段階B: 辞書あり)
 ;
 ; 目的:
 ;   INT 18h(キーボードBIOS) の AH=00h(キー入力待ち)/AH=01h(キーセンス) を
-;   フックし、ハンドラ内で完結するローマ字->ひらがな変換を行う。
+;   フックし、ハンドラ内で完結するローマ字->ひらがな->かな漢字変換を行う。
 ;
 ;   guest/docs/fep-measure-05-int18.md の実測により、FreeCOM(FreeDOS)も
 ;   COMMAND.COM(NEC MS-DOS)も最終的に INT 18h AH=00h でキーを読んでいる
@@ -14,6 +14,15 @@
 ;   lbuf/try_append(行バッファへの確定+エコー)は使わない。かなが確定したら
 ;   このハンドラの外(呼び出し元)へ返すための outq(確定済みバイトの待ち行列)
 ;   へ積む。
+;
+;   段階B = かな漢字変換を追加する。INT 18h ハンドラの中から辞書ファイルを
+;   開くことはできない(下記の絶対厳守事項)ため、辞書は**インストール時に
+;   丸ごとメモリへ読み込み**、そのセグメントを常駐データ dic_seg に保存する。
+;   ハンドラは ES=dic_seg にしてメモリ上の辞書を直接二分探索する
+;   (ファイルI/Oは一切しない)。候補バッファ・候補巡回・確定のロジックは
+;   FEP.ASM(INT 21h版 v1)の cand_*/confirm_candidate/dict_lookup を移植した
+;   ものだが、確定先が lbuf ではなく outq である点、辞書がファイルではなく
+;   常駐メモリである点が異なる。
 ;
 ;   *** 絶対厳守: INT 18h のハンドラの中から INT 21h を呼んではいけない ***
 ;   INT 18h は DOS の CON ドライバから呼ばれることがあるため、ハンドラは
@@ -44,6 +53,8 @@ ROMABUFSIZE     equ     8
 KANABUFSIZE     equ     64
 OUTQSIZE        equ     64
 STATUSCOLS      equ     80             ; ステータス行の埋め幅(桁=画面上のカラム数)
+CANDBUFSIZE     equ     128
+CANDMAX         equ     16
 
 ; --- キーボードBIOSの作業領域 (物理アドレス。セグメント0000h) ---
 ; CON ドライバは INT 18h AH=00h を呼ぶ前に 0x528(件数) を見て「入力が
@@ -102,6 +113,27 @@ scratchch:      db      0       ; kana_append_ascii が1バイトを指すため
 ; 「ん」「っ」の Shift_JIS バイト列 (テーブル検索を経ない特殊確定用)
 sound_n:        db      0x82, 0xF1      ; "ん"
 sound_sokuon:   db      0x82, 0xC1      ; "っ"
+
+; --- 段階B: 辞書(インストール時に丸ごとメモリへ読み込んだセグメント) ---
+; install: が AH=48h で確保し、辞書ファイルの中身をそのまま書き込む。
+; 0 のままなら辞書が無い(常駐しない=常駐後にここが0になることはない)。
+dic_seg:        dw      0
+
+; --- 段階B: 変換候補の状態 (FEP.ASM v1 の cand_* と同一の考え方) ---
+cand_count:     db      0       ; 0 = 変換していない
+cand_index:     db      0       ; 0起点
+cand_buf:       times   CANDBUFSIZE db 0
+cand_off:       times   CANDMAX dw 0    ; 各候補の cand_buf 内オフセット
+cand_len:       times   CANDMAX db 0    ; 各候補のバイト数
+
+; dict_lookup の作業用スクラッチ
+yomi_field:     times   16 db 0
+search_lo:      dw      0
+search_hi:      dw      0
+search_mid:     dw      0
+cand_read_i:    db      0
+cand_cur_len:   db      0
+cb_pos:         dw      0
 
 ; --- 確定済みバイトの待ち行列 (AH=00h/01h がここから返す) ---
 outq:           times   OUTQSIZE db 0
@@ -757,6 +789,282 @@ resolve_romaji:
         ret
 
 ;--------------------------------------------------------------------
+; 段階B: かな漢字変換 (FEP.ASM v1 の confirm_candidate/cancel_conversion/
+; dict_lookup を移植したもの。ただし:
+;   - 確定先は lbuf ではなく outq(kb_ring_push経由でキーボードBIOSへ)
+;   - 辞書はファイルではなく dic_seg の常駐メモリ(ファイルI/Oを一切しない)
+;--------------------------------------------------------------------
+
+; 現在の候補(cand_buf の cand_off[cand_index] から cand_len[cand_index]
+; バイト)を outq へそのまま積み、kanabuf/候補状態をリセットする。
+; (outq は幅情報を持たない生バイト列のキューなので sjis_width判定は不要。
+; FEP.ASM の confirm_candidate と違い try_append/lbuf は使わない)
+confirm_candidate:
+        push    ax
+        push    cx
+        push    si
+        push    di
+
+        mov     al, [cs:cand_index]
+        xor     ah, ah
+        mov     di, ax                  ; di = index (cand_len用)
+        mov     si, di
+        add     si, si                  ; si = index*2 (cand_off用)
+        mov     si, [cs:cand_off + si]
+        add     si, cand_buf            ; si -> 候補バイト列先頭
+        mov     cl, [cs:cand_len + di]
+        xor     ch, ch
+.loop:
+        jcxz    .done
+        mov     al, [cs:si]
+        call    outq_push
+        inc     si
+        loop    .loop
+.done:
+        mov     byte [cs:kanalen], 0
+        mov     byte [cs:kanacnt], 0
+        mov     byte [cs:cand_count], 0
+        mov     byte [cs:cand_index], 0
+
+        pop     di
+        pop     si
+        pop     cx
+        pop     ax
+        ret
+
+; 変換を取り消して kanabuf 編集状態に戻る(kanabuf 自体はそのまま残す)。
+cancel_conversion:
+        mov     byte [cs:cand_count], 0
+        mov     byte [cs:cand_index], 0
+        ret
+
+; AL = 0-255 の値を10進数で vram_put_ascii により書く(DIはVRAMカーソル、
+; 呼び出し側が維持する)。status_col の範囲を超える桁は書かずに捨てる。
+vram_put_decimal:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        xor     ah, ah
+        mov     bx, 10
+        xor     cx, cx
+.divloop:
+        xor     dx, dx
+        div     bx                      ; ax = ax/10, dx = 余り(1桁)
+        push    dx
+        inc     cx
+        or      ax, ax
+        jnz     .divloop
+.printloop:
+        jcxz    .pdone
+        pop     dx
+        cmp     byte [cs:status_col], STATUSCOLS
+        jae     .skip
+        mov     al, dl
+        add     al, '0'
+        call    vram_put_ascii
+        inc     byte [cs:status_col]
+.skip:
+        dec     cx
+        jmp     .printloop
+.pdone:
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        ret
+
+; kanabuf(kanalen バイト)をよみとして、常駐辞書(dic_seg)を直接二分探索する。
+; 見つかれば cand_count>0, cand_index=0 とし cand_buf/cand_off/cand_len を
+; 設定する。見つからない・よみが長すぎる・辞書が無い場合は cand_count=0の
+; まま(kanabuf は変えない)。ファイルI/Oは一切しない。
+dict_lookup:
+        push    ax
+        push    bx
+        push    cx
+        push    dx
+        push    si
+        push    di
+        push    bp
+        push    es
+
+        mov     byte [cs:cand_count], 0
+        mov     byte [cs:cand_index], 0
+
+        mov     al, [cs:kanalen]
+        cmp     al, 16
+        ja      .notfound
+
+        ; --- よみフィールド(16バイト、0埋め)を作る ---
+        mov     di, yomi_field
+        mov     cx, 16
+.zero_loop:
+        mov     byte [cs:di], 0
+        inc     di
+        loop    .zero_loop
+
+        mov     al, [cs:kanalen]
+        mov     cl, al
+        xor     ch, ch
+        mov     si, kanabuf
+        mov     di, yomi_field
+.copy_loop:
+        jcxz    .copy_done
+        mov     al, [cs:si]
+        mov     [cs:di], al
+        inc     si
+        inc     di
+        loop    .copy_loop
+.copy_done:
+
+        mov     ax, [cs:dic_seg]
+        or      ax, ax
+        jz      .notfound               ; 辞書未ロード(常駐時に失敗していれば起きない)
+        mov     es, ax
+
+        mov     ax, [es:8]              ; エントリ数 (ヘッダ +0008, u16)
+        or      ax, ax
+        jz      .notfound
+        dec     ax
+        mov     [cs:search_hi], ax
+        mov     word [cs:search_lo], 0
+        mov     bx, [es:10]             ; 索引開始オフセット (ヘッダ +000A, u16)
+
+.search_loop:
+        mov     ax, [cs:search_lo]
+        cmp     ax, [cs:search_hi]
+        jg      .notfound               ; lo > hi (signed) -> 見つからない
+
+        mov     ax, [cs:search_lo]
+        add     ax, [cs:search_hi]
+        shr     ax, 1
+        mov     [cs:search_mid], ax
+
+        mov     cx, 20
+        mul     cx                      ; dx:ax = mid*20
+        add     ax, bx
+        mov     di, ax                  ; es:di -> エントリ先頭(よみ16 + 候補off u32)
+
+        mov     si, yomi_field
+        mov     cx, 16
+.cmp16:
+        mov     al, [es:di]
+        cmp     al, [cs:si]
+        jne     .cmp16_diff
+        inc     di
+        inc     si
+        loop    .cmp16
+        jmp     .found                  ; 16バイト全一致 (di はエントリ+16=候補off位置)
+.cmp16_diff:
+        cmp     al, [cs:si]             ; al=辞書側バイト, [cs:si]=目的側バイト
+        jb      .go_upper               ; 辞書側が小さい -> 後半を探す
+        mov     ax, [cs:search_mid]
+        dec     ax
+        mov     [cs:search_hi], ax
+        jmp     .search_loop
+.go_upper:
+        mov     ax, [cs:search_mid]
+        inc     ax
+        mov     [cs:search_lo], ax
+        jmp     .search_loop
+
+.found:
+        mov     si, [es:di]             ; si = 候補ブロックの絶対オフセット(下位ワード。
+                                         ; 辞書は64KB未満前提なので上位ワードは見ない)
+
+        mov     al, [es:si]             ; 候補数
+        cmp     al, CANDMAX
+        jbe     .cc_ok
+        mov     al, CANDMAX
+.cc_ok:
+        mov     [cs:cand_count], al
+        mov     byte [cs:cand_index], 0
+        inc     si                      ; si -> 候補データ先頭 (es:si)
+
+        mov     word [cs:cb_pos], 0
+        mov     byte [cs:cand_read_i], 0
+
+.cand_loop:
+        mov     al, [cs:cand_read_i]
+        cmp     al, [cs:cand_count]
+        jae     .cand_done
+
+        mov     al, [es:si]             ; 候補のバイト長
+        inc     si
+        mov     [cs:cand_cur_len], al
+
+        mov     ax, [cs:cb_pos]
+        mov     bl, [cs:cand_cur_len]
+        xor     bh, bh
+        add     ax, bx
+        cmp     ax, CANDBUFSIZE
+        ja      .cand_overflow
+
+        mov     al, [cs:cand_read_i]
+        xor     ah, ah
+        mov     di, ax                  ; di = i (cand_len用インデックス)
+        mov     bp, di
+        add     bp, bp                  ; bp = i*2 (cand_off用インデックス)
+        mov     ax, [cs:cb_pos]
+        mov     [cs:cand_off + bp], ax
+        mov     al, [cs:cand_cur_len]
+        mov     [cs:cand_len + di], al
+
+        ; 候補本体を cand_buf + cb_pos へコピー (es:si -> cs:bx)
+        mov     bx, cand_buf
+        add     bx, [cs:cb_pos]
+        mov     cl, [cs:cand_cur_len]
+        xor     ch, ch
+.copy_cand:
+        jcxz    .copy_cand_done
+        mov     al, [es:si]
+        mov     [cs:bx], al
+        inc     si
+        inc     bx
+        loop    .copy_cand
+.copy_cand_done:
+
+        mov     al, [cs:cand_cur_len]
+        xor     ah, ah
+        add     [cs:cb_pos], ax
+
+        inc     byte [cs:cand_read_i]
+        jmp     .cand_loop
+
+.cand_overflow:
+        mov     al, [cs:cand_read_i]
+        mov     [cs:cand_count], al
+        cmp     byte [cs:cand_count], 0
+        je      .notfound
+        jmp     .cand_done
+
+.cand_done:
+        pop     es
+        pop     bp
+        pop     di
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        stc
+        ret
+
+.notfound:
+        mov     byte [cs:cand_count], 0
+        mov     byte [cs:cand_index], 0
+        pop     es
+        pop     bp
+        pop     di
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     ax
+        clc
+        ret
+
+;--------------------------------------------------------------------
 ; ステータス行描画 (テキストVRAM直書き。ノーマルモード640x400専用)
 ;--------------------------------------------------------------------
 
@@ -851,6 +1159,83 @@ draw_status:
         loop    .prefix_loop
 .prefix_done:
 
+        ; --- 変換中なら候補 + " (i/n)"、そうでなければ kanabuf を表示 ---
+        cmp     byte [cs:cand_count], 0
+        jne     .cand_display
+        jmp     .show_kanabuf
+
+.cand_display:
+        mov     al, [cs:cand_index]
+        xor     ah, ah
+        mov     bx, ax
+        mov     al, [cs:cand_len + bx]
+        mov     [cs:ka_wcount], al      ; 空きスクラッチを一時的に流用(候補バイト数)
+        add     bx, bx                  ; bx = index*2
+        mov     bx, [cs:cand_off + bx]
+        mov     si, cand_buf
+        add     si, bx                  ; si -> 候補バイト列先頭
+        mov     cl, [cs:ka_wcount]
+        xor     ch, ch
+.cand_loop2:
+        jcxz    .cand_loop2_done
+        mov     al, [cs:si]
+        call    sjis_width              ; al=1 or 2, CF=1なら幅2
+        jc      .cand_wide2
+        cmp     byte [cs:status_col], STATUSCOLS
+        jae     .cand_loop2_done
+        mov     al, [cs:si]
+        call    vram_put_ascii
+        inc     si
+        dec     cx
+        inc     byte [cs:status_col]
+        jmp     .cand_loop2
+.cand_wide2:
+        mov     al, [cs:status_col]
+        add     al, 2
+        cmp     al, STATUSCOLS
+        ja      .cand_loop2_done
+        mov     bl, [cs:si]
+        mov     bh, [cs:si+1]
+        call    vram_put_wide
+        add     si, 2
+        sub     cx, 2
+        add     byte [cs:status_col], 2
+        jmp     .cand_loop2
+.cand_loop2_done:
+
+        cmp     byte [cs:status_col], STATUSCOLS
+        jae     .content_done
+        mov     al, ' '
+        call    vram_put_ascii
+        inc     byte [cs:status_col]
+
+        cmp     byte [cs:status_col], STATUSCOLS
+        jae     .content_done
+        mov     al, '('
+        call    vram_put_ascii
+        inc     byte [cs:status_col]
+
+        mov     al, [cs:cand_index]
+        inc     al
+        call    vram_put_decimal
+
+        cmp     byte [cs:status_col], STATUSCOLS
+        jae     .content_done
+        mov     al, '/'
+        call    vram_put_ascii
+        inc     byte [cs:status_col]
+
+        mov     al, [cs:cand_count]
+        call    vram_put_decimal
+
+        cmp     byte [cs:status_col], STATUSCOLS
+        jae     .content_done
+        mov     al, ')'
+        call    vram_put_ascii
+        inc     byte [cs:status_col]
+        jmp     .content_done
+
+.show_kanabuf:
         ; --- kanabuf(幅混在。kanawidで1グリフずつ判定)
         ; si = kanabuf内ポインタ, bp = kanawid内ポインタ, cx = 残りグリフ数 ---
         mov     si, kanabuf
@@ -1000,6 +1385,8 @@ newint18:
         je      .ah00_do_bs
         cmp     al, 0x1B
         je      .ah00_do_esc
+        cmp     al, 0x20
+        je      .ah00_do_space
         cmp     al, 0x00
         je      .ah00_direct_return     ; 文字コードを持たないキー(カーソル等)は殺さない
 
@@ -1010,6 +1397,12 @@ newint18:
         ja      .ah00_rj_noconv
         add     al, 0x20                ; 大文字は小文字化する(FEP.ASMと同じ)
 .ah00_rj_noconv:
+        cmp     byte [cs:cand_count], 0
+        je      .ah00_rj_go
+        ; 変換中に別の文字が来た: まず現在の候補を確定してからローマ字処理へ回す
+        ; (FEP.ASMのnihon不具合と同種の取りこぼしを避けるため確定を先に行う)
+        call    confirm_candidate
+.ah00_rj_go:
         cmp     byte [cs:romalen], ROMABUFSIZE
         jae     .ah00_redraw_continue   ; 安全策: 溢れたら捨てる
         mov     bl, [cs:romalen]
@@ -1022,10 +1415,39 @@ newint18:
         jmp     .ah00_redraw_continue
 
 .ah00_toggle:
+        cmp     byte [cs:cand_count], 0
+        je      .ah00_toggle_simple
+        call    cancel_conversion       ; 変換中: 取り消してから切替(かなは残す)
+.ah00_toggle_simple:
         xor     byte [cs:mode], 1
         jmp     .ah00_redraw_continue
 
+.ah00_do_space:
+        cmp     byte [cs:cand_count], 0
+        jne     .ah00_space_next
+        ; 変換中でない: Spaceの前に未確定ローマ字を確定処理してから辞書引きする
+        ; (n/nnの取りこぼし対策。FEP.ASMで実績のある不具合と同じ理由)
+        call    finalize_romabuf
+        call    dict_lookup             ; 見つかれば cand_count>0, cand_index=0
+        jmp     .ah00_redraw_continue
+.ah00_space_next:
+        ; 変換中: 次候補へ(末尾まで行ったら先頭へ戻る)
+        mov     al, [cs:cand_index]
+        inc     al
+        cmp     al, [cs:cand_count]
+        jb      .ah00_space_set
+        xor     al, al
+.ah00_space_set:
+        mov     [cs:cand_index], al
+        jmp     .ah00_redraw_continue
+
 .ah00_do_cr:
+        cmp     byte [cs:cand_count], 0
+        je      .ah00_cr_not_converting
+        ; 変換中: 現在の候補を確定する
+        call    confirm_candidate
+        jmp     .ah00_redraw_continue
+.ah00_cr_not_converting:
         call    finalize_romabuf        ; romabuf残りをkanabufへ回収
         cmp     byte [cs:kanalen], 0
         jne     .ah00_cr_has_kana
@@ -1039,6 +1461,12 @@ newint18:
         jmp     .ah00_redraw_continue
 
 .ah00_do_bs:
+        cmp     byte [cs:cand_count], 0
+        je      .ah00_bs_edit
+        ; 変換中: 変換を取り消して kanabuf に戻る(かなは削らない)
+        call    cancel_conversion
+        jmp     .ah00_redraw_continue
+.ah00_bs_edit:
         cmp     byte [cs:romalen], 0
         je      .ah00_bs_kana
         dec     byte [cs:romalen]
@@ -1057,6 +1485,12 @@ newint18:
         jmp     .ah00_exit              ; ah/al は call far の結果のまま返す
 
 .ah00_do_esc:
+        cmp     byte [cs:cand_count], 0
+        je      .ah00_esc_not_converting
+        ; 変換中: 変換を取り消してかなに戻る(かなは残す)
+        call    cancel_conversion
+        jmp     .ah00_redraw_continue
+.ah00_esc_not_converting:
         mov     byte [cs:romalen], 0
         mov     byte [cs:kanalen], 0
         mov     byte [cs:kanacnt], 0
@@ -1136,6 +1570,97 @@ install:
         int     0x21
 
 .install_now:
+        ; --- 段階B: 辞書ファイルを丸ごとメモリへ読み込む ---
+        ; INT 18h ハンドラの中からは INT 21h を呼べない(絶対厳守事項)ため、
+        ; ファイルI/Oが自由にできるこのインストール時に一度だけ読み込み、
+        ; そのセグメントを常駐データ dic_seg に保存する。失敗したら
+        ; どの段階で失敗したかが分かるメッセージを出して常駐せずに終了する。
+
+        ; 辞書ファイル名を確定する ("X:\FEP.DIC" の X を現在のドライブへ)
+        mov     ah, 0x19                ; カレントドライブ取得 (0=A, 1=B, ...)
+        int     0x21
+        add     al, 'A'
+        mov     [install_dic_path], al
+
+        ; open (読み込み専用)
+        mov     dx, install_dic_path
+        mov     ax, 0x3D00
+        int     0x21
+        jc      .err_open
+        mov     [install_handle], ax
+
+        ; seek end でサイズを得る (DX:AX = 絶対オフセット)
+        mov     bx, [install_handle]
+        xor     cx, cx
+        xor     dx, dx
+        mov     ax, 0x4202              ; seek, SEEK_END, offset=0
+        int     0x21
+        jc      .err_seek
+        or      dx, dx
+        jnz     .err_toolarge           ; 64KB以上は今回は対象外
+        or      ax, ax
+        jz      .err_toolarge           ; 空ファイルも辞書として不正
+        mov     [install_size], ax
+
+        ; seek を先頭へ戻す
+        mov     bx, [install_handle]
+        xor     cx, cx
+        xor     dx, dx
+        mov     ax, 0x4200              ; seek, SEEK_SET
+        int     0x21
+        jc      .err_seek
+
+        ; 必要パラグラフ数 = ceil(size / 16) (32bit演算。sizeは64KB未満なので
+        ; size+15 が16bitに収まらない境界があり得るため dx:ax で計算する)
+        mov     ax, [install_size]
+        xor     dx, dx
+        add     ax, 15
+        adc     dx, 0
+        mov     cx, 16
+        div     cx                      ; dx:ax / 16 -> ax=パラグラフ数
+        mov     [install_paras], ax
+
+        ; メモリブロックを確保
+        mov     bx, ax
+        mov     ah, 0x48
+        int     0x21
+        jc      .err_alloc
+        mov     [dic_seg], ax
+
+        ; 確保したブロックへ全体を読み込む (DS:DX を一時的に張り替える)
+        mov     bx, [install_handle]
+        mov     cx, [install_size]
+        push    ds
+        mov     ax, [dic_seg]
+        mov     ds, ax
+        xor     dx, dx
+        mov     ah, 0x3F
+        int     0x21
+        pop     ds
+        jc      .err_read
+        cmp     ax, [install_size]
+        jne     .err_read
+
+        ; close
+        mov     bx, [install_handle]
+        mov     ah, 0x3E
+        int     0x21
+
+        ; マジック確認 ("FEPDIC01", 8バイト)
+        mov     ax, [dic_seg]
+        mov     es, ax
+        mov     si, install_dic_magic
+        xor     di, di
+        mov     cx, 8
+.magic_loop:
+        mov     al, [cs:si]
+        cmp     al, [es:di]
+        jne     .err_magic
+        inc     si
+        inc     di
+        loop    .magic_loop
+
+        ; --- 辞書ロード成功。INT 18h をフックして常駐する ---
         mov     ax, 0x3518              ; 元の INT 18h ベクタを取得
         int     0x21
         mov     [oldint18], bx
@@ -1153,5 +1678,49 @@ install:
         mov     ax, 0x3100              ; 常駐終了
         int     0x21
 
-msg_ok:         db      'FEP18 resident. Ctrl+XFER or Ctrl-K toggles kana.', 0x0D, 0x0A, '$'
+.err_open:
+        mov     dx, msg_err_open
+        jmp     .abort
+.err_seek:
+        mov     dx, msg_err_seek
+        jmp     .abort_close
+.err_toolarge:
+        mov     dx, msg_err_toolarge
+        jmp     .abort_close
+.err_alloc:
+        mov     dx, msg_err_alloc
+        jmp     .abort_close
+.err_read:
+        mov     dx, msg_err_read
+        jmp     .abort_close
+.err_magic:
+        mov     dx, msg_err_magic
+        jmp     .abort
+
+.abort_close:
+        push    dx
+        mov     bx, [install_handle]
+        mov     ah, 0x3E
+        int     0x21
+        pop     dx
+.abort:
+        mov     ah, 0x09
+        int     0x21
+        mov     ax, 0x4C01
+        int     0x21
+
+msg_ok:         db      'FEP18 resident (dictionary loaded). Ctrl+XFER or Ctrl-K toggles kana.', 0x0D, 0x0A, '$'
 msg_already:    db      'FEP18 already resident.', 0x0D, 0x0A, '$'
+msg_err_open:   db      'FEP18: dictionary open failed (FEP.DIC not found?).', 0x0D, 0x0A, '$'
+msg_err_seek:   db      'FEP18: dictionary seek failed.', 0x0D, 0x0A, '$'
+msg_err_toolarge: db    'FEP18: dictionary is empty or too large (must be <64KB).', 0x0D, 0x0A, '$'
+msg_err_alloc:  db      'FEP18: memory allocation for dictionary failed.', 0x0D, 0x0A, '$'
+msg_err_read:   db      'FEP18: dictionary read failed.', 0x0D, 0x0A, '$'
+msg_err_magic:  db      'FEP18: dictionary magic mismatch (not a FEPDIC01 file).', 0x0D, 0x0A, '$'
+
+; --- インストール時のみ使うデータ(常駐後は破棄される) ---
+install_dic_path:      db      'X:\FEP.DIC', 0 ; 先頭のXはインストール時に実ドライブへ書き換える
+install_dic_magic:     db      'FEPDIC01'
+install_handle:        dw      0
+install_size:           dw      0
+install_paras:          dw      0
