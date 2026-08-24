@@ -72,6 +72,21 @@ node common/build-disk.mjs
 
 各 probe(`probes/*.ASM`)も同様に `nasm -f bin` で個別にアセンブルできます。
 
+## リリース物の作り方
+
+配布用の FD イメージ(`.xdf`)と zip をまとめて作るには次を実行します
+(SKK-JISYO.L が `tsukushi/dic/upstream/` にある場合):
+
+```sh
+python3 common/make_release.py --version 0.1.0
+```
+
+`out/release/` に `tsukushi-v<version>.xdf` と `tsukushi-v<version>.zip` が
+生成されます。`TSUKUSHI.COM`・`TSUKUSHI.DIC` は既存の成果物を使い回さず、
+毎回ソース(`TSUKUSHI.ASM`・`mkdic2.py`)から作り直します。収録するのは
+本体・辞書・`READ.ME`・`LICENSE.TXT`・`GPL2.TXT` の5ファイルのみで、
+probes は含みません。
+
 ## 受け取りポリシー
 
 既存の FEP や市販ソフトを逆アセンブルした結果・内部仕様の提供は

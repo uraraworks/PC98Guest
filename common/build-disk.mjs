@@ -40,14 +40,52 @@ const DATA_START = ROOT_START + ROOT_SECTORS;
 // 普通に読める正しい形で張る。
 const FRAGMENT_GAP_CLUSTERS = 1;
 
+// --release: 配布用FDイメージを組み立てるモード(common/make_release.py から
+// 呼ばれる)。測定用(既定)の挙動には一切手を入れない。
 let fragmentCount = 1;
+let releaseMode = false;
+let releaseCom = null;
+let releaseDic = null;
+let releaseReadme = null;
+let releaseLicense = null;
+let releaseGpl2 = null;
+let releaseOut = null;
 for (let i = 0; i < process.argv.length; i++) {
-  if (process.argv[i] === '--fragment') {
+  const arg = process.argv[i];
+  if (arg === '--fragment') {
     fragmentCount = parseInt(process.argv[i + 1], 10);
     if (!Number.isInteger(fragmentCount) || fragmentCount < 1) {
       console.error('--fragment には1以上の整数を指定してください');
       process.exit(1);
     }
+  } else if (arg === '--release') {
+    releaseMode = true;
+  } else if (arg === '--com') {
+    releaseCom = process.argv[i + 1];
+  } else if (arg === '--dic') {
+    releaseDic = process.argv[i + 1];
+  } else if (arg === '--readme') {
+    releaseReadme = process.argv[i + 1];
+  } else if (arg === '--license') {
+    releaseLicense = process.argv[i + 1];
+  } else if (arg === '--gpl2') {
+    releaseGpl2 = process.argv[i + 1];
+  } else if (arg === '--out') {
+    releaseOut = process.argv[i + 1];
+  }
+}
+
+if (releaseMode) {
+  const missing = [];
+  if (!releaseCom) missing.push('--com');
+  if (!releaseDic) missing.push('--dic');
+  if (!releaseReadme) missing.push('--readme');
+  if (!releaseLicense) missing.push('--license');
+  if (!releaseGpl2) missing.push('--gpl2');
+  if (!releaseOut) missing.push('--out');
+  if (missing.length > 0) {
+    console.error(`--release には ${missing.join(', ')} の指定が必要です`);
+    process.exit(1);
   }
 }
 
@@ -57,7 +95,7 @@ const image = Buffer.alloc(TOTAL_SECTORS * BYTES_PER_SECTOR, 0);
 image[0] = 0xeb; // jmp short +0x3c
 image[1] = 0x3c;
 image[2] = 0x90; // nop
-image.write('ESCT1   ', 3, 8, 'ascii');
+image.write(releaseMode ? 'TSUKUSHI' : 'ESCT1   ', 3, 8, 'ascii');
 image.writeUInt16LE(BYTES_PER_SECTOR, 11);
 image[13] = SECTORS_PER_CLUSTER;
 image.writeUInt16LE(RESERVED_SECTORS, 14);
@@ -89,7 +127,14 @@ setFatEntry(1, 0xfff);
 
 // --- ファイル配置 ---
 // 測定用プログラム一式。FreeDOS(98) 側での確認にも使うので つくし本体と辞書も入れる。
-const files = [
+// --release モードでは配布用の5ファイルだけを収録する(probesは入れない)。
+const files = releaseMode ? [
+  { name: 'TSUKUSHI', ext: 'COM', path: releaseCom },
+  { name: 'TSUKUSHI', ext: 'DIC', path: releaseDic },
+  { name: 'READ    ', ext: 'ME ', path: releaseReadme },
+  { name: 'LICENSE ', ext: 'TXT', path: releaseLicense },
+  { name: 'GPL2    ', ext: 'TXT', path: releaseGpl2 },
+] : [
   { name: 'ESCT1   ', ext: 'COM', path: join(PROBES, 'ESCT1.COM') },
   { name: 'ESCT2   ', ext: 'COM', path: join(PROBES, 'ESCT2.COM') },
   { name: 'FEP     ', ext: 'COM', path: join(PROBES, 'FEP.COM') },
@@ -221,7 +266,7 @@ for (let i = 0; i < FAT_COUNT; i++) {
 }
 root.copy(image, ROOT_START * BYTES_PER_SECTOR);
 
-mkdirSync(OUT_DIR, { recursive: true });
-const outPath = join(OUT_DIR, 'esctest.xdf');
+const outPath = releaseMode ? releaseOut : join(OUT_DIR, 'esctest.xdf');
+mkdirSync(dirname(outPath), { recursive: true });
 writeFileSync(outPath, image);
 console.log(`wrote ${outPath} (${image.length} bytes)`);
