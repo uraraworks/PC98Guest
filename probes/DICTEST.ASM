@@ -1,4 +1,4 @@
-; DICTEST.COM - FEP.DIC 辞書ファイルの単体検索テスト (常駐しない普通の .COM)
+; DICTEST.COM - TSUKUSHI.DIC 辞書ファイルの単体検索テスト (常駐しない普通の .COM)
 ;
 ; 使い方: DICTEST <ローマ字>
 ;   例)  DICTEST nihon
@@ -10,7 +10,7 @@
 ;       FEP.ASM の resolve_romaji 一式の構造をそのまま流用している。
 ;       FEP.ASM 自体は変更しない)
 ;   3. 変換したよみを "[yomi] " に続けて表示する
-;   4. カレントディレクトリの FEP.DIC を開き、二分探索でよみを引く
+;   4. カレントディレクトリの TSUKUSHI.DIC を開き、二分探索でよみを引く
 ;   5. 見つかれば "1:候補 2:候補" のように番号付きで表示、
 ;      見つからなければ "not found" と表示する
 ;
@@ -108,7 +108,7 @@ start:
         call    print_bytes
         call    print_crlf
 
-        ; ---- 4. FEP.DIC を開く ----
+        ; ---- 4. TSUKUSHI.DIC を開く ----
         mov     dx, dic_filename
         mov     ax, 0x3D00              ; open, read-only
         int     0x21
@@ -791,7 +791,7 @@ ya_scratch:     db      0
 sound_n:        db      0x82, 0xF1      ; "ん"
 sound_sokuon:   db      0x82, 0xC1      ; "っ"
 
-dic_filename:   db      'FEP.DIC', 0
+dic_filename:   db      'TSUKUSHI.DIC', 0
 dic_handle:     dw      0
 dic_magic:      db      'FEPDIC01'
 dic_count:      dw      0
@@ -811,10 +811,10 @@ cand_len:       db      0
 cand_text_buf:  times   CANDTEXTBUFSIZE db 0
 
 msg_usage:      db      'usage: DICTEST <romaji>', CR, LF, '$'
-msg_open_err:   db      'FEP.DIC: open error', CR, LF, '$'
-msg_header_err: db      'FEP.DIC: header read error', CR, LF, '$'
-msg_magic_err:  db      'FEP.DIC: bad magic (format error)', CR, LF, '$'
-msg_io_err:     db      'FEP.DIC: read/seek error', CR, LF, '$'
+msg_open_err:   db      'TSUKUSHI.DIC: open error', CR, LF, '$'
+msg_header_err: db      'TSUKUSHI.DIC: header read error', CR, LF, '$'
+msg_magic_err:  db      'TSUKUSHI.DIC: bad magic (format error)', CR, LF, '$'
+msg_io_err:     db      'TSUKUSHI.DIC: read/seek error', CR, LF, '$'
 msg_notfound:   db      'not found', CR, LF, '$'
 
 msg_yomi_prefix:

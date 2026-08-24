@@ -94,7 +94,7 @@ cand_off:       times   CANDMAX dw 0    ; 各候補の cand_buf 内オフセッ�
 cand_len:       times   CANDMAX db 0    ; 各候補のバイト数
 
 ; --- v1: 辞書 ---
-dic_path:       db      'X:\FEP.DIC', 0 ; 先頭の 'X' はインストール時に実ドライブへ書き換える
+dic_path:       db      'X:\TSUKUSHI.DIC', 0 ; 先頭の 'X' はインストール時に実ドライブへ書き換える
 dic_handle:     dw      0
 dic_magic:      db      'FEPDIC01'
 dic_count:      dw      0
@@ -846,7 +846,7 @@ cancel_conversion:
 ; ただしハンドラ内なので int 21h は使わず pushf+call far [cs:oldint21]、
 ; ES 依存の文字列命令(movsb/cmpsb)は使わず CS: 明示のバイトループにする)
 ;
-; kanabuf(kanalen バイト)をよみとして FEP.DIC を引く。
+; kanabuf(kanalen バイト)をよみとして TSUKUSHI.DIC を引く。
 ; 見つかれば CF=1 で cand_count/cand_index/cand_buf/cand_off/cand_len を
 ; 設定する(cand_index=0)。見つからない・開けない・壊れている場合は
 ; CF=0 で cand_count=0 のまま(=変換を開始しない)。
@@ -885,7 +885,7 @@ dict_lookup:
         loop    .copy_loop
 .copy_done:
 
-        ; --- FEP.DIC を開く ---
+        ; --- TSUKUSHI.DIC を開く ---
         mov     dx, dic_path
         mov     ax, 0x3D00              ; open, read-only
         pushf
@@ -1607,7 +1607,7 @@ install:
         int     0x21
 
 .install_now:
-        ; 辞書ファイル名を確定する ("X:\FEP.DIC" の X を現在のドライブへ)
+        ; 辞書ファイル名を確定する ("X:\TSUKUSHI.DIC" の X を現在のドライブへ)
         mov     ah, 0x19                ; カレントドライブ取得 (0=A, 1=B, ...)
         int     0x21
         add     al, 'A'

@@ -26,7 +26,7 @@
 ;   変換のたびに必要なセクタだけ INT 1Bh で読む。辞書サイズの上限は
 ;   事実上なくなり、常駐に載せる必要も無い。
 ;
-;   辞書の位置解決(FEP.DIC がディスクのどこにあるか)は DICLOC.ASM で
+;   辞書の位置解決(TSUKUSHI.DIC がディスクのどこにあるか)は DICLOC.ASM で
 ;   確立した手順(BPB・FAT・ルートディレクトリを読んでFAT12クラスタ
 ;   チェーンを辿る)と同じ考え方をインストール時に行う(DICLOC.ASM
 ;   自体は変更しない。同じ手順を本ファイル内に書く)。断片化した辞書
@@ -130,7 +130,7 @@ scratchch:      db      0       ; kana_append_ascii が1バイトを指すため
 sound_n:        db      0x82, 0xF1      ; "ん"
 sound_sokuon:   db      0x82, 0xC1      ; "っ"
 
-; --- 段階C: 辞書はディスク上(FEP.DIC)に置いたまま。常駐データには
+; --- 段階C: 辞書はディスク上(TSUKUSHI.DIC)に置いたまま。常駐データには
 ; ディスク上の位置・BPB情報・1〜2セクタ分の読み込みバッファだけを持つ。
 ; インストール時に DICLOC.ASM と同じ手順で解決する(下記 install: 参照。
 ; DICLOC.ASM 自体は変更しない)。
@@ -869,7 +869,7 @@ resolve_romaji:
 ; 段階C: かな漢字変換 (FEP.ASM v1 の confirm_candidate/cancel_conversion/
 ; dict_lookup を移植したもの。ただし:
 ;   - 確定先は lbuf ではなく outq(kb_ring_push経由でキーボードBIOSへ)
-;   - 辞書はディスク上(FEP.DIC, v2/FEPDIC02形式)にあり、INT 1Bh で
+;   - 辞書はディスク上(TSUKUSHI.DIC, v2/FEPDIC02形式)にあり、INT 1Bh で
 ;     必要なセクタだけをそのつど読む(常駐メモリには載せない)
 ;--------------------------------------------------------------------
 
@@ -1406,7 +1406,7 @@ load_candidates_from_dic:
 .cand_done:
         ret
 
-; kanabuf(kanalen バイト)をよみとして、ディスク上の辞書(FEP.DIC, v2形式)を
+; kanabuf(kanalen バイト)をよみとして、ディスク上の辞書(TSUKUSHI.DIC, v2形式)を
 ; 「疎索引を二分探索 -> ブロック内を最大SPARSE件だけ線形走査」で引く
 ; (手順は tools/dic2_ref.py の docstring と同一)。
 ; 見つかれば cand_count>0, cand_index=0 とし cand_buf/cand_off/cand_len を
@@ -2202,7 +2202,7 @@ install:
         int     0x21
 
 .install_now:
-        ; --- 段階D: FEP.DIC のディスク上の位置を解決し、FDとHDDの両方に
+        ; --- 段階D: TSUKUSHI.DIC のディスク上の位置を解決し、FDとHDDの両方に
         ; 対応する。BPB→FAT→ルートディレクトリでファイルの論理位置を
         ; 求める手順自体はFAT12/FAT16で共通(DICLOC.ASMで確立した考え方)。
         ; そのあと「その論理位置を実際にどう読むか」を5通り(FD/HDD SASI
@@ -2364,7 +2364,7 @@ install:
         mov     word [install_fat_term], 0xFFF8
 .fat_type_done:
 
-        ; ---- 5) ルートディレクトリを1セクタずつ読みながら "FEP     DIC"
+        ; ---- 5) ルートディレクトリを1セクタずつ読みながら "TSUKUSHIDIC"
         ; を探す(ルートエントリが多いHDDでも1バッファに収めなくて済む
         ; ようにする。ディレクトリエントリ32バイトはBPBのbpsが32の倍数
         ; である限りセクタをまたがない) ----
@@ -2887,15 +2887,15 @@ msg_ok_suffix:          db ').', 0x0D, 0x0A
                         db 'Ctrl+XFER or Ctrl-K toggles kana, Space converts, Enter commits.', 0x0D, 0x0A, '$'
 msg_already:            db 'Tsukushi FEP already resident.', 0x0D, 0x0A, '$'
 msg_err_boot_read:      db 'TSUKUSHI: boot sector read failed (int25h).', 0x0D, 0x0A, '$'
-msg_err_overflow:       db 'TSUKUSHI: value overflow while resolving FEP.DIC location.', 0x0D, 0x0A, '$'
+msg_err_overflow:       db 'TSUKUSHI: value overflow while resolving TSUKUSHI.DIC location.', 0x0D, 0x0A, '$'
 msg_err_fat_read:       db 'TSUKUSHI: FAT read failed (int25h).', 0x0D, 0x0A, '$'
 msg_err_root_read:      db 'TSUKUSHI: root directory read failed (int25h).', 0x0D, 0x0A, '$'
-msg_err_not_found:      db 'TSUKUSHI: FEP.DIC not found in root directory.', 0x0D, 0x0A, '$'
+msg_err_not_found:      db 'TSUKUSHI: TSUKUSHI.DIC not found in root directory.', 0x0D, 0x0A, '$'
 msg_err_chain_runaway:  db 'TSUKUSHI: FAT chain too long (possible loop).', 0x0D, 0x0A, '$'
-msg_err_fragmented:     db 'TSUKUSHI: FEP.DIC is fragmented (not defragmented). Defragment the disk and try again.', 0x0D, 0x0A, '$'
+msg_err_fragmented:     db 'TSUKUSHI: TSUKUSHI.DIC is fragmented (not defragmented). Defragment the disk and try again.', 0x0D, 0x0A, '$'
 msg_err_header_read:    db 'TSUKUSHI: dictionary header read failed (int1Bh).', 0x0D, 0x0A, '$'
 msg_err_too_many_blocks: db 'TSUKUSHI: dictionary sparse index has too many blocks (>65535).', 0x0D, 0x0A, '$'
-msg_err_all_candidates_failed: db 'TSUKUSHI: FEP.DIC not readable (tried FD and HDD/SASI ua=00-03).', 0x0D, 0x0A, '$'
+msg_err_all_candidates_failed: db 'TSUKUSHI: TSUKUSHI.DIC not readable (tried FD and HDD/SASI ua=00-03).', 0x0D, 0x0A, '$'
 
 ; --- インストール時のみ使うデータ(常駐後は破棄される) ---
 INSTALL_CHAIN_SAFETY   equ     8192    ; FATチェーンの暴走(循環等)検出用の上限反復回数
@@ -2956,7 +2956,7 @@ install_win_target:           dw 0
 install_win_need2:             db 0
 
 install_dic_magic:      db      'FEPDIC02'
-install_target_name:    db      'FEP     DIC'   ; 8.3の生の形(11バイト、スペース埋め)
+install_target_name:    db      'TSUKUSHIDIC'   ; 8.3の生の形(11バイト、TSUKUSHIが8文字なのでスペース埋め不要)
 
 ;--------------------------------------------------------------------
 ; ファイル像の末尾 (インストールコード・メッセージ・上のデータ・下記の

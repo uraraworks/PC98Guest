@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """SKK-JISYO 形式(または dic/base.txt 形式)を読み、
-FEPL.DIC(v2, 疎索引形式のかな漢字変換辞書)を生成する。
+TSUKUSHI.DIC(v2, 疎索引形式のかな漢字変換辞書)を生成する。
 
 v1(tools/mkdic.py, FEPDIC01)は索引が「よみ16B固定長+オフセット4B」の
 固定長索引で、SKK-JISYO.L 全体だと索引だけで数MBになってしまう。
 v2 では索引にオフセットだけを持たせ(疎索引)、実際のよみはデータ部から
 読んで比較する。
 
-出力(既定 out/FEPL.DIC, リトルエンディアン, すべて Shift_JIS(CP932)):
+出力(既定 out/TSUKUSHI.DIC, リトルエンディアン, すべて Shift_JIS(CP932)):
   +0000  8 bytes  マジック "FEPDIC02"
   +0008  u32      エントリ総数
   +000C  u32      疎索引のレコード数
@@ -58,7 +58,7 @@ HERE = Path(__file__).resolve().parent
 FEP_DIR = HERE.parent           # tsukushi/
 REPO_ROOT = FEP_DIR.parent       # リポジトリルート
 DEFAULT_SRC = FEP_DIR / 'dic' / 'upstream' / 'SKK-JISYO.L'
-DEFAULT_OUT = REPO_ROOT / 'out' / 'FEPL.DIC'
+DEFAULT_OUT = REPO_ROOT / 'out' / 'TSUKUSHI.DIC'
 
 MAGIC = b'FEPDIC02'
 HEADER_LEN = 0x20
@@ -264,7 +264,7 @@ def build(src_path: Path, out_path: Path, max_yomi_kana, max_cands, sparse: int)
 
 
 def main():
-    ap = argparse.ArgumentParser(description='SKK-JISYO 形式から FEPL.DIC(v2)を生成する')
+    ap = argparse.ArgumentParser(description='SKK-JISYO 形式から TSUKUSHI.DIC(v2)を生成する')
     ap.add_argument('--src', type=Path, default=DEFAULT_SRC)
     ap.add_argument('--out', type=Path, default=DEFAULT_OUT)
     ap.add_argument('--max-yomi-kana', type=int, default=None,

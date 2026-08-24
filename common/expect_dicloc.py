@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 FEP_DIR = HERE.parent
 IMAGE = FEP_DIR / 'out' / 'esctest.xdf'
 
-TARGET_NAME = b'FEP     DIC'  # 8.3の生の形(11バイト、スペース埋め)
+TARGET_NAME = b'TSUKUSHIDIC'  # 8.3の生の形(11バイト、TSUKUSHIが8文字なのでスペース埋め不要)
 
 
 def sector(data: bytes, bps: int, lba: int, count: int) -> bytes:
@@ -61,7 +61,7 @@ def main():
             return raw & 0x0FFF
         return raw >> 4
 
-    # --- ルートディレクトリ全体から "FEP     DIC" を探す ---
+    # --- ルートディレクトリ全体から "TSUKUSHIDIC" を探す ---
     root = sector(data, bps, root_start, root_sects)
     file_clus = None
     file_size = None
@@ -77,7 +77,7 @@ def main():
             break
 
     if file_clus is None:
-        print('error: FEP.DIC not found in root directory', file=sys.stderr)
+        print('error: TSUKUSHI.DIC not found in root directory', file=sys.stderr)
         return 1
 
     print(f'[file] clus={file_clus} size={file_size}')

@@ -79,7 +79,7 @@ const files = [
   // DICTEST.COM は v1辞書(FEPDIC01)専用。TSUKUSHIは v2(FEPDIC02, ディスク版)を
   // 使うようになったため、DICTEST.COM 自体はリポジトリに残すがイメージには
   // 収録しない(source of confusion を避けるため)。
-  { name: 'FEP     ', ext: 'DIC', path: join(OUT_DIR, 'FEP.DIC') },
+  { name: 'TSUKUSHI', ext: 'DIC', path: join(OUT_DIR, 'TSUKUSHI.DIC') },
   { name: 'AHSPY   ', ext: 'COM', path: join(PROBES, 'AHSPY.COM') },
   { name: 'INTEST  ', ext: 'COM', path: join(PROBES, 'INTEST.COM') },
   { name: 'K18SPY  ', ext: 'COM', path: join(PROBES, 'K18SPY.COM') },

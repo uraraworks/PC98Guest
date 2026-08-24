@@ -60,7 +60,7 @@ guest/
 nasm -I tsukushi/ -f bin tsukushi/TSUKUSHI.ASM -o tsukushi/TSUKUSHI.COM
 
 # 辞書の生成(SKK-JISYO.L が dic/upstream/ にある場合)
-python3 tsukushi/tools/mkdic2.py --out out/FEP.DIC
+python3 tsukushi/tools/mkdic2.py --out out/TSUKUSHI.DIC
 
 # probes を含む測定用FDイメージの組み立て
 node common/build-disk.mjs
@@ -82,6 +82,6 @@ node common/build-disk.mjs
 つくし本体・probes・ビルドスクリプト等、このリポジトリのコードは
 [MIT License](LICENSE) です。
 
-辞書データ(`out/FEP.DIC` 等の生成物)は SKK-JISYO.L の派生物であり、
+辞書データ(`out/TSUKUSHI.DIC` 等の生成物)は SKK-JISYO.L の派生物であり、
 **GPL v2 以降**が適用されます。詳細は
 [`tsukushi/dic/README.md`](tsukushi/dic/README.md) を参照してください。

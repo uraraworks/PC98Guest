@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""dic/base.txt を読み、FEP.DIC(かな漢字変換 辞書ファイル)を生成する。
+"""dic/base.txt を読み、TSUKUSHI.DIC(かな漢字変換 辞書ファイル)を生成する。
 
 入力形式(dic/base.txt, UTF-8): 1行 = "よみ /候補/候補/.../"
   - よみと候補列の間は半角スペース1つ
   - 候補列は先頭と末尾がスラッシュで、間をスラッシュ区切り
 
-出力(out/FEP.DIC, リトルエンディアン, すべて Shift_JIS(CP932)):
+出力(out/TSUKUSHI.DIC, リトルエンディアン, すべて Shift_JIS(CP932)):
   +0000  8 bytes  マジック "FEPDIC01"
   +0008  u16      エントリ数
   +000A  u16      索引の開始オフセット (= 16)
@@ -31,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 FEP_DIR = HERE.parent           # tsukushi/
 REPO_ROOT = FEP_DIR.parent       # リポジトリルート
 SRC_TXT = FEP_DIR / 'dic' / 'base.txt'
-OUT_DIC = REPO_ROOT / 'out' / 'FEP.DIC'
+OUT_DIC = REPO_ROOT / 'out' / 'TSUKUSHI.DIC'
 
 MAGIC = b'FEPDIC01'
 YOMI_FIELD_LEN = 16

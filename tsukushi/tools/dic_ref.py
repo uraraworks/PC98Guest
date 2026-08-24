@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FEP.DIC を二分探索で引く Python 参照実装。
+"""TSUKUSHI.DIC を二分探索で引く Python 参照実装。
 
 ASM(DICTEST.ASM)側の二分探索はこれと同じ結果になるように書く。
 ファイル形式は tools/mkdic.py のモジュールdocstringを参照。
@@ -86,7 +86,7 @@ def load(path) -> Dic:
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
-        sys.exit(f'usage: {sys.argv[0]} <FEP.DIC> <yomi>')
+        sys.exit(f'usage: {sys.argv[0]} <TSUKUSHI.DIC> <yomi>')
     dic = load(sys.argv[1])
     result = dic.lookup(sys.argv[2])
     if result is None:

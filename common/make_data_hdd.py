@@ -48,7 +48,7 @@ WebNP2がIndexedDBへ永続化しレンダラが数十秒固まるため、測�
   物理セクタ2〜(パーティション開始前)は実イメージにならい0xE5埋め。
 
 出力: out/datahdd.thd
-収録: out/FEP.DIC, probes/*.COM, tsukushi/TSUKUSHI.COM (すべてルート直下、
+収録: out/TSUKUSHI.DIC, probes/*.COM, tsukushi/TSUKUSHI.COM (すべてルート直下、
       クラスタ連続配置)
 
 実装は WebPaint98/tools/extract_hdd.py (読み取り参照実装) と
@@ -84,7 +84,7 @@ PROBES = REPO_ROOT / 'probes'
 TSUKUSHI = REPO_ROOT / 'tsukushi'
 OUT_DIR = REPO_ROOT / 'out'
 OUT_THD = OUT_DIR / 'datahdd.thd'
-FEP_DIC = OUT_DIR / 'FEP.DIC'
+FEP_DIC = OUT_DIR / 'TSUKUSHI.DIC'
 
 THD_HEADER = 0x100
 HEADS = 8
@@ -226,7 +226,7 @@ def build():
     if not FEP_DIC.exists():
         sys.exit(
             f'収録対象が見つからない: {FEP_DIC}\n'
-            '先に python3 tsukushi/tools/mkdic2.py --out out/FEP.DIC を実行すること'
+            '先に python3 tsukushi/tools/mkdic2.py --out out/TSUKUSHI.DIC を実行すること'
         )
 
     files = [FEP_DIC]

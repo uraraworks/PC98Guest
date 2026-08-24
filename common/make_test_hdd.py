@@ -33,7 +33,7 @@ ROOT_FILES = [
     TSUKUSHI / 'TSUKUSHI.COM',
     # DICTEST.COM は v1辞書(FEPDIC01)専用。TSUKUSHIは v2(FEPDIC02, ディスク版)を
     # 使うため、DICTEST.COM自体はリポジトリに残すがイメージには収録しない。
-    OUT_DIR / 'FEP.DIC',   # ビルド成果物ではなく辞書データだが、収録手順は同じ
+    OUT_DIR / 'TSUKUSHI.DIC',   # ビルド成果物ではなく辞書データだが、収録手順は同じ
     PROBES / 'AHSPY.COM',
     PROBES / 'INTEST.COM',
     PROBES / 'K18SPY.COM',

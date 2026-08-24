@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FEPL.DIC(v2, 疎索引形式)を「疎索引を二分探索→ブロック内線形走査」で
+"""TSUKUSHI.DIC(v2, 疎索引形式)を「疎索引を二分探索→ブロック内線形走査」で
 引く Python 参照実装。
 
 ASM 側の検索は、これと同じ手順で書く:
@@ -151,7 +151,7 @@ def load(path) -> Dic2:
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
-        sys.exit(f'usage: {sys.argv[0]} <FEPL.DIC> <yomi>')
+        sys.exit(f'usage: {sys.argv[0]} <TSUKUSHI.DIC> <yomi>')
     dic = load(sys.argv[1])
     result = dic.lookup(sys.argv[2])
     if result is None:

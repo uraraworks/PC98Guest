@@ -41,7 +41,7 @@ FreeDOS(98) 用の常駐かな漢字変換 FEP(フロントエンドプロセッ
   モードへ戻ると書き戻して元の画面(ファンクションキー表示等)に戻す。
 - **辞書はディスクから必要なセクタだけを INT 1Bh(ディスクBIOS生セクタ
   読み込み)で読む**。インストール時に BPB・FAT・ルートディレクトリを
-  読んで `FEP.DIC` の位置を解決し(DICLOC.ASM で確立した手順と同じ考え方)、
+  読んで `TSUKUSHI.DIC` の位置を解決し(DICLOC.ASM で確立した手順と同じ考え方)、
   常駐後は変換のたびに該当セクタだけを読む。これにより辞書サイズの上限が
   事実上なくなり、常駐メモリに辞書を載せる必要が無い。
 - **辞書は FD 上にも HDD 上にも置ける**。インストール時に「FD(現行の
@@ -61,10 +61,10 @@ FreeDOS(98) 用の常駐かな漢字変換 FEP(フロントエンドプロセッ
 
 ```sh
 # SKK-JISYO.L を dic/upstream/ に置いたうえで(リポジトリには含めない)
-python3 tools/mkdic2.py --out ../out/FEP.DIC
+python3 tools/mkdic2.py --out ../out/TSUKUSHI.DIC
 ```
 
-生成される `FEP.DIC` のライセンスについては
+生成される `TSUKUSHI.DIC` のライセンスについては
 [`dic/README.md`](dic/README.md) を参照してください
 (つくし本体とは別に **GPL v2 以降** が適用されます)。
 

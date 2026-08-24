@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""FEPL.DIC(v2) 生成物のテスト。
+"""TSUKUSHI.DIC(v2) 生成物のテスト。
 
 dic/base.txt から v2 を作って:
   - 全エントリが引けること(順序も一致)
@@ -61,7 +61,7 @@ def load_expected_base():
 def test_base():
     print('== dic/base.txt 由来のテスト ==')
     run_mkdic2(BASE_TXT, OUT_BASE2)
-    check(OUT_BASE2.exists(), 'FEPL.DIC(base) が生成されなかった')
+    check(OUT_BASE2.exists(), 'TSUKUSHI.DIC(base) が生成されなかった')
 
     dic = dic2_ref.load(OUT_BASE2)
     expected = load_expected_base()
@@ -171,7 +171,7 @@ def test_upstream():
 
     print('== dic/upstream/SKK-JISYO.L 由来のテスト ==')
     run_mkdic2(UPSTREAM_L, OUT_L2)
-    check(OUT_L2.exists(), 'FEPL.DIC(L) が生成されなかった')
+    check(OUT_L2.exists(), 'TSUKUSHI.DIC(L) が生成されなかった')
 
     dic = dic2_ref.load(OUT_L2)
     entries = load_skk_nasi_entries()

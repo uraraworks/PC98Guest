@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""FEP.DIC 生成物のテスト。
+"""TSUKUSHI.DIC 生成物のテスト。
 
-- dic/base.txt の全エントリが、生成した FEP.DIC を dic_ref.py で引くと
+- dic/base.txt の全エントリが、生成した TSUKUSHI.DIC を dic_ref.py で引くと
   元の候補リストが順序どおり返ること
 - 存在しないよみを引くと None(見つからない)が返ること
 - 索引が本当に昇順になっていること
@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 FEP_DIR = HERE.parent           # tsukushi/
 REPO_ROOT = FEP_DIR.parent       # リポジトリルート
 SRC_TXT = FEP_DIR / 'dic' / 'base.txt'
-OUT_DIC = REPO_ROOT / 'out' / 'FEP.DIC'
+OUT_DIC = REPO_ROOT / 'out' / 'TSUKUSHI.DIC'
 
 sys.path.insert(0, str(HERE))
 import dic_ref  # noqa: E402
@@ -51,7 +51,7 @@ def load_expected():
 def main():
     # 1. 生成
     subprocess.run([sys.executable, str(HERE / 'mkdic.py')], check=True)
-    check(OUT_DIC.exists(), 'FEP.DIC が生成されなかった')
+    check(OUT_DIC.exists(), 'TSUKUSHI.DIC が生成されなかった')
 
     dic = dic_ref.load(OUT_DIC)
     expected = load_expected()

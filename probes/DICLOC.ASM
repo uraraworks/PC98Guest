@@ -1,4 +1,4 @@
-; DICLOC.COM - FEP.DIC がディスクのどこにあるか(開始LBA・セクタ数)を解決して表示する
+; DICLOC.COM - TSUKUSHI.DIC がディスクのどこにあるか(開始LBA・セクタ数)を解決して表示する
 ;
 ; 目的:
 ;   辞書をディスクから直接読む方式(常駐後にセクタ単位で読む)への第一歩。
@@ -20,7 +20,7 @@
 ;   3) BPBから bps/spc/rsvd/nfat/rootent/totsec/spf/spt/heads を読む。
 ;   4) fat_start・root_start・root_sects・data_start を計算する。
 ;   5) FAT全体・ルートディレクトリ全体をINT 25hで読み、
-;      "FEP     DIC"(8.3の生の形、スペース埋め)を探す。
+;      "TSUKUSHIDIC"(8.3の生の形)を探す。
 ;   6) 見つかった開始クラスタからFAT12チェーンを辿り、クラスタ数と
 ;      「連続しているか(次クラスタ=現クラスタ+1か)」を求める。
 ;   7) 開始LBA = data_start + (開始クラスタ-2) * spc を求めて表示する。
@@ -160,7 +160,7 @@ start:
         popf
         jc      err_root_read
 
-        ; ---- 5c) "FEP     DIC" を探す ----
+        ; ---- 5c) "TSUKUSHIDIC" を探す ----
         mov     ax, [rootent]
         mov     [entries_left], ax
         mov     si, root_buf
@@ -623,7 +623,7 @@ dd_qhi:         dw      0
 
 dec32_buf:      times 11 db 0
 
-target_name:    db      'FEP     DIC'   ; 8.3の生の形(11バイト、スペース埋め)
+target_name:    db      'TSUKUSHIDIC'   ; 8.3の生の形(11バイト、TSUKUSHIが8文字なのでスペース埋め不要)
 
 msg_bpb_bps:            db      '[bpb] bps=$'
 msg_bpb_spc:            db      ' spc=$'
@@ -658,7 +658,7 @@ msg_err_fat_too_big:    db      'error: FAT does not fit in buffer', 0x0D, 0x0A,
 msg_err_fat_read:       db      'error: FAT read failed (int25h status=$'
 msg_err_root_too_big:   db      'error: root directory does not fit in buffer', 0x0D, 0x0A, '$'
 msg_err_root_read:      db      'error: root directory read failed (int25h status=$'
-msg_err_not_found:      db      'error: FEP.DIC not found in root directory', 0x0D, 0x0A, '$'
+msg_err_not_found:      db      'error: TSUKUSHI.DIC not found in root directory', 0x0D, 0x0A, '$'
 msg_err_chain_runaway:  db      'error: FAT chain too long (possible loop)', 0x0D, 0x0A, '$'
 msg_err_overflow:       db      'error: value overflow in calculation', 0x0D, 0x0A, '$'
 
