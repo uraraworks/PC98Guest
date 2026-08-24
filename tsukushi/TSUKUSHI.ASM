@@ -115,6 +115,10 @@ oldint18:       dd      0
 
 mode:           db      0       ; 0=直接入力, 1=かな入力
 
+; カタカナ変換(F7でカタカナ、F6でひらがなに戻す)。kanabuf 自体は書き換えず、
+; 表示・確定の直前だけ変換する(打ち足し・BS では維持する)。
+kata_flag:      db      0       ; 0=ひらがな表示, 1=カタカナ表示
+
 romabuf:        times   ROMABUFSIZE db 0
 romalen:        db      0
 
@@ -278,25 +282,61 @@ outq_pop:
         pop     bx
         ret
 
-; kanabuf(kanalen バイト)をそのまま先頭から outq へ積み、kanabuf を空にする。
+; kanabuf(kanalen バイト)を先頭から outq へ積み、kanabuf を空にする。
+; kata_flag=1 のときは kanawid で幅2(ひらがな候補)のグリフだけ
+; kata_convert してから積む(kanabuf 自体は書き換えない)。
 push_kanabuf_to_outq:
         push    ax
+        push    bx
         push    cx
         push    si
+        push    di
+        cmp     byte [cs:kata_flag], 0
+        jne     .kata
         mov     cl, [cs:kanalen]
         xor     ch, ch
         mov     si, kanabuf
 .loop:
-        jcxz    .done
+        jcxz    .after
         mov     al, [cs:si]
         call    outq_push
         inc     si
         loop    .loop
-.done:
+        jmp     .after
+.kata:
+        mov     si, kanabuf
+        mov     di, kanawid
+        xor     ch, ch
+        mov     cl, [cs:kanacnt]
+.kloop:
+        jcxz    .after
+        mov     al, [cs:di]
+        cmp     al, 2
+        je      .kwide
+        mov     al, [cs:si]
+        call    outq_push
+        inc     si
+        jmp     .knext
+.kwide:
+        mov     bl, [cs:si]
+        mov     bh, [cs:si+1]
+        call    kata_convert
+        mov     al, bl
+        call    outq_push
+        mov     al, bh
+        call    outq_push
+        add     si, 2
+.knext:
+        inc     di
+        loop    .kloop
+.after:
         mov     byte [cs:kanalen], 0
         mov     byte [cs:kanacnt], 0
+        mov     byte [cs:kata_flag], 0
+        pop     di
         pop     si
         pop     cx
+        pop     bx
         pop     ax
         ret
 
@@ -407,6 +447,36 @@ sjis_width:
 .w1:
         mov     al, 1
         clc
+        ret
+
+;--------------------------------------------------------------------
+; ひらがな -> カタカナ (Shift_JIS、実測で確認済み。詳細は README 参照)
+; IN: BL=SJIS上位バイト(b1), BH=SJIS下位バイト(b2)
+; OUT: BL/BH = カタカナのSJIS(範囲外ならそのまま変更しない)
+; 破壊: なし(AX,DXは呼び出し内で退避)
+;   0x829F(ぁ) <= v <= 0x82DD(む) : v += 0xA1
+;   0x82DE(め) <= v <= 0x82F1(ん) : v += 0xA2  (0x7Fの欠番を飛び越すため)
+;   それ以外                      : 変換しない
+;--------------------------------------------------------------------
+kata_convert:
+        push    ax
+        mov     ah, bl                  ; ax = (b1<<8)|b2
+        mov     al, bh
+        cmp     ax, 0x829F
+        jb      .no
+        cmp     ax, 0x82DD
+        ja      .chk2
+        add     ax, 0xA1
+        jmp     .store
+.chk2:
+        cmp     ax, 0x82F1
+        ja      .no
+        add     ax, 0xA2
+.store:
+        mov     bl, ah
+        mov     bh, al
+.no:
+        pop     ax
         ret
 
 ;--------------------------------------------------------------------
@@ -916,6 +986,7 @@ confirm_candidate:
         mov     byte [cs:kanacnt], 0
         mov     byte [cs:cand_count], 0
         mov     byte [cs:cand_index], 0
+        mov     byte [cs:kata_flag], 0
 
         pop     di
         pop     si
@@ -1868,6 +1939,10 @@ draw_status:
         ja      .kb_done                ; 超えるなら1文字手前で打ち切り、残りは空白パッドに任せる
         mov     bl, [cs:si]             ; bl = SJIS上位バイト(b1)
         mov     bh, [cs:si+1]           ; bh = SJIS下位バイト(b2)
+        cmp     byte [cs:kata_flag], 0
+        je      .kb_wide_noconv
+        call    kata_convert            ; kanabuf自体は変えず、表示だけカタカナ化
+.kb_wide_noconv:
         call    vram_put_wide
         add     si, 2
         add     byte [cs:status_col], 2
@@ -2062,6 +2137,12 @@ newint18:
         cmp     al, 0x00
         jne     .ah00_notcursor
         ; --- 文字コードを持たないキー(カーソル等) ---
+        ; F6/F7(カタカナ変換の切替)は変換中かどうかに関わらず判定する。
+        ; F8(半角カタカナ)/F9/F10 は今回未対応。今までどおり素通しする。
+        cmp     ah, 0x68                ; F7 = カタカナ化
+        je      .ah00_f7
+        cmp     ah, 0x67                ; F6 = ひらがなに戻す
+        je      .ah00_f6
         ; 変換中(cand_count>0)のときだけ↑/↓/Shift+XFERを候補選択に横取りする。
         ; 変換中でなければ今までどおり素通し(DOS側のカーソル操作を壊さない)。
         cmp     byte [cs:cand_count], 0
@@ -2112,6 +2193,7 @@ newint18:
         jmp     .ah00_after_status
 .ah00_toggle_to_direct:
         ; かな->直接: 退避しておいた内容を書き戻し、以後は描かない
+        mov     byte [cs:kata_flag], 0
         call    restore_status
         jmp     .ah00_after_status
 
@@ -2120,6 +2202,8 @@ newint18:
         jne     .ah00_space_next
         ; 変換中でない: Spaceの前に未確定ローマ字を確定処理してから辞書引きする
         ; (n/nnの取りこぼし対策。FEP.ASMで実績のある不具合と同じ理由)
+        ; カタカナ表示中だった場合は通常の変換に戻す(kata_flag=0)。
+        mov     byte [cs:kata_flag], 0
         call    finalize_romabuf
         call    dict_lookup             ; 見つかれば cand_count>0, cand_index=0
         jmp     .ah00_redraw_continue
@@ -2132,6 +2216,23 @@ newint18:
         xor     al, al
 .ah00_space_set:
         mov     [cs:cand_index], al
+        jmp     .ah00_redraw_continue
+
+.ah00_f7:
+        ; F7: kanabufが空なら何もせず素通し。変換中なら取り消してから
+        ; kata_flag=1(カタカナ表示)にする。かなの中身自体は変えない。
+        cmp     byte [cs:kanalen], 0
+        je      .ah00_direct_return
+        cmp     byte [cs:cand_count], 0
+        je      .ah00_f7_setflag
+        call    cancel_conversion
+.ah00_f7_setflag:
+        mov     byte [cs:kata_flag], 1
+        jmp     .ah00_redraw_continue
+
+.ah00_f6:
+        ; F6: ひらがな表示に戻す。かなモードなら常に有効。
+        mov     byte [cs:kata_flag], 0
         jmp     .ah00_redraw_continue
 
 .ah00_cand_prev:
@@ -2198,6 +2299,7 @@ newint18:
         mov     byte [cs:romalen], 0
         mov     byte [cs:kanalen], 0
         mov     byte [cs:kanacnt], 0
+        mov     byte [cs:kata_flag], 0
         jmp     .ah00_redraw_continue
 
 .ah00_direct_return:
