@@ -188,6 +188,38 @@
 #define BOXCH_V       0x96  /* vertical line   */
 #define BOXCH_LT      0x93  /* left T (mid separator, left end)  */
 #define BOXCH_RT      0x92  /* right T (mid separator, right end) */
+#define BOXCH_TJ      0x91  /* top border / inner vertical-divider junction
+                                (row 0); see docs/filer-measure-03.md */
+#define BOXCH_HJ      0x90  /* horizontal line / inner vertical-divider
+                                junction (row 2); see docs/filer-measure-03.md */
+
+/* ---- header row 1 (disk totals) vertical dividers -----------------------
+ * Row 1 (合計/使用/空き - total/used/free) gets two 0x96 dividers (see
+ * docs/filer-measure-03.md); row 0's border and row 2's separator must
+ * place a junction char (0x91 / 0x90) directly above/below each divider.
+ * The first two fields are padded to a fixed cell width so the divider
+ * columns are the same every frame, independent of how many digits the
+ * current disk's byte counts have - DISK_FIELD_WIDTH (25) covers the
+ * widest possible field: a 6-cell label + format_u32()'s widest output
+ * ("4,294,967,295", 13 cells) + a 6-cell " bytes"/"バイト" suffix, in
+ * either language (measured with check.py's cell_width()). The third
+ * (free) field is left unpadded - box_row()'s own BOX_WIDTH truncation
+ * covers it. */
+#define DISK_FIELD_WIDTH 25
+#define DISK_SEP_COL1     (1 + DISK_FIELD_WIDTH)
+#define DISK_SEP_COL2     (1 + DISK_FIELD_WIDTH + 1 + DISK_FIELD_WIDTH)
+
+/* ---- header row 0 (title) right-hand clock field -------------------------
+ * "YY-MM-DD HH:MM:SS", 17 cells, shown at the right end of the title row.
+ * TITLE_DATETIME_GAP is the blank cell between the title's trailing
+ * dash-fill and the clock field; TITLE_DECOR_WIDTH is the "--" + " " +
+ * " " decoration around the title text (see draw_title_row()). check.py
+ * derives MSG_TITLE's cell-width limit from these plus BOX_WIDTH instead
+ * of hardcoding it, so changing any of them changes the enforced limit
+ * too. */
+#define DATETIME_WIDTH      17
+#define TITLE_DATETIME_GAP  1
+#define TITLE_DECOR_WIDTH   4
 
 /* ---- language / message table ----------------------------------------
  * All on-screen text is collected here and looked up by index; no
@@ -237,7 +269,7 @@
 #define MSG_MOVE_DONE_SUF       36
 
 const char *g_msgJA[] = {
-  "PC98Guest ファイラ - ディレクトリビューア（マイルストーン2・開発中）",
+  "PC98Guest ファイラ - ディレクトリビューア",
   "パス=",
   "　（※上限",
   "件を超えたため一覧を打ち切りました ※）",
@@ -277,7 +309,7 @@ const char *g_msgJA[] = {
 };
 
 const char *g_msgEN[] = {
-  "PC98Guest Filer - directory viewer (milestone 2, work in progress)",
+  "PC98Guest Filer - directory viewer",
   "Path=",
   "   (** over ",
   " entries, list truncated **)",
@@ -369,6 +401,9 @@ int msg_selftest(void)
  * 4/5 - the function keys are an additional entry point, not a
  * replacement. */
 #define FKEY_COUNT       10
+
+#define IDLE_POLL_SPIN  3000  /* busy-wait between dos_kbhit() polls in
+                                 main()'s idle loop - see its comment */
 #define FKEY_FIELD_WIDTH 6
 
 int g_fkeyCol[] = { 4, 11, 18, 25, 32, 42, 49, 56, 63, 70 };
@@ -637,6 +672,46 @@ unsigned int dos_diskfree(unsigned int drive, unsigned int *availClus,
       "pop ax");
 }
 
+/* INT 21h AH=2Ah (get date): CX=year, DH=month, DL=day (AL=day-of-week,
+   unused here). *year/*month/*day are filled from those; see
+   format_datetime() below, which is the only caller. */
+void dos_getdate(unsigned int *year, unsigned int *month, unsigned int *day)
+{
+  asm("mov ah, 0x2a\n"
+      "int 0x21\n"
+      "mov si, [bp+4]\n"
+      "mov [si], cx\n"
+      "mov si, [bp+6]\n"
+      "mov al, dh\n"
+      "mov ah, 0\n"
+      "mov [si], ax\n"
+      "mov si, [bp+8]\n"
+      "mov al, dl\n"
+      "mov ah, 0\n"
+      "mov [si], ax");
+}
+
+/* INT 21h AH=2Ch (get time): CH=hour, CL=minute, DH=second (DL=1/100s,
+   unused here). *hour/*minute/*second are filled from those; see
+   format_datetime() below, which is the only caller. */
+void dos_gettime(unsigned int *hour, unsigned int *minute, unsigned int *second)
+{
+  asm("mov ah, 0x2c\n"
+      "int 0x21\n"
+      "mov si, [bp+4]\n"
+      "mov al, ch\n"
+      "mov ah, 0\n"
+      "mov [si], ax\n"
+      "mov si, [bp+6]\n"
+      "mov al, cl\n"
+      "mov ah, 0\n"
+      "mov [si], ax\n"
+      "mov si, [bp+8]\n"
+      "mov al, dh\n"
+      "mov ah, 0\n"
+      "mov [si], ax");
+}
+
 /* write len bytes starting at buf to stdout (handle 1) via INT 21h AH=40h.
    Used instead of stdio so screen writes are explicit, single-shot DOS
    calls rather than a line-buffered stream that never sees a newline. */
@@ -805,6 +880,42 @@ void format_time(unsigned int t, char *out)
   out[5] = 0;
 }
 
+/* current wall-clock date/time as "YY-MM-DD HH:MM:SS" (DATETIME_WIDTH ==
+   17 cells, all ASCII, plus the NUL - out[] must be at least 18 bytes).
+   Unlike format_date()/format_time() above (which decode a DOS
+   directory-entry's packed date/time), this reads the live clock via
+   INT 21h AH=2Ah/2Ch on every call, so re-calling it each frame is what
+   makes the on-screen clock advance. */
+void format_datetime(char *out)
+{
+  unsigned int year, month, day;
+  unsigned int hour, minute, second;
+  unsigned int yy;
+
+  dos_getdate(&year, &month, &day);
+  dos_gettime(&hour, &minute, &second);
+  yy = year % 100;
+
+  out[0] = (char)('0' + yy / 10);
+  out[1] = (char)('0' + yy % 10);
+  out[2] = '-';
+  out[3] = (char)('0' + month / 10);
+  out[4] = (char)('0' + month % 10);
+  out[5] = '-';
+  out[6] = (char)('0' + day / 10);
+  out[7] = (char)('0' + day % 10);
+  out[8] = ' ';
+  out[9] = (char)('0' + hour / 10);
+  out[10] = (char)('0' + hour % 10);
+  out[11] = ':';
+  out[12] = (char)('0' + minute / 10);
+  out[13] = (char)('0' + minute % 10);
+  out[14] = ':';
+  out[15] = (char)('0' + second / 10);
+  out[16] = (char)('0' + second % 10);
+  out[17] = 0;
+}
+
 /* attribute string "R H S A", '_' where the bit is not set */
 void format_attr(unsigned char attr, char *out)
 {
@@ -948,6 +1059,25 @@ void sappend_uint(char *dst, int *lenp, unsigned int v, int cap)
   }
   dst[lp] = 0;
   *lenp = lp;
+}
+
+/* like sappend(), but pads the appended text with plain ASCII spaces (one
+   sappend() call per space, so 'cap' is still respected the same way) up
+   to 'width' screen cells - used by draw_disk_line() to give its
+   total/used fields a fixed on-screen width so the vertical dividers
+   between them land on the same column every frame. If s is already
+   'width' cells or wider, no padding is added (draw_disk_line() sizes
+   DISK_FIELD_WIDTH to the true worst case, so this should not happen in
+   practice, but it is not treated as an error - the field is simply left
+   unpadded rather than truncated). */
+void sappend_padded(char *dst, int *lenp, char *s, int width, int cap)
+{
+  int w;
+  int i;
+
+  w = text_width(s);
+  sappend(dst, lenp, s, cap);
+  for (i = w; i < width; i++) sappend(dst, lenp, " ", cap);
 }
 
 /* ---- text VRAM (direct screen writes; milestone 5) --------------------
@@ -1244,19 +1374,25 @@ void draw_title_row(void)
   int titleCells;
   int used;
   int fillCells;
-  int fillPairs;
   int i;
   int col;
+  char datetime[DATETIME_WIDTH + 1];
 
   vram_ank(ROW_TITLE, 0, BOXCH_TL, ATTR_BASE);
   vram_ank(ROW_TITLE, 1 + BOX_WIDTH, BOXCH_TR, ATTR_BASE);
 
   title = MSG(MSG_TITLE);
   titleCells = text_width(title);
-  used = 2 + 1 + titleCells + 1; /* "--" + " " + title + " " */
-  fillCells = BOX_WIDTH - used;
+  /* "--" + " " + title + " " on the left, then dash-fill, then a gap and
+     the clock field on the right - see the DATETIME_WIDTH/
+     TITLE_DATETIME_GAP/TITLE_DECOR_WIDTH comment above. fillCells fills
+     every cell between the two (not just half of it - the trailing dash
+     run reaches all the way to where the gap+clock field begins), so the
+     row always ends exactly at the right border regardless of title
+     length. */
+  used = TITLE_DECOR_WIDTH + titleCells;
+  fillCells = BOX_WIDTH - used - TITLE_DATETIME_GAP - DATETIME_WIDTH;
   if (fillCells < 0) fillCells = 0; /* defensive: title too wide to fit */
-  fillPairs = fillCells / 2;
 
   col = 1;
   vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE); col++;
@@ -1265,8 +1401,20 @@ void draw_title_row(void)
   vram_puts_cells(ROW_TITLE, col, title, ATTR_BASE, titleCells);
   col += titleCells;
   vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++;
-  for (i = 0; i < fillPairs; i++) { vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE); col++; }
-  if ((fillCells % 2) == 1) { vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++; }
+  for (i = 0; i < fillCells; i++) { vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE); col++; }
+  for (i = 0; i < TITLE_DATETIME_GAP; i++) { vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++; }
+
+  format_datetime(datetime);
+  for (i = 0; i < DATETIME_WIDTH; i++) {
+    vram_ank(ROW_TITLE, col, (unsigned char)datetime[i], ATTR_BASE); col++;
+  }
+
+  /* row-0 junctions above the disk-line's two vertical dividers (row 1) -
+     written last so they land on top of whatever the dash-fill loop put
+     there; DISK_SEP_COL1/2 are always inside the dash-fill run because
+     check.py caps the title well short of reaching them. */
+  vram_ank(ROW_TITLE, DISK_SEP_COL1, BOXCH_TJ, ATTR_BASE);
+  vram_ank(ROW_TITLE, DISK_SEP_COL2, BOXCH_TJ, ATTR_BASE);
 }
 
 /* immediate one-off write, used only for the pre/post-frame terminal mode
@@ -2259,8 +2407,10 @@ void draw_disk_line(void)
   char totalBuf[16];
   char usedBuf[16];
   char freeBuf[16];
+  char field[40];
   char row[128];
   int p;
+  int fp;
 
   drive = dos_getdrive();
   secPerClus = dos_diskfree(drive + 1, &availClus, &bytesPerSec, &totalClus);
@@ -2269,7 +2419,7 @@ void draw_disk_line(void)
   if (secPerClus == 0xFFFF) {
     sappend(row, &p, MSG(MSG_DISK_UNAVAIL), sizeof(row));
     box_row(ROW_DISK, BOXCH_V, BOXCH_V, row);
-    return;
+    return; /* no fields, so no dividers either - row stays plain text */
   }
 
   cLo = umul32(secPerClus, bytesPerSec, &cHi);            /* bytes/cluster */
@@ -2281,19 +2431,37 @@ void draw_disk_line(void)
   format_u32(usedHi, usedLo, usedBuf);
   format_u32(freeHi, freeLo, freeBuf);
 
-  sappend(row, &p, MSG(MSG_DISK_TOTAL), sizeof(row));
-  sappend(row, &p, totalBuf, sizeof(row));
-  sappend(row, &p, MSG(MSG_BYTES_SUFFIX), sizeof(row));
-  sappend(row, &p, " ", sizeof(row));
-  sappend(row, &p, MSG(MSG_DISK_USED), sizeof(row));
-  sappend(row, &p, usedBuf, sizeof(row));
-  sappend(row, &p, MSG(MSG_BYTES_SUFFIX), sizeof(row));
-  sappend(row, &p, " ", sizeof(row));
-  sappend(row, &p, MSG(MSG_DISK_FREE), sizeof(row));
-  sappend(row, &p, freeBuf, sizeof(row));
-  sappend(row, &p, MSG(MSG_BYTES_SUFFIX), sizeof(row));
+  /* total and used are padded to DISK_FIELD_WIDTH so the divider after
+     each one lands at DISK_SEP_COL1/DISK_SEP_COL2 every frame (see the
+     comment on those #defines); free is left as-is. */
+  fp = 0;
+  sappend(field, &fp, MSG(MSG_DISK_TOTAL), sizeof(field));
+  sappend(field, &fp, totalBuf, sizeof(field));
+  sappend(field, &fp, MSG(MSG_BYTES_SUFFIX), sizeof(field));
+  sappend_padded(row, &p, field, DISK_FIELD_WIDTH, sizeof(row));
+  sappend(row, &p, " ", sizeof(row)); /* divider cell; overwritten below */
+
+  fp = 0;
+  sappend(field, &fp, MSG(MSG_DISK_USED), sizeof(field));
+  sappend(field, &fp, usedBuf, sizeof(field));
+  sappend(field, &fp, MSG(MSG_BYTES_SUFFIX), sizeof(field));
+  sappend_padded(row, &p, field, DISK_FIELD_WIDTH, sizeof(row));
+  sappend(row, &p, " ", sizeof(row)); /* divider cell; overwritten below */
+
+  fp = 0;
+  sappend(field, &fp, MSG(MSG_DISK_FREE), sizeof(field));
+  sappend(field, &fp, freeBuf, sizeof(field));
+  sappend(field, &fp, MSG(MSG_BYTES_SUFFIX), sizeof(field));
+  sappend(row, &p, field, sizeof(row));
 
   box_row(ROW_DISK, BOXCH_V, BOXCH_V, row);
+
+  /* 0x96 is itself in the SJIS-lead-byte range, so it cannot be embedded
+     in 'row' and handed to vram_puts_cells() (see the file-header VRAM
+     comment) - it is written directly afterwards instead, same as the
+     BOXCH_* corner/border chars elsewhere in this file. */
+  vram_ank(ROW_DISK, DISK_SEP_COL1, BOXCH_V, ATTR_BASE);
+  vram_ank(ROW_DISK, DISK_SEP_COL2, BOXCH_V, ATTR_BASE);
 }
 
 /* builds the current-path line (header box row ROW_PATH) into a plain
@@ -2399,6 +2567,8 @@ void draw_cmdline(void)
   int pad;
   int c;
   char *label;
+  unsigned char ch;
+  unsigned int attr;
 
   for (col = 0; col < VRAM_COLS; col++) {
     vram_ank(ROW_CMD, col, ' ', ATTR_BASE);
@@ -2410,9 +2580,19 @@ void draw_cmdline(void)
     if (len == 0) continue; /* reserved (not implemented yet): leave blank */
     pad = (FKEY_FIELD_WIDTH - len) / 2;
     if (pad < 0) pad = 0;
-    for (c = 0; c < len && (pad + c) < FKEY_FIELD_WIDTH; c++) {
-      vram_ank(ROW_CMD, g_fkeyCol[i] + pad + c, (unsigned char)label[c],
-                (c == g_fkeyHiPos[i]) ? ATTR_FKEY_KEY : ATTR_FKEY_LABEL);
+    /* the whole FKEY_FIELD_WIDTH-cell field is reversed, including the
+       blank padding cells around the label - measured against real
+       hardware as 6 reversed cells per field, not just the label's own
+       characters (see docs/filer-measure-05.md). */
+    for (c = 0; c < FKEY_FIELD_WIDTH; c++) {
+      if (c >= pad && c < pad + len) {
+        ch = (unsigned char)label[c - pad];
+        attr = ((c - pad) == g_fkeyHiPos[i]) ? ATTR_FKEY_KEY : ATTR_FKEY_LABEL;
+      } else {
+        ch = ' ';
+        attr = ATTR_FKEY_LABEL;
+      }
+      vram_ank(ROW_CMD, g_fkeyCol[i] + c, ch, attr);
     }
   }
 }
@@ -2444,6 +2624,9 @@ void draw_screen_frame(void)
   draw_disk_line();
 
   box_dash_row(ROW_SEP1, BOXCH_LT, BOXCH_RT);
+  vram_ank(ROW_SEP1, DISK_SEP_COL1, BOXCH_HJ, ATTR_BASE); /* under the
+     disk-line dividers - see DISK_SEP_COL1/2's comment above */
+  vram_ank(ROW_SEP1, DISK_SEP_COL2, BOXCH_HJ, ATTR_BASE);
 
   draw_path_line();
 
@@ -2559,6 +2742,21 @@ int main(int argc, char *argv[])
 
   running = 1;
   while (running) {
+    /* dos_getch() (AH=08h) blocks until a key is pressed, which would
+       freeze the row-0 clock while idle. Poll dos_kbhit() (AH=0Bh)
+       instead and redraw the title row (the only thing that changes
+       while idle) between polls; vram_set_cell()'s change-only writes
+       mean a redraw that finds nothing changed touches no hardware at
+       all. IDLE_POLL_SPIN is a plain busy-wait between AH=0Bh calls -
+       real-mode DOS has no blocking "wait for key or N ticks" primitive
+       this program already used elsewhere, and a fixed spin count is
+       enough to keep this from calling INT 21h flat out while still
+       updating the clock well within a second; see the #define. */
+    while (!dos_kbhit()) {
+      int spin;
+      draw_title_row();
+      for (spin = 0; spin < IDLE_POLL_SPIN; spin++) { }
+    }
     key = dos_getch();
     if (key == KEY_UP || key == KEY_CTRL_E) {
       move_cursor(DIR_UP);

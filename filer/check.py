@@ -79,7 +79,7 @@ import os
 #   "dialog"   -> checked against DIALOG_WIDTH
 #   "fragment" -> not length-checked (see module docstring); listed only
 MSG_LIMITS = {
-    "MSG_TITLE":                ("box",      0),
+    "MSG_TITLE":                ("box_title", 0),
     "MSG_PATH_PREFIX":          ("fragment", 1),
     "MSG_TRUNC_PREFIX":         ("fragment", 2),
     "MSG_TRUNC_SUFFIX":         ("fragment", 3),
@@ -198,6 +198,17 @@ def main():
     box_width = extract_define_int(text, "BOX_WIDTH")
     cmdline_width = extract_define_int(text, "CMDLINE_WIDTH")
     dialog_width = extract_define_int(text, "DIALOG_WIDTH")
+    # MSG_TITLE (row 0) shares its row with a right-hand clock field
+    # ("YY-MM-DD HH:MM:SS", see draw_title_row() in FILER.C), so its real
+    # on-screen budget is BOX_WIDTH minus that field, its gap, and the
+    # title's own "--"/" "/" " decoration - all read out of FILER.C's
+    # #defines, never hardcoded here, so this tracks draw_title_row()'s
+    # own arithmetic (used = TITLE_DECOR_WIDTH + titleCells; fillCells =
+    # BOX_WIDTH - used - TITLE_DATETIME_GAP - DATETIME_WIDTH) automatically.
+    datetime_width = extract_define_int(text, "DATETIME_WIDTH")
+    title_datetime_gap = extract_define_int(text, "TITLE_DATETIME_GAP")
+    title_decor_width = extract_define_int(text, "TITLE_DECOR_WIDTH")
+    title_width = box_width - datetime_width - title_datetime_gap - title_decor_width
     ja = extract_array(text, "g_msgJA")
     en = extract_array(text, "g_msgEN")
 
@@ -218,7 +229,14 @@ def main():
     # ---- check 5: every message fits the cell limit its use site implies --
     limits = {
         "box": box_width,
+        "box_title": title_width,
         "dialog": dialog_width,
+    }
+    limit_names = {
+        "box": "BOX_WIDTH",
+        "box_title": "the title's clock-adjusted width (BOX_WIDTH - "
+                      "DATETIME_WIDTH - TITLE_DATETIME_GAP - TITLE_DECOR_WIDTH)",
+        "dialog": "DIALOG_WIDTH",
     }
     n = len(ja)
     known_indices = set(idx for (_kind, idx) in MSG_LIMITS.values())
@@ -244,8 +262,7 @@ def main():
             if w > limit:
                 fail("%s[%s] (index %d) is %d cells wide, exceeds the %s "
                      "limit (%d cells) - %r" %
-                     (label, name, idx, w, "BOX_WIDTH" if kind == "box"
-                      else "DIALOG_WIDTH", limit, s))
+                     (label, name, idx, w, limit_names[kind], limit, s))
         ja_w = cell_width(ja[idx].encode("cp932"))
         en_w = cell_width(en[idx].encode("cp932"))
         report.append("  [%2d] %-26s %-8s limit=%3d  JA=%3d  EN=%3d" %
@@ -253,7 +270,8 @@ def main():
 
     print("PASS: 5) every message fits the cell limit implied by its use "
           "site, in both languages")
-    print("     (box=%d dialog=%d cells)" % (box_width, dialog_width))
+    print("     (box=%d box_title=%d dialog=%d cells)" %
+          (box_width, title_width, dialog_width))
     for line in report:
         print(line)
 
