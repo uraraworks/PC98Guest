@@ -1220,6 +1220,28 @@ void sappend_field_rj(char *dst, int *lenp, char *label, char *number, int width
 #define ATTR_BASE  0xE1
 #define ATTR_REV   0xE5
 
+/* ---- measured original colors (docs/filer-measure-06.md) --------------
+ * ATTR_BORDER: box-drawing borders/dividers and header labels (cyan).
+ * ATTR_TITLE:  title text and the row-0 clock field (yellow).
+ * ATTR_VALUE:  header values (path/filename/numbers) - same byte value as
+ *              ATTR_BASE, kept as a separate name so call sites read as
+ *              "this is a value", not "this is the historical default".
+ * ATTR_LIST_DIR/ATTR_LIST_FILE/ATTR_LIST_SYS: file-list row colors by
+ * entry type (directory / normal file / system-or-hidden file). The
+ * cursor row keeps its type color and only adds the reverse-video bit
+ * (ATTR_CURSOR_BIT) - see entry_attr() below; measured cursor/non-cursor
+ * attribute bytes for the same file differ only by that bit, never by
+ * color, unlike the old "cursor=yellow / other=white" scheme this
+ * replaces. ------------------------------------------------------- */
+#define ATTR_BORDER      0xA1
+#define ATTR_LABEL       0xA1
+#define ATTR_TITLE       0xC1
+#define ATTR_VALUE       0xE1
+#define ATTR_LIST_DIR    0xA1
+#define ATTR_LIST_FILE   0xC1
+#define ATTR_LIST_SYS    0x61
+#define ATTR_CURSOR_BIT  0x04
+
 /* bottom function-key row attributes (row 24 only) - measured off the
  * real product's attribute plane, a different convention from ATTR_REV
  * above: the whole label is reversed AND uses a non-white color, and the
@@ -1424,11 +1446,11 @@ void ansi_goto(int row, int col)
 
 /* draws one row of the header box: left border char + content
    (space-padded/truncated to BOX_WIDTH cells) + right border char. */
-void box_row(int row, unsigned char lb, unsigned char rb, char *content)
+void box_row(int row, unsigned char lb, unsigned char rb, char *content, unsigned int contentAttr)
 {
-  vram_ank(row, 0, lb, ATTR_BASE);
-  vram_puts_cells(row, 1, content, ATTR_BASE, BOX_WIDTH);
-  vram_ank(row, 1 + BOX_WIDTH, rb, ATTR_BASE);
+  vram_ank(row, 0, lb, ATTR_BORDER);
+  vram_puts_cells(row, 1, content, contentAttr, BOX_WIDTH);
+  vram_ank(row, 1 + BOX_WIDTH, rb, ATTR_BORDER);
 }
 
 /* draws a header-box separator row: border char, BOX_WIDTH horizontal
@@ -1441,9 +1463,9 @@ void box_dash_row(int row, unsigned char lb, unsigned char rb)
 {
   int i;
 
-  vram_ank(row, 0, lb, ATTR_BASE);
-  for (i = 0; i < BOX_WIDTH; i++) vram_ank(row, 1 + i, BOXCH_H, ATTR_BASE);
-  vram_ank(row, 1 + BOX_WIDTH, rb, ATTR_BASE);
+  vram_ank(row, 0, lb, ATTR_BORDER);
+  for (i = 0; i < BOX_WIDTH; i++) vram_ank(row, 1 + i, BOXCH_H, ATTR_BORDER);
+  vram_ank(row, 1 + BOX_WIDTH, rb, ATTR_BORDER);
 }
 
 /* draws the header box's top border row (row 0): corners, horizontal
@@ -1493,8 +1515,8 @@ void draw_title_row(void)
   int col;
   char datetime[DATETIME_WIDTH + 1];
 
-  vram_ank(ROW_TITLE, 0, BOXCH_TL, ATTR_BASE);
-  vram_ank(ROW_TITLE, 1 + BOX_WIDTH, BOXCH_TR, ATTR_BASE);
+  vram_ank(ROW_TITLE, 0, BOXCH_TL, ATTR_BORDER);
+  vram_ank(ROW_TITLE, 1 + BOX_WIDTH, BOXCH_TR, ATTR_BORDER);
 
   title = MSG(MSG_TITLE);
   titleCells = text_width(title);
@@ -1510,29 +1532,29 @@ void draw_title_row(void)
   if (fillCells < 0) fillCells = 0; /* defensive: title too wide to fit */
 
   col = 1;
-  vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE); col++;
-  vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE); col++;
-  vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++;
-  vram_puts_cells(ROW_TITLE, col, title, ATTR_BASE, titleCells);
+  vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BORDER); col++;
+  vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BORDER); col++;
+  vram_ank(ROW_TITLE, col, ' ', ATTR_TITLE); col++;
+  vram_puts_cells(ROW_TITLE, col, title, ATTR_TITLE, titleCells);
   col += titleCells;
-  vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++;
+  vram_ank(ROW_TITLE, col, ' ', ATTR_TITLE); col++;
   for (i = 0; i < fillCells; i++) {
     /* the only place this row ever places the disk-separator junction
        char - see the function comment above for why doing it here,
        inline with the fill loop, instead of as a separate unconditional
        pass afterward, is what stops this cell from flickering. */
     if (col == DISK_SEP_COL1 || col == DISK_SEP_COL2) {
-      vram_ank(ROW_TITLE, col, BOXCH_TJ, ATTR_BASE);
+      vram_ank(ROW_TITLE, col, BOXCH_TJ, ATTR_BORDER);
     } else {
-      vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE);
+      vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BORDER);
     }
     col++;
   }
-  for (i = 0; i < TITLE_DATETIME_GAP; i++) { vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++; }
+  for (i = 0; i < TITLE_DATETIME_GAP; i++) { vram_ank(ROW_TITLE, col, ' ', ATTR_TITLE); col++; }
 
   format_datetime(datetime);
   for (i = 0; i < DATETIME_WIDTH; i++) {
-    vram_ank(ROW_TITLE, col, (unsigned char)datetime[i], ATTR_BASE); col++;
+    vram_ank(ROW_TITLE, col, (unsigned char)datetime[i], ATTR_TITLE); col++;
   }
 }
 
@@ -1732,26 +1754,26 @@ void draw_dialog(char *msg, char *errmsg)
   draw_screen_frame();
 
   row = DIALOG_ROW;
-  vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BASE);
-  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BASE);
-  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_TR, ATTR_BASE);
+  vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BORDER);
+  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_TR, ATTR_BORDER);
   row++;
 
-  vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BASE);
-  vram_puts_cells(row, DIALOG_COL + 1, msg, ATTR_BASE, DIALOG_WIDTH);
-  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BASE);
+  vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
+  vram_puts_cells(row, DIALOG_COL + 1, msg, ATTR_VALUE, DIALOG_WIDTH);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
   row++;
 
   if (errmsg != 0) {
-    vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BASE);
-    vram_puts_cells(row, DIALOG_COL + 1, errmsg, ATTR_BASE, DIALOG_WIDTH);
-    vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BASE);
+    vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
+    vram_puts_cells(row, DIALOG_COL + 1, errmsg, ATTR_VALUE, DIALOG_WIDTH);
+    vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
     row++;
   }
 
-  vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BASE);
-  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BASE);
-  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BASE);
+  vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BORDER);
+  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BORDER);
 }
 
 /* ---- reusable text-input dialog (Rename / mKdir) -----------------------
@@ -1786,9 +1808,9 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   draw_screen_frame();
 
   row = DIALOG_ROW;
-  vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BASE);
-  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BASE);
-  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_TR, ATTR_BASE);
+  vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BORDER);
+  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_TR, ATTR_BORDER);
   row++;
 
   p = 0;
@@ -1797,22 +1819,22 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   buf[len] = 0; /* line/sappend below need a NUL-terminated C string */
   sappend(line, &p, buf, sizeof(line));
 
-  vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BASE);
-  vram_puts_cells(row, DIALOG_COL + 1, line, ATTR_BASE, DIALOG_WIDTH);
-  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BASE);
+  vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
+  vram_puts_cells(row, DIALOG_COL + 1, line, ATTR_VALUE, DIALOG_WIDTH);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
   fieldRow = row;
   row++;
 
   if (errmsg != 0) {
-    vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BASE);
-    vram_puts_cells(row, DIALOG_COL + 1, errmsg, ATTR_BASE, DIALOG_WIDTH);
-    vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BASE);
+    vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
+    vram_puts_cells(row, DIALOG_COL + 1, errmsg, ATTR_VALUE, DIALOG_WIDTH);
+    vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
     row++;
   }
 
-  vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BASE);
-  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BASE);
-  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BASE);
+  vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BORDER);
+  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BORDER);
 
   /* BOXCH_V is now a 1-cell ANK border character, so the field text
      starts 1 cell past the border column (this used to be 2, when the
@@ -2167,8 +2189,23 @@ void do_exec(void)
   /* the child may have written anything to the screen (or nothing, if
      dos_exec() itself failed before ever loading it) - invalidate the
      mirror unconditionally so every write below actually happens; see
-     this function's header comment above. */
+     this function's header comment above.
+     Measured bug (real hardware, F2 -> COMMAND.COM -> EXIT): the child's
+     own output can scroll the physical screen, which shifts old content
+     (e.g. this program's own function-key row) into cells this program's
+     normal redraw never revisits on its own - row 23 sits between the
+     file list and the function-key row and nothing ever draws it, and the
+     1-cell gap column between the two list columns and the very last
+     screen column are never drawn either. Invalidating the mirror alone
+     is not enough for this: draw_dialog()/draw_screen() below only ever
+     repaint the cells they actually use, so a stale cell outside that set
+     stays stale forever - the shifted content just sits there. */
   vram_shadow_init();
+  /* Force every one of the 25x80 cells to actually be overwritten with a
+     blank space once, regardless of whether this program's own drawing
+     ever touches that cell again - only after that is it safe to let the
+     usual partial-redraw functions take over below. */
+  vram_clear_all();
 
   if (rc != 0) {
     draw_dialog(MSG(MSG_EXEC_ERR_FAILED), 0);
@@ -2657,6 +2694,7 @@ void draw_disk_line(void)
   char freeBuf[16];
   char row[128];
   int p;
+  int labelCells;
 
   drive = dos_getdrive();
   secPerClus = dos_diskfree(drive + 1, &availClus, &bytesPerSec, &totalClus);
@@ -2664,7 +2702,7 @@ void draw_disk_line(void)
   p = 0;
   if (secPerClus == 0xFFFF) {
     sappend(row, &p, MSG(MSG_DISK_UNAVAIL), sizeof(row));
-    box_row(ROW_DISK, BOXCH_V, BOXCH_V, row);
+    box_row(ROW_DISK, BOXCH_V, BOXCH_V, row, ATTR_LABEL);
     return; /* no fields, so no dividers either - row stays plain text */
   }
 
@@ -2690,14 +2728,26 @@ void draw_disk_line(void)
 
   sappend_field_rj(row, &p, MSG(MSG_DISK_FREE), freeBuf, DISK_FIELD_WIDTH, sizeof(row));
 
-  box_row(ROW_DISK, BOXCH_V, BOXCH_V, row);
+  /* whole row painted white (values) first, then each field's own label is
+     painted cyan on top (measured; see docs/filer-measure-06.md) - a label
+     always starts at its field's first column since sappend_field_rj()
+     puts the label before the number, so no extra position tracking is
+     needed beyond the field boundaries already defined above. */
+  box_row(ROW_DISK, BOXCH_V, BOXCH_V, row, ATTR_VALUE);
+
+  labelCells = text_width(MSG(MSG_DISK_TOTAL));
+  vram_puts_cells(ROW_DISK, 1, MSG(MSG_DISK_TOTAL), ATTR_LABEL, labelCells);
+  labelCells = text_width(MSG(MSG_DISK_USED));
+  vram_puts_cells(ROW_DISK, 1 + DISK_FIELD_WIDTH + 1, MSG(MSG_DISK_USED), ATTR_LABEL, labelCells);
+  labelCells = text_width(MSG(MSG_DISK_FREE));
+  vram_puts_cells(ROW_DISK, 1 + 2 * (DISK_FIELD_WIDTH + 1), MSG(MSG_DISK_FREE), ATTR_LABEL, labelCells);
 
   /* 0x96 is itself in the SJIS-lead-byte range, so it cannot be embedded
      in 'row' and handed to vram_puts_cells() (see the file-header VRAM
      comment) - it is written directly afterwards instead, same as the
      BOXCH_* corner/border chars elsewhere in this file. */
-  vram_ank(ROW_DISK, DISK_SEP_COL1, BOXCH_V, ATTR_BASE);
-  vram_ank(ROW_DISK, DISK_SEP_COL2, BOXCH_V, ATTR_BASE);
+  vram_ank(ROW_DISK, DISK_SEP_COL1, BOXCH_V, ATTR_BORDER);
+  vram_ank(ROW_DISK, DISK_SEP_COL2, BOXCH_V, ATTR_BORDER);
 }
 
 /* builds the current-path line (header box row ROW_PATH) into a plain
@@ -2708,9 +2758,13 @@ void draw_path_line(void)
 {
   char row[256];
   int p;
+  int pathLabelCells;
+  int markedLabelStart;
+  int markedLabelCells;
 
   p = 0;
   sappend(row, &p, MSG(MSG_PATH_PREFIX), sizeof(row));
+  pathLabelCells = text_width(row); /* "Path=" alone always starts at column 1 */
   sappend(row, &p, g_path, sizeof(row));
   if (g_truncated) {
     sappend(row, &p, MSG(MSG_TRUNC_PREFIX), sizeof(row));
@@ -2718,10 +2772,18 @@ void draw_path_line(void)
     sappend(row, &p, MSG(MSG_TRUNC_SUFFIX), sizeof(row));
   }
   sappend(row, &p, "  ", sizeof(row));
+  markedLabelStart = text_width(row);
   sappend(row, &p, MSG(MSG_MARKED_LABEL), sizeof(row));
+  markedLabelCells = text_width(row) - markedLabelStart;
   sappend_uint(row, &p, (unsigned int)count_marked(), sizeof(row));
 
-  box_row(ROW_PATH, BOXCH_V, BOXCH_V, row);
+  /* whole row white (values) first, then the "Path="/"Marked:" labels are
+     painted cyan on top - see draw_disk_line()'s comment for why a second
+     targeted pass is used instead of tracking per-character attributes
+     while 'row' is being built. */
+  box_row(ROW_PATH, BOXCH_V, BOXCH_V, row, ATTR_VALUE);
+  vram_puts_cells(ROW_PATH, 1, MSG(MSG_PATH_PREFIX), ATTR_LABEL, pathLabelCells);
+  vram_puts_cells(ROW_PATH, 1 + markedLabelStart, MSG(MSG_MARKED_LABEL), ATTR_LABEL, markedLabelCells);
 }
 
 /* builds the selected-entry info line (header box row ROW_INFO); keeps
@@ -2736,12 +2798,17 @@ void draw_info_line(int visibleCount)
   char timebuf[6];
   char row[128];
   int p;
+  int infoLabelCells;
+  int attrLabelStart;
+  int attrLabelCells;
 
   p = 0;
   if (visibleCount == 0) {
     sappend(row, &p, MSG(MSG_INFO_PREFIX), sizeof(row));
+    infoLabelCells = text_width(row);
     sappend(row, &p, MSG(MSG_INFO_EMPTY), sizeof(row));
-    box_row(ROW_INFO, BOXCH_V, BOXCH_V, row);
+    box_row(ROW_INFO, BOXCH_V, BOXCH_V, row, ATTR_VALUE);
+    vram_puts_cells(ROW_INFO, 1, MSG(MSG_INFO_PREFIX), ATTR_LABEL, infoLabelCells);
     return;
   }
 
@@ -2757,6 +2824,7 @@ void draw_info_line(int visibleCount)
   format_time(g_time[g_cursor], timebuf);
 
   sappend(row, &p, MSG(MSG_INFO_PREFIX), sizeof(row));
+  infoLabelCells = text_width(row);
   sappend(row, &p, &g_name[g_cursor * NAME_LEN], sizeof(row));
   sappend(row, &p, "  ", sizeof(row));
   sappend(row, &p, sizebuf, sizeof(row));
@@ -2772,10 +2840,17 @@ void draw_info_line(int visibleCount)
   sappend(row, &p, " ", sizeof(row));
   sappend(row, &p, timebuf, sizeof(row));
   sappend(row, &p, "  ", sizeof(row));
+  attrLabelStart = text_width(row);
   sappend(row, &p, MSG(MSG_ATTR_LABEL), sizeof(row));
+  attrLabelCells = text_width(row) - attrLabelStart;
   sappend(row, &p, attrbuf, sizeof(row));
 
-  box_row(ROW_INFO, BOXCH_V, BOXCH_V, row);
+  /* whole row white (values) first, then the "Info:"/"Attr:" labels are
+     painted cyan on top - same two-pass approach as draw_disk_line()/
+     draw_path_line() above. */
+  box_row(ROW_INFO, BOXCH_V, BOXCH_V, row, ATTR_VALUE);
+  vram_puts_cells(ROW_INFO, 1, MSG(MSG_INFO_PREFIX), ATTR_LABEL, infoLabelCells);
+  vram_puts_cells(ROW_INFO, 1 + attrLabelStart, MSG(MSG_ATTR_LABEL), ATTR_LABEL, attrLabelCells);
 }
 
 /* draws the bottom row (row 24) as the measured PC-98 function-key
@@ -2834,6 +2909,28 @@ void draw_cmdline(void)
 }
 
 
+/* file-list row color by entry type (measured; see docs/filer-measure-
+   06.md): directories cyan, plain files yellow, files with the system or
+   hidden attribute magenta. The cursor row keeps this same color and only
+   adds the reverse-video bit - measured cursor/non-cursor attribute bytes
+   for the same file (e.g. 0x65 vs 0x61) differ by exactly that bit, never
+   by color, so this must never substitute a different color for the
+   cursor row the way the old "cursor=yellow / other=white" scheme did. */
+unsigned int entry_attr(int idx, int isCursor)
+{
+  unsigned int base;
+
+  if (g_attr[idx] & ATTR_DIR) {
+    base = ATTR_LIST_DIR;
+  } else if (g_attr[idx] & (ATTR_SYSTEM | ATTR_HIDDEN)) {
+    base = ATTR_LIST_SYS;
+  } else {
+    base = ATTR_LIST_FILE;
+  }
+  if (isCursor) base |= ATTR_CURSOR_BIT;
+  return base;
+}
+
 void draw_screen_frame(void)
 {
   int leftCount;
@@ -2860,9 +2957,9 @@ void draw_screen_frame(void)
   draw_disk_line();
 
   box_dash_row(ROW_SEP1, BOXCH_LT, BOXCH_RT);
-  vram_ank(ROW_SEP1, DISK_SEP_COL1, BOXCH_HJ, ATTR_BASE); /* under the
+  vram_ank(ROW_SEP1, DISK_SEP_COL1, BOXCH_HJ, ATTR_BORDER); /* under the
      disk-line dividers - see DISK_SEP_COL1/2's comment above */
-  vram_ank(ROW_SEP1, DISK_SEP_COL2, BOXCH_HJ, ATTR_BASE);
+  vram_ank(ROW_SEP1, DISK_SEP_COL2, BOXCH_HJ, ATTR_BORDER);
 
   draw_path_line();
 
@@ -2877,7 +2974,7 @@ void draw_screen_frame(void)
     if (leftIdx < leftCount) {
       build_entry_text(leftIdx, entrybuf);
       vram_puts_cells(ROW_LIST_TOP + row, COL_LEFT, entrybuf,
-                       (leftIdx == g_cursor) ? ATTR_REV : ATTR_BASE, 39);
+                       entry_attr(leftIdx, leftIdx == g_cursor), 39);
     } else {
       /* nothing here now - blank it explicitly; a shrunk directory
          listing (after Delete, or moving into a smaller directory) must
@@ -2888,7 +2985,7 @@ void draw_screen_frame(void)
     if (rightIdx < visibleCount) {
       build_entry_text(rightIdx, entrybuf);
       vram_puts_cells(ROW_LIST_TOP + row, COL_RIGHT, entrybuf,
-                       (rightIdx == g_cursor) ? ATTR_REV : ATTR_BASE, 39);
+                       entry_attr(rightIdx, rightIdx == g_cursor), 39);
     } else {
       vram_puts_cells(ROW_LIST_TOP + row, COL_RIGHT, "", ATTR_BASE, 39);
     }
