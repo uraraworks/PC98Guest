@@ -58,6 +58,25 @@
 
 #define SCRBUF_SIZE   8192
 
+/* ---- header box (rows 0-5) drawn with full-width box-drawing chars ---
+ * Measured against the real console: the DOS-console text output path
+ * treats bytes 0x81-0x9F as Shift_JIS lead bytes, so the half-width
+ * single-line box characters (0x9C-0x9F etc.) cannot be sent through it
+ * (see docs/ for the measurement). Full-width box-drawing characters
+ * (each 2 screen cells) are used instead; all width math below is in
+ * screen cells via text_width(), never byte counts or strlen().
+ * ------------------------------------------------------------------- */
+#define BOX_WIDTH     76   /* interior width in cells, between the borders */
+
+#define BOXCH_TL      "\x84\xa1"  /* topleft corner  */
+#define BOXCH_TR      "\x84\xa2"  /* topright corner */
+#define BOXCH_BL      "\x84\xa4"  /* bottomleft corner  */
+#define BOXCH_BR      "\x84\xa3"  /* bottomright corner */
+#define BOXCH_H       "\x84\x9f"  /* horizontal line */
+#define BOXCH_V       "\x84\xa0"  /* vertical line   */
+#define BOXCH_LT      "\x84\xa5"  /* left T (mid separator, left end)  */
+#define BOXCH_RT      "\x84\xa7"  /* right T (mid separator, right end) */
+
 /* ---- language / message table ----------------------------------------
  * All on-screen text is collected here and looked up by index; no
  * literal UI text is written directly at the call site. See
@@ -82,19 +101,19 @@
 #define MSG_CMDLINE       12
 
 const char *g_msgJA[] = {
-  "PC98Guest ƒtƒ@ƒCƒ‰ - ƒfƒBƒŒƒNƒgƒŠƒrƒ…[ƒAiƒ}ƒCƒ‹ƒXƒg[ƒ“1EŠJ”­’†j",
-  "ƒpƒX=",
-  "@i¦ãŒÀ",
-  "Œ‚ð’´‚¦‚½‚½‚ßˆê——‚ð‘Å‚¿Ø‚è‚Ü‚µ‚½ ¦j",
-  "î•ñ:",
-  "i‹ój",
-  "ƒfƒBƒXƒN:iŽæ“¾‚Å‚«‚Ü‚¹‚ñj",
-  "‡Œv:",
-  "Žg—p:",
-  "‹ó‚«:",
-  "ƒoƒCƒg",
-  "‘®«:",
-  "–îˆóƒL[:ˆÚ“®@Q/ESC:I—¹"
+  "PC98Guest ï¿½tï¿½@ï¿½Cï¿½ï¿½ - ï¿½fï¿½Bï¿½ï¿½ï¿½Nï¿½gï¿½ï¿½ï¿½rï¿½ï¿½ï¿½[ï¿½Aï¿½iï¿½}ï¿½Cï¿½ï¿½ï¿½Xï¿½gï¿½[ï¿½ï¿½1ï¿½Eï¿½Jï¿½ï¿½ï¿½ï¿½ï¿½j",
+  "ï¿½pï¿½X=",
+  "ï¿½@ï¿½iï¿½ï¿½ï¿½ï¿½ï¿½",
+  "ï¿½ï¿½ï¿½ð’´‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ßˆê——ï¿½ï¿½Å‚ï¿½ï¿½Ø‚ï¿½Ü‚ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½j",
+  "ï¿½ï¿½ï¿½:",
+  "ï¿½iï¿½ï¿½j",
+  "ï¿½fï¿½Bï¿½Xï¿½N:ï¿½iï¿½æ“¾ï¿½Å‚ï¿½ï¿½Ü‚ï¿½ï¿½ï¿½j",
+  "ï¿½ï¿½ï¿½v:",
+  "ï¿½gï¿½p:",
+  "ï¿½ï¿½:",
+  "ï¿½oï¿½Cï¿½g",
+  "ï¿½ï¿½ï¿½ï¿½:",
+  "ï¿½ï¿½ï¿½Lï¿½[:ï¿½Ú“ï¿½ï¿½@Q/ESC:ï¿½Iï¿½ï¿½"
 };
 
 const char *g_msgEN[] = {
@@ -316,12 +335,43 @@ void format_u32(unsigned int hi, unsigned int lo, char *out)
   for (i = n - 1; i >= 0; i--) {
     out[j] = digits[i];
     j++;
-    if (i > 0 && (i % 3) == 2) {
+    /* digits[] is stored least-significant-first (digits[0] = units), so
+       index i is the distance of this digit from the units digit. A comma
+       belongs right after this digit whenever it completes a group of 3
+       counting from the units digit, i.e. i is a positive multiple of 3. */
+    if (i > 0 && (i % 3) == 0) {
       out[j] = ',';
       j++;
     }
   }
   out[j] = 0;
+}
+
+/* same as format_u32() but without ',' separators; used for the plain
+   (unseparated) file-list size column - see docs/, only the header totals
+   use comma grouping there. */
+void format_u32_plain(unsigned int hi, unsigned int lo, char *out)
+{
+  char digits[12];
+  int n;
+  int i;
+  unsigned int rem;
+
+  n = 0;
+  if (hi == 0 && lo == 0) {
+    out[0] = '0';
+    out[1] = 0;
+    return;
+  }
+  while (hi != 0 || lo != 0) {
+    rem = divmod10(&hi, &lo);
+    digits[n] = (char)('0' + rem);
+    n++;
+  }
+  for (i = 0; i < n; i++) {
+    out[i] = digits[n - 1 - i];
+  }
+  out[n] = 0;
 }
 
 /* ---- date/time formatting -------------------------------------------- */
@@ -353,7 +403,7 @@ void format_time(unsigned int t, char *out)
 
   hour = (t >> 11) & 0x1F;
   minute = (t >> 5) & 0x3F;
-  out[0] = (char)('0' + hour / 10);
+  out[0] = (hour / 10 == 0) ? ' ' : (char)('0' + hour / 10);
   out[1] = (char)('0' + hour % 10);
   out[2] = ':';
   out[3] = (char)('0' + minute / 10);
@@ -431,6 +481,154 @@ void right_justify(char *buf, int col, int width, char *s)
     for (i = 0; i < pad; i++) buf[col + i] = ' ';
     put_str_n(buf, col + pad, s, len);
   }
+}
+
+/* appends the NUL-terminated string s to dst at byte offset *lenp, then
+   re-terminates dst; *lenp is advanced past the appended bytes. Used to
+   assemble row content (label + number + label + ...) into a plain
+   buffer before it is placed into a header box row. */
+void sappend(char *dst, int *lenp, char *s)
+{
+  int i;
+
+  i = 0;
+  while (s[i] != 0) {
+    dst[*lenp] = s[i];
+    (*lenp)++;
+    i++;
+  }
+  dst[*lenp] = 0;
+}
+
+/* same as sappend(), but for an unsigned int formatted as plain decimal */
+void sappend_uint(char *dst, int *lenp, unsigned int v)
+{
+  char tmp[6];
+  int n;
+
+  n = 0;
+  if (v == 0) {
+    sappend(dst, lenp, "0");
+    return;
+  }
+  while (v > 0) {
+    tmp[n] = (char)('0' + (v % 10));
+    v = v / 10;
+    n++;
+  }
+  while (n > 0) {
+    n--;
+    dst[*lenp] = tmp[n];
+    (*lenp)++;
+  }
+  dst[*lenp] = 0;
+}
+
+/* copies s into buf starting at cell offset col, at most 'width' screen
+   cells (as measured by text_width's SJIS-aware rules), silently
+   truncating on the right without ever splitting a multi-byte character.
+   Unlike put_str_n, the limit here is in cells, not bytes. Does not pad;
+   caller must pre-fill buf with spaces for a fixed-width field. */
+void put_str_cells(char *buf, int col, char *s, int width)
+{
+  int i;
+  int cell;
+  int outpos;
+  unsigned char c;
+
+  i = 0;
+  cell = 0;
+  outpos = col;
+  while (s[i] != 0) {
+    c = (unsigned char)s[i];
+    if ((c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC)) {
+      if (s[i + 1] != 0) {
+        if (cell + 2 > width) break;
+        buf[outpos] = s[i];
+        buf[outpos + 1] = s[i + 1];
+        outpos += 2;
+        cell += 2;
+        i += 2;
+      } else {
+        if (cell + 1 > width) break;
+        buf[outpos] = s[i];
+        outpos++;
+        cell++;
+        i++;
+      }
+    } else {
+      if (cell + 1 > width) break;
+      buf[outpos] = s[i];
+      outpos++;
+      cell++;
+      i++;
+    }
+  }
+}
+
+/* draws one row of the header box: left border char(s) + content
+   (space-padded/truncated to BOX_WIDTH cells) + right border char(s).
+   'content' may be shorter than BOX_WIDTH (padded with spaces) or exactly
+   BOX_WIDTH (e.g. an all-dashes separator row); it is never split mid
+   multi-byte character. */
+void box_row(int row, char *lb, char *rb, char *content)
+{
+  char cell[BOX_WIDTH + 1];
+  int i;
+
+  for (i = 0; i < BOX_WIDTH; i++) cell[i] = ' ';
+  cell[BOX_WIDTH] = 0;
+  put_str_cells(cell, 0, content, BOX_WIDTH);
+
+  buf_goto(row, 0);
+  buf_puts(lb);
+  buf_puts(cell);
+  buf_puts(rb);
+}
+
+/* fills out[] with exactly BOX_WIDTH cells (2*BOX_WIDTH... no, BOX_WIDTH
+   is even, so BOX_WIDTH bytes) of the horizontal line character; used for
+   the header box's plain separator/border rows. */
+void build_dash_row(char *out)
+{
+  int p;
+  int i;
+
+  p = 0;
+  for (i = 0; i < BOX_WIDTH / 2; i++) {
+    sappend(out, &p, BOXCH_H);
+  }
+}
+
+/* builds the top border row's content: horizontal line, the title
+   message centered-ish, horizontal line, filling exactly BOX_WIDTH
+   cells. Width is computed in cells via text_width(), never assumed, so
+   this adapts to either language table without hardcoding a length. */
+void build_title_row(char *out)
+{
+  char *title;
+  int p;
+  int fillCells;
+  int fillPairs;
+  int i;
+
+  title = MSG(MSG_TITLE);
+
+  p = 0;
+  sappend(out, &p, BOXCH_H);
+  sappend(out, &p, BOXCH_H);
+  sappend(out, &p, " ");
+  sappend(out, &p, title);
+  sappend(out, &p, " ");
+
+  /* byte offset == cell offset here: every string appended above is
+     either 1-byte ASCII or a 2-byte SJIS/box char, so p already equals
+     the number of cells used. */
+  fillCells = BOX_WIDTH - p;
+  if (fillCells < 0) fillCells = 0; /* defensive: title too wide to fit */
+  fillPairs = fillCells / 2;
+  for (i = 0; i < fillPairs; i++) sappend(out, &p, BOXCH_H);
+  if ((fillCells % 2) == 1) sappend(out, &p, " ");
 }
 
 /* ---- screen frame buffer (replaces stdio for all screen output) ------- */
@@ -584,7 +782,7 @@ void build_entry_text(int idx, char *buf)
 
   for (i = 0; i < 39; i++) buf[i] = ' ';
   buf[39] = 0;
-  buf[10] = '.';
+  /* no '.' by default; only shown when there is an actual extension */
 
   rawname = &g_name[idx * NAME_LEN];
   dot = -1;
@@ -601,13 +799,18 @@ void build_entry_text(int idx, char *buf)
     put_str_n(buf, 2, rawname, namelen);
     extlen = strlen(rawname + dot + 1);
     if (extlen > 3) extlen = 3;
-    put_str_n(buf, 11, rawname + dot + 1, extlen);
+    if (extlen > 0) {
+      buf[10] = '.';
+      put_str_n(buf, 11, rawname + dot + 1, extlen);
+    }
   }
 
+  /* file-list size column: no ',' grouping in the real product, only the
+     header totals (draw_disk_line) are comma-grouped */
   if (g_attr[idx] & ATTR_DIR) {
     strcpy(sizebuf, "<DIR>");
   } else {
-    format_u32(g_sizeHi[idx], g_sizeLo[idx], sizebuf);
+    format_u32_plain(g_sizeHi[idx], g_sizeLo[idx], sizebuf);
   }
   right_justify(buf, 14, 9, sizebuf);
 
@@ -618,6 +821,9 @@ void build_entry_text(int idx, char *buf)
   put_str_n(buf, 34, timebuf, 5);
 }
 
+/* builds the disk total/used/free line (header box row ROW_DISK) into a
+   plain buffer for box_row(); comma-grouped, unlike the file-list sizes -
+   this is one of the header totals lines. */
 void draw_disk_line(void)
 {
   unsigned int drive;
@@ -632,13 +838,16 @@ void draw_disk_line(void)
   char totalBuf[16];
   char usedBuf[16];
   char freeBuf[16];
+  char row[128];
+  int p;
 
   drive = dos_getdrive();
   secPerClus = dos_diskfree(drive + 1, &availClus, &bytesPerSec, &totalClus);
 
-  buf_goto(ROW_DISK, 0);
+  p = 0;
   if (secPerClus == 0xFFFF) {
-    buf_puts(MSG(MSG_DISK_UNAVAIL));
+    sappend(row, &p, MSG(MSG_DISK_UNAVAIL));
+    box_row(ROW_DISK, BOXCH_V, BOXCH_V, row);
     return;
   }
 
@@ -651,19 +860,45 @@ void draw_disk_line(void)
   format_u32(usedHi, usedLo, usedBuf);
   format_u32(freeHi, freeLo, freeBuf);
 
-  buf_puts(MSG(MSG_DISK_TOTAL));
-  buf_puts(totalBuf);
-  buf_puts(MSG(MSG_BYTES_SUFFIX));
-  buf_puts("  ");
-  buf_puts(MSG(MSG_DISK_USED));
-  buf_puts(usedBuf);
-  buf_puts(MSG(MSG_BYTES_SUFFIX));
-  buf_puts("  ");
-  buf_puts(MSG(MSG_DISK_FREE));
-  buf_puts(freeBuf);
-  buf_puts(MSG(MSG_BYTES_SUFFIX));
+  sappend(row, &p, MSG(MSG_DISK_TOTAL));
+  sappend(row, &p, totalBuf);
+  sappend(row, &p, MSG(MSG_BYTES_SUFFIX));
+  sappend(row, &p, " ");
+  sappend(row, &p, MSG(MSG_DISK_USED));
+  sappend(row, &p, usedBuf);
+  sappend(row, &p, MSG(MSG_BYTES_SUFFIX));
+  sappend(row, &p, " ");
+  sappend(row, &p, MSG(MSG_DISK_FREE));
+  sappend(row, &p, freeBuf);
+  sappend(row, &p, MSG(MSG_BYTES_SUFFIX));
+
+  box_row(ROW_DISK, BOXCH_V, BOXCH_V, row);
 }
 
+/* builds the current-path line (header box row ROW_PATH) into a plain
+   buffer for box_row(). Split out of draw_screen() so all header-box
+   content assembly follows the same "build a string, then box_row()"
+   shape. */
+void draw_path_line(void)
+{
+  char row[256];
+  int p;
+
+  p = 0;
+  sappend(row, &p, MSG(MSG_PATH_PREFIX));
+  sappend(row, &p, g_path);
+  if (g_truncated) {
+    sappend(row, &p, MSG(MSG_TRUNC_PREFIX));
+    sappend_uint(row, &p, (unsigned int)MAX_ENTRIES);
+    sappend(row, &p, MSG(MSG_TRUNC_SUFFIX));
+  }
+
+  box_row(ROW_PATH, BOXCH_V, BOXCH_V, row);
+}
+
+/* builds the selected-entry info line (header box row ROW_INFO); keeps
+   comma-grouped sizes like draw_disk_line() - it is part of the same
+   header box, not the file-list grid. */
 void draw_info_line(int visibleCount)
 {
   char entrybuf[40];
@@ -671,11 +906,14 @@ void draw_info_line(int visibleCount)
   char sizebuf[16];
   char datebuf[9];
   char timebuf[6];
+  char row[128];
+  int p;
 
-  buf_goto(ROW_INFO, 0);
+  p = 0;
   if (visibleCount == 0) {
-    buf_puts(MSG(MSG_INFO_PREFIX));
-    buf_puts(MSG(MSG_INFO_EMPTY));
+    sappend(row, &p, MSG(MSG_INFO_PREFIX));
+    sappend(row, &p, MSG(MSG_INFO_EMPTY));
+    box_row(ROW_INFO, BOXCH_V, BOXCH_V, row);
     return;
   }
 
@@ -690,18 +928,20 @@ void draw_info_line(int visibleCount)
   format_date(g_date[g_cursor], datebuf);
   format_time(g_time[g_cursor], timebuf);
 
-  buf_puts(MSG(MSG_INFO_PREFIX));
-  buf_puts(&g_name[g_cursor * NAME_LEN]);
-  buf_puts("  ");
-  buf_puts(sizebuf);
-  buf_puts(MSG(MSG_BYTES_SUFFIX));
-  buf_puts("  ");
-  buf_puts(datebuf);
-  buf_puts(" ");
-  buf_puts(timebuf);
-  buf_puts("  ");
-  buf_puts(MSG(MSG_ATTR_LABEL));
-  buf_puts(attrbuf);
+  sappend(row, &p, MSG(MSG_INFO_PREFIX));
+  sappend(row, &p, &g_name[g_cursor * NAME_LEN]);
+  sappend(row, &p, "  ");
+  sappend(row, &p, sizebuf);
+  sappend(row, &p, MSG(MSG_BYTES_SUFFIX));
+  sappend(row, &p, "  ");
+  sappend(row, &p, datebuf);
+  sappend(row, &p, " ");
+  sappend(row, &p, timebuf);
+  sappend(row, &p, "  ");
+  sappend(row, &p, MSG(MSG_ATTR_LABEL));
+  sappend(row, &p, attrbuf);
+
+  box_row(ROW_INFO, BOXCH_V, BOXCH_V, row);
 }
 
 void draw_screen(void)
@@ -713,6 +953,8 @@ void draw_screen(void)
   int leftIdx;
   int rightIdx;
   char entrybuf[40];
+  char titleRow[BOX_WIDTH + 1];
+  char dashRow[BOX_WIDTH + 1];
   int i;
 
   visibleCount = g_count;
@@ -723,27 +965,22 @@ void draw_screen(void)
   buf_reset();
   buf_clear();
 
-  buf_goto(ROW_TITLE, 0);
-  buf_puts(MSG(MSG_TITLE));
+  /* header box, rows 0-5: full-width box-drawing borders around the
+     title/disk/path/info lines (see BOXCH_* above for why full-width
+     chars rather than the half-width single-line set). */
+  build_title_row(titleRow);
+  box_row(ROW_TITLE, BOXCH_TL, BOXCH_TR, titleRow);
 
   draw_disk_line();
 
-  buf_goto(ROW_SEP1, 0);
-  for (i = 0; i < 79; i++) buf_putc('-');
+  build_dash_row(dashRow);
+  box_row(ROW_SEP1, BOXCH_LT, BOXCH_RT, dashRow);
 
-  buf_goto(ROW_PATH, 0);
-  buf_puts(MSG(MSG_PATH_PREFIX));
-  buf_puts(g_path);
-  if (g_truncated) {
-    buf_puts(MSG(MSG_TRUNC_PREFIX));
-    buf_putuint((unsigned int)MAX_ENTRIES);
-    buf_puts(MSG(MSG_TRUNC_SUFFIX));
-  }
+  draw_path_line();
 
   draw_info_line(visibleCount);
 
-  buf_goto(ROW_SEP2, 0);
-  for (i = 0; i < 79; i++) buf_putc('-');
+  box_row(ROW_SEP2, BOXCH_BL, BOXCH_BR, dashRow);
 
   for (row = 0; row < LEFT_ROWS; row++) {
     leftIdx = row;
