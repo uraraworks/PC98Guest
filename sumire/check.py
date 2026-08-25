@@ -203,15 +203,19 @@ def main():
     dialog_width = extract_define_int(text, "DIALOG_WIDTH")
     # MSG_TITLE (row 0) shares its row with a right-hand clock field
     # ("YY-MM-DD HH:MM:SS", see draw_title_row() in SUMIRE.C), so its real
-    # on-screen budget is BOX_WIDTH minus that field, its gap, and the
-    # title's own "--"/" "/" " decoration - all read out of SUMIRE.C's
-    # #defines, never hardcoded here, so this tracks draw_title_row()'s
-    # own arithmetic (used = TITLE_DECOR_WIDTH + titleCells; fillCells =
-    # BOX_WIDTH - used - TITLE_DATETIME_GAP - DATETIME_WIDTH) automatically.
+    # on-screen budget is BOX_WIDTH minus that field, its gap, the 2-cell
+    # tail (space + border-line cell) between the clock and the top-right
+    # corner, and the title's own "--"/" "/" " decoration - all read out
+    # of SUMIRE.C's #defines, never hardcoded here, so this tracks
+    # draw_title_row()'s own arithmetic (used = TITLE_DECOR_WIDTH +
+    # titleCells; fillCells = BOX_WIDTH - used - TITLE_DATETIME_GAP -
+    # DATETIME_WIDTH - TITLE_TAIL_WIDTH) automatically.
     datetime_width = extract_define_int(text, "DATETIME_WIDTH")
     title_datetime_gap = extract_define_int(text, "TITLE_DATETIME_GAP")
     title_decor_width = extract_define_int(text, "TITLE_DECOR_WIDTH")
-    title_width = box_width - datetime_width - title_datetime_gap - title_decor_width
+    title_tail_width = extract_define_int(text, "TITLE_TAIL_WIDTH")
+    title_width = (box_width - datetime_width - title_datetime_gap
+                   - title_decor_width - title_tail_width)
     ja = extract_array(text, "g_msgJA")
     en = extract_array(text, "g_msgEN")
 
@@ -238,7 +242,8 @@ def main():
     limit_names = {
         "box": "BOX_WIDTH",
         "box_title": "the title's clock-adjusted width (BOX_WIDTH - "
-                      "DATETIME_WIDTH - TITLE_DATETIME_GAP - TITLE_DECOR_WIDTH)",
+                      "DATETIME_WIDTH - TITLE_DATETIME_GAP - "
+                      "TITLE_DECOR_WIDTH - TITLE_TAIL_WIDTH)",
         "dialog": "DIALOG_WIDTH",
     }
     n = len(ja)

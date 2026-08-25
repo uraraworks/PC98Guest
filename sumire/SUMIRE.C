@@ -207,16 +207,25 @@
  * its numbers right-justified with a 1-cell blank margin at the field's
  * right edge, and no "bytes"/"バイト" unit suffix at all (the label
  * already says what it is) - see sappend_field_rj() and draw_disk_line()
- * below. All three fields (total/used/free) are padded/right-justified to
- * a fixed DISK_FIELD_WIDTH cell width so the divider columns are the same
- * every frame, independent of how many digits the current disk's byte
- * counts have. DISK_FIELD_WIDTH (20) covers the widest possible field: a
- * 6-cell label + format_u32()'s widest output ("4,294,967,295", 13 cells)
- * + the 1-cell trailing margin, in either language (measured with
- * check.py's cell_width()). */
-#define DISK_FIELD_WIDTH 20
-#define DISK_SEP_COL1     (1 + DISK_FIELD_WIDTH)
-#define DISK_SEP_COL2     (1 + DISK_FIELD_WIDTH + 1 + DISK_FIELD_WIDTH)
+ * below.
+ *
+ * The three fields are NOT all the same width: the original 20/20/20
+ * split (leaving the divider columns at 21/42) left the 3rd field 36
+ * cells wide - a lot of dead space to the right of "free", since this
+ * program only has 3 fields where the original product had 4 ("Page"
+ * included). Instead the divider columns themselves are fixed directly
+ * (26/53), splitting BOX_WIDTH's 78 cells into three nearly-equal
+ * thirds (25/26/25); each field's width is then derived from those
+ * columns so the widths can never drift apart from them. All three still comfortably
+ * clear the worst-case field size: a 6-cell label + format_u32()'s
+ * widest output ("4,294,967,295", 13 cells) + the 1-cell trailing
+ * margin = 20 cells, in either language (measured with check.py's
+ * cell_width()). */
+#define DISK_SEP_COL1      26
+#define DISK_SEP_COL2      53
+#define DISK_FIELD1_WIDTH  (DISK_SEP_COL1 - 1)
+#define DISK_FIELD2_WIDTH  (DISK_SEP_COL2 - DISK_SEP_COL1 - 1)
+#define DISK_FIELD3_WIDTH  (BOX_WIDTH - DISK_SEP_COL2)
 
 /* ---- header row 0 (title) right-hand clock field -------------------------
  * "YY-MM-DD HH:MM:SS", 17 cells, shown at the right end of the title row.
@@ -229,6 +238,11 @@
 #define DATETIME_WIDTH      17
 #define TITLE_DATETIME_GAP  1
 #define TITLE_DECOR_WIDTH   4
+/* trailing " " + one BOXCH_H cell placed after the clock field and
+   before the top-right corner (measured: real hardware leaves a 1-cell
+   gap plus a border cell between the clock and the corner, not the
+   clock butted right up against it) - see draw_title_row(). */
+#define TITLE_TAIL_WIDTH    2
 
 /* ---- language / message table ----------------------------------------
  * All on-screen text is collected here and looked up by index; no
@@ -1122,10 +1136,10 @@ void sappend_uint(char *dst, int *lenp, unsigned int v, int cap)
 /* like sappend(), but pads the appended text with plain ASCII spaces (one
    sappend() call per space, so 'cap' is still respected the same way) up
    to 'width' screen cells - used by draw_disk_line() to give its
-   total/used fields a fixed on-screen width so the vertical dividers
-   between them land on the same column every frame. If s is already
-   'width' cells or wider, no padding is added (draw_disk_line() sizes
-   DISK_FIELD_WIDTH to the true worst case, so this should not happen in
+   total/used/free fields a fixed on-screen width so the vertical
+   dividers between them land on the same column every frame. If s is
+   already 'width' cells or wider, no padding is added (draw_disk_line()
+   sizes each field to the true worst case, so this should not happen in
    practice, but it is not treated as an error - the field is simply left
    unpadded rather than truncated). */
 void sappend_padded(char *dst, int *lenp, char *s, int width, int cap)
@@ -1144,10 +1158,10 @@ void sappend_padded(char *dst, int *lenp, char *s, int width, int cap)
    last digit always lands exactly 1 cell short of the field's right edge
    (a fixed 1-cell trailing margin), matching the real product's own
    disk-totals row (measured; see draw_disk_line() and the
-   DISK_FIELD_WIDTH comment above) - "各欄で数値は右詰め、右端に1桁ぶんの
-   余白". If label+number+the 1-cell margin is already 'width' cells or
-   wider, no padding is added (draw_disk_line() sizes DISK_FIELD_WIDTH to
-   the true worst case, so this should not happen in practice, but as
+   DISK_SEP_COL1/DISK_SEP_COL2 comment above) - "各欄で数値は右詰め、右端に
+   1桁ぶんの余白". If label+number+the 1-cell margin is already 'width'
+   cells or wider, no padding is added (draw_disk_line() sizes each field
+   to the true worst case, so this should not happen in practice, but as
    with sappend_padded() it is not treated as an error). */
 void sappend_field_rj(char *dst, int *lenp, char *label, char *number, int width, int cap)
 {
@@ -1528,7 +1542,7 @@ void draw_title_row(void)
      row always ends exactly at the right border regardless of title
      length. */
   used = TITLE_DECOR_WIDTH + titleCells;
-  fillCells = BOX_WIDTH - used - TITLE_DATETIME_GAP - DATETIME_WIDTH;
+  fillCells = BOX_WIDTH - used - TITLE_DATETIME_GAP - DATETIME_WIDTH - TITLE_TAIL_WIDTH;
   if (fillCells < 0) fillCells = 0; /* defensive: title too wide to fit */
 
   col = 1;
@@ -1556,6 +1570,11 @@ void draw_title_row(void)
   for (i = 0; i < DATETIME_WIDTH; i++) {
     vram_ank(ROW_TITLE, col, (unsigned char)datetime[i], ATTR_TITLE); col++;
   }
+  /* TITLE_TAIL_WIDTH: a blank cell then one more border-line cell,
+     landing just before the top-right corner written at the top of this
+     function - see the TITLE_TAIL_WIDTH comment above. */
+  vram_ank(ROW_TITLE, col, ' ', ATTR_TITLE); col++;
+  vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BORDER); col++;
 }
 
 /* immediate one-off write, used only for the pre/post-frame terminal mode
@@ -2716,17 +2735,17 @@ void draw_disk_line(void)
   format_u32(freeHi, freeLo, freeBuf);
 
   /* right-justified, no unit suffix - measured off the real product's own
-     disk-totals row (see the DISK_FIELD_WIDTH comment above and
-     sappend_field_rj()). All three fields (not just total/used) use the
-     same fixed field width, so the row reads consistently even though
-     only total/used need it for divider alignment. */
-  sappend_field_rj(row, &p, MSG(MSG_DISK_TOTAL), totalBuf, DISK_FIELD_WIDTH, sizeof(row));
+     disk-totals row (see the DISK_SEP_COL1/DISK_SEP_COL2 comment above
+     and sappend_field_rj()). Each field uses its own derived width so
+     the three columns come out nearly equal instead of the 3rd one
+     trailing off into empty space. */
+  sappend_field_rj(row, &p, MSG(MSG_DISK_TOTAL), totalBuf, DISK_FIELD1_WIDTH, sizeof(row));
   sappend(row, &p, " ", sizeof(row)); /* divider cell; overwritten below */
 
-  sappend_field_rj(row, &p, MSG(MSG_DISK_USED), usedBuf, DISK_FIELD_WIDTH, sizeof(row));
+  sappend_field_rj(row, &p, MSG(MSG_DISK_USED), usedBuf, DISK_FIELD2_WIDTH, sizeof(row));
   sappend(row, &p, " ", sizeof(row)); /* divider cell; overwritten below */
 
-  sappend_field_rj(row, &p, MSG(MSG_DISK_FREE), freeBuf, DISK_FIELD_WIDTH, sizeof(row));
+  sappend_field_rj(row, &p, MSG(MSG_DISK_FREE), freeBuf, DISK_FIELD3_WIDTH, sizeof(row));
 
   /* whole row painted white (values) first, then each field's own label is
      painted cyan on top (measured; see docs/filer-measure-06.md) - a label
@@ -2738,9 +2757,9 @@ void draw_disk_line(void)
   labelCells = text_width(MSG(MSG_DISK_TOTAL));
   vram_puts_cells(ROW_DISK, 1, MSG(MSG_DISK_TOTAL), ATTR_LABEL, labelCells);
   labelCells = text_width(MSG(MSG_DISK_USED));
-  vram_puts_cells(ROW_DISK, 1 + DISK_FIELD_WIDTH + 1, MSG(MSG_DISK_USED), ATTR_LABEL, labelCells);
+  vram_puts_cells(ROW_DISK, DISK_SEP_COL1 + 1, MSG(MSG_DISK_USED), ATTR_LABEL, labelCells);
   labelCells = text_width(MSG(MSG_DISK_FREE));
-  vram_puts_cells(ROW_DISK, 1 + 2 * (DISK_FIELD_WIDTH + 1), MSG(MSG_DISK_FREE), ATTR_LABEL, labelCells);
+  vram_puts_cells(ROW_DISK, DISK_SEP_COL2 + 1, MSG(MSG_DISK_FREE), ATTR_LABEL, labelCells);
 
   /* 0x96 is itself in the SJIS-lead-byte range, so it cannot be embedded
      in 'row' and handed to vram_puts_cells() (see the file-header VRAM
