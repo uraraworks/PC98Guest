@@ -13,3 +13,19 @@ tsukushi/dic/upstream/
 
 # ビルド成果物。ずれるのでツリーには置かず、Release で配る。
 *.COM
+
+# 原物（FD / JED）は絶対に置かない。二次的な網。
+# 主たる防御は置き場を分けたことで、原物は PC98/_local/originals/ にある
+# （公開 repo の配下に存在しない）。一度コミットすると git rm しても
+# 履歴からは公開されたままなので、ignore を当てにしない。
+#
+# ワイルドカードにしないこと。*.MCR のように広く書くと、将来この repo が
+# 持つ自作物のファイルを無言で飲み込む。原物の実ファイル名だけを列挙する。
+FD.DOC
+FD98_313.DOC
+FDCUST2.DOC
+FD.CFG
+JED.EXE
+JED.DOC
+JEDMAC.DOC
+JED.CFG
