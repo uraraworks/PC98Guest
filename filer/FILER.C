@@ -16,8 +16,16 @@
  * used by Rename (R, single entry under the cursor) and mKdir (K, create
  * a directory in the current path). Both re-use the same dialog and show
  * a failure message inline in the same box rather than a separate line,
- * keeping the prompt and the partially-typed text on screen. Copy/Move
- * are still not implemented.
+ * keeping the prompt and the partially-typed text on screen.
+ * Milestone 4 adds: Copy (C) and Move (M), using the same "marked set if
+ * non-empty, else the cursor entry" target rule as Delete, with a
+ * per-file Y/N/ESC overwrite prompt (the original refuses same-name
+ * copies outright with no prompt - see README's independence notes for
+ * why this implementation asks instead). It also replaces the bottom
+ * command line: instead of one long bilingual "key:description" message
+ * capped at CMDLINE_WIDTH cells, it now shows English command words with
+ * their key letter in reverse video, matching the original's own
+ * measured convention (see g_cmdWords[]/cmdline_put_word()).
  *
  * Built with SmallerC (C89-ish subset, 16-bit small-model MZ EXE).
  * Screen I/O uses ANSI-style escape sequences (measured against
@@ -46,6 +54,13 @@
 #define INPUT_MAXLEN  12     /* max chars (not counting NUL) enterable in
                                  input_dialog(): an 8.3 name, same limit as
                                  NAME_LEN-1; see do_rename()/do_mkdir() */
+#define DEST_MAXLEN   40     /* max chars enterable for a Copy/Move
+                                 destination directory (e.g. "B:\\SUBDIR"),
+                                 a different (longer) limit than
+                                 INPUT_MAXLEN because this is a path, not
+                                 an 8.3 name; see do_copy()/do_move() */
+#define COPY_BUF_SIZE 4096   /* size of the single global file-copy
+                                 buffer g_copybuf; see its declaration */
 #define LEFT_ROWS     17
 #define VISIBLE_MAX   34     /* 17 rows x 2 columns; see README for the
                                  milestone-1 "no paging yet" limitation */
@@ -147,20 +162,31 @@
 #define MSG_DISK_FREE     9
 #define MSG_BYTES_SUFFIX  10
 #define MSG_ATTR_LABEL    11
-#define MSG_CMDLINE       12
-#define MSG_MARKED_LABEL       13
-#define MSG_DEL_CONFIRM_ONE_PRE   14
-#define MSG_DEL_CONFIRM_ONE_SUF   15
-#define MSG_DEL_CONFIRM_MARK_PRE  16
-#define MSG_DEL_CONFIRM_MARK_SUF  17
-#define MSG_DEL_ERR_ISDIR      18
-#define MSG_DEL_ERR_FAILED     19
-#define MSG_RENAME_PROMPT       20
-#define MSG_RENAME_ERR_EMPTY    21
-#define MSG_RENAME_ERR_FAILED   22
-#define MSG_MKDIR_PROMPT        23
-#define MSG_MKDIR_ERR_EMPTY     24
-#define MSG_MKDIR_ERR_FAILED    25
+#define MSG_MARKED_LABEL       12
+#define MSG_DEL_CONFIRM_ONE_PRE   13
+#define MSG_DEL_CONFIRM_ONE_SUF   14
+#define MSG_DEL_CONFIRM_MARK_PRE  15
+#define MSG_DEL_CONFIRM_MARK_SUF  16
+#define MSG_DEL_ERR_ISDIR      17
+#define MSG_DEL_ERR_FAILED     18
+#define MSG_RENAME_PROMPT       19
+#define MSG_RENAME_ERR_EMPTY    20
+#define MSG_RENAME_ERR_FAILED   21
+#define MSG_MKDIR_PROMPT        22
+#define MSG_MKDIR_ERR_EMPTY     23
+#define MSG_MKDIR_ERR_FAILED    24
+#define MSG_CM_ERR_HASDIR       25
+#define MSG_COPY_PROMPT         26
+#define MSG_MOVE_PROMPT         27
+#define MSG_CM_ERR_EMPTY        28
+#define MSG_COPY_ERR_PRE        29
+#define MSG_MOVE_ERR_PRE        30
+#define MSG_OVERWRITE_PRE       31
+#define MSG_OVERWRITE_SUF       32
+#define MSG_COPY_DONE_PRE       33
+#define MSG_COPY_DONE_SUF       34
+#define MSG_MOVE_DONE_PRE       35
+#define MSG_MOVE_DONE_SUF       36
 
 const char *g_msgJA[] = {
   "PC98Guest ファイラ - ディレクトリビューア（マイルストーン2・開発中）",
@@ -175,7 +201,6 @@ const char *g_msgJA[] = {
   "空き:",
   "バイト",
   "属性:",
-  "矢印移動 SP/TAB:マーク HOME:全マーク Enter:開く R:改名 K:新規 D:削除 Q/ESC:終了",
   "マーク:",
   "このファイルを削除しますか: ",
   " (Y/N)",
@@ -188,7 +213,19 @@ const char *g_msgJA[] = {
   "リネームに失敗しました（同名がある？）",
   "新しいディレクトリ名: ",
   "名前を入力してください",
-  "作成に失敗しました（同名がある？）"
+  "作成に失敗しました（同名がある？）",
+  "ディレクトリは対象にできません（何かキーを押してください）",
+  "コピー先: ",
+  "移動先: ",
+  "フォルダ名を入力してください",
+  "コピーに失敗しました: ",
+  "移動に失敗しました: ",
+  "上書きしますか: ",
+  " (Y/N/ESC)",
+  "コピー完了: ",
+  " 件",
+  "移動完了: ",
+  " 件"
 };
 
 const char *g_msgEN[] = {
@@ -204,7 +241,6 @@ const char *g_msgEN[] = {
   "Free:",
   " bytes",
   "Attr:",
-  "Arrows:move SP/TAB:mark HOME:all Enter:open R:ren K:mkdir D:del Q/ESC:quit",
   "Marked:",
   "Delete this file: ",
   " (Y/N)",
@@ -217,7 +253,19 @@ const char *g_msgEN[] = {
   "Rename failed (name already exists?)",
   "New directory name: ",
   "Enter a name",
-  "Create failed (name already exists?)"
+  "Create failed (name already exists?)",
+  "Cannot copy/move a directory (press any key)",
+  "Copy to: ",
+  "Move to: ",
+  "Enter a folder name",
+  "Copy failed: ",
+  "Move failed: ",
+  "Overwrite: ",
+  " (Y/N/ESC)",
+  "Copied ",
+  " file(s)",
+  "Moved ",
+  " file(s)"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -245,6 +293,36 @@ int msg_selftest(void)
   return 1;
 }
 
+/* ---- bottom command line (language-independent) ------------------------
+ * Milestone 4 replaces the old "key:description" MSG_CMDLINE line (which
+ * was pinned to CMDLINE_WIDTH cells and could not fit more than a
+ * handful of keys once written out in full words) with the original's
+ * own convention, measured from the real product: command *names* in
+ * English, with the letter that is the actual key shown in reverse video
+ * (see cmdline_put_word()), so many more commands fit on one line. This
+ * line is the same in both languages by design - the command words and
+ * the short movement/mark/open legend are plain English abbreviations,
+ * not translated text, so they live here as ordinary C data rather than
+ * in g_msgJA/g_msgEN.
+ * g_cmdWords[0] is the plain (non-highlighted) legend text; g_cmdHiPos[0]
+ * is -1 to mark it as "no highlight". Every other g_cmdWords[i] is a
+ * command name whose key is g_cmdWords[i][g_cmdHiPos[i]] - e.g. mKdir's
+ * key is 'K', the character at index 1, matching the 'k'/'K' dispatch in
+ * main(). check.py reconstructs this exact same line (prefix, then a
+ * single space plus each word) to verify it never exceeds CMDLINE_WIDTH
+ * screen cells - see draw_screen_frame()'s cmdline block below, which
+ * must keep assembling it the same way. */
+char *g_cmdWords[] = {
+  "Arrow:move SP/Tab:mark HOME:all Enter:open",
+  "Copy",
+  "Move",
+  "Delete",
+  "Rename",
+  "mKdir",
+  "Quit"
+};
+int g_cmdHiPos[] = { -1, 0, 0, 0, 0, 1, 0 };
+
 /* ---- global state ------------------------------------------------------ */
 
 char g_name[MAX_ENTRIES * NAME_LEN];
@@ -263,6 +341,11 @@ int g_cursor;         /* index into the visible list (0 .. visibleCount-1) */
 char g_path[80];      /* current directory, always ends with '\' */
 char g_search[88];    /* g_path + "*.*" */
 unsigned char g_dta[43];
+
+char g_copybuf[COPY_BUF_SIZE]; /* single shared Copy/Move I/O buffer -
+                                    see COPY_BUF_SIZE's comment; never put
+                                    a buffer this size on the stack in a
+                                    16-bit small-model program. */
 
 char g_scrbuf[SCRBUF_SIZE]; /* one full-screen frame, flushed in one write */
 unsigned int g_scrlen;
@@ -338,6 +421,118 @@ int dos_rename(char *oldPath, char *newPath)
       "mov ah, 0x56\n"
       "int 0x21\n"
       "pop es\n"
+      "sbb ax, ax");
+}
+
+/* ---- file I/O (Copy/Move; INT 21h AH=3Dh/3Ch/3Fh/40h/3Eh/57h) ----------
+ * These use the same "jnc LABEL / mov ax,-1 / LABEL:" idiom instead of
+ * the "sbb ax,ax" trick used above, because their success value is not
+ * simply 0 - it is a handle (dos_open/dos_create) or a byte count
+ * (dos_read/dos_wfile) that must be returned as-is from AX when CF is
+ * clear. Each label name below is unique across this whole file: this
+ * inline asm is emitted verbatim into one shared assembly output (see
+ * smlrc.md - "output verbatim"), so two functions reusing the same
+ * label would collide at assemble time. ------------------------------ */
+
+/* open an existing file (mode 0 = read-only, matching this program's
+   only use: reading a Copy/Move source). Returns a handle >= 0, or -1
+   on failure. */
+int dos_open(char *path, unsigned int mode)
+{
+  asm("mov dx, [bp+4]\n"
+      "mov al, [bp+6]\n"
+      "mov ah, 0x3d\n"
+      "int 0x21\n"
+      "jnc L_dos_open_ok\n"
+      "mov ax, -1\n"
+      "L_dos_open_ok:");
+}
+
+/* create (or truncate, if it already exists) a file for writing, with
+   normal attributes. Returns a handle >= 0, or -1 on failure. */
+int dos_create(char *path, unsigned int attr)
+{
+  asm("mov dx, [bp+4]\n"
+      "mov cx, [bp+6]\n"
+      "mov ah, 0x3c\n"
+      "int 0x21\n"
+      "jnc L_dos_create_ok\n"
+      "mov ax, -1\n"
+      "L_dos_create_ok:");
+}
+
+/* closes a handle from dos_open()/dos_create(). Returns 0 on success,
+   nonzero on failure. */
+int dos_close(unsigned int handle)
+{
+  asm("mov bx, [bp+4]\n"
+      "mov ah, 0x3e\n"
+      "int 0x21\n"
+      "sbb ax, ax");
+}
+
+/* reads up to len bytes into buf. Returns the number of bytes actually
+   read (0 means end of file, not an error), or -1 on failure. */
+int dos_read(unsigned int handle, char *buf, unsigned int len)
+{
+  asm("mov bx, [bp+4]\n"
+      "mov dx, [bp+6]\n"
+      "mov cx, [bp+8]\n"
+      "mov ah, 0x3f\n"
+      "int 0x21\n"
+      "jnc L_dos_read_ok\n"
+      "mov ax, -1\n"
+      "L_dos_read_ok:");
+}
+
+/* writes len bytes from buf to an open handle (unlike dos_write() above,
+   which is hardcoded to handle 1 for screen output). Returns the number
+   of bytes actually written, or -1 on failure; the caller compares this
+   against the requested len to catch a short write (e.g. disk full). */
+int dos_wfile(unsigned int handle, char *buf, unsigned int len)
+{
+  asm("mov bx, [bp+4]\n"
+      "mov dx, [bp+6]\n"
+      "mov cx, [bp+8]\n"
+      "mov ah, 0x40\n"
+      "int 0x21\n"
+      "jnc L_dos_wfile_ok\n"
+      "mov ax, -1\n"
+      "L_dos_wfile_ok:");
+}
+
+/* AH=57h AL=0: reads an open handle's file date/time into *timeOut/
+   *dateOut (packed DOS format, the same encoding format_date()/
+   format_time() already decode elsewhere in this file). Returns 0 on
+   success, nonzero on failure. */
+int dos_getftime(unsigned int handle, unsigned int *timeOut, unsigned int *dateOut)
+{
+  asm("mov bx, [bp+4]\n"
+      "mov al, 0\n"
+      "mov ah, 0x57\n"
+      "int 0x21\n"
+      "jc L_dos_getftime_err\n"
+      "mov si, [bp+6]\n"
+      "mov [si], cx\n"
+      "mov si, [bp+8]\n"
+      "mov [si], dx\n"
+      "mov ax, 0\n"
+      "jmp L_dos_getftime_done\n"
+      "L_dos_getftime_err:\n"
+      "mov ax, -1\n"
+      "L_dos_getftime_done:");
+}
+
+/* AH=57h AL=1: sets an open handle's file date/time (packed DOS format).
+   Returns 0 on success, nonzero on failure. */
+int dos_setftime(unsigned int handle, unsigned int time, unsigned int date)
+{
+  asm("mov bx, [bp+4]\n"
+      "mov cx, [bp+6]\n"
+      "mov dx, [bp+8]\n"
+      "mov al, 1\n"
+      "mov ah, 0x57\n"
+      "int 0x21\n"
       "sbb ax, ax");
 }
 
@@ -726,6 +921,39 @@ void put_str_cells(char *buf, int col, char *s, int width)
       outpos++;
       cell++;
       i++;
+    }
+  }
+}
+
+/* writes one command-line word, byte by byte, highlighting exactly the
+   character at cell index hlPos (its key) in reverse video. Measured on
+   real hardware: ESC[7m is reverse video (attribute b2) and works;
+   ESC[1m (bold/highlight) does not change anything visible; ESC[4m
+   (underline) shifts the following glyph 4 dots to the right, a real
+   rendering bug, so neither of those is used here. ESC[0m resets *all*
+   attributes, including color, not just reverse video - so color 37 (the
+   line's base color, set by the caller before this is used, matching
+   draw_screen_frame()'s buf_color(37) before the whole entries loop) is
+   re-applied right after every ESC[0m, keeping the rest of the word (and
+   whatever this program draws next) at the intended color rather than
+   whatever "no color set" defaults to.
+   Command words are plain ASCII (see g_cmdWords[]), so this indexes by
+   byte, not by text_width() cell - unlike the JA/EN message text
+   elsewhere in this file, no SJIS multi-byte handling is needed here.
+   hlPos == -1 (used for g_cmdWords[0], the plain legend text) disables
+   the highlight entirely. */
+void cmdline_put_word(char *word, int hlPos)
+{
+  int i;
+
+  for (i = 0; word[i] != 0; i++) {
+    if (i == hlPos) {
+      buf_puts("\x1b[7m");
+      buf_putc(word[i]);
+      buf_puts("\x1b[0m");
+      buf_color(37);
+    } else {
+      buf_putc(word[i]);
     }
   }
 }
@@ -1414,6 +1642,392 @@ void do_mkdir(void)
   draw_screen();
 }
 
+/* ---- copy / move --------------------------------------------------------- */
+
+/* builds destDir + "\" + name into out[] (unlike build_full_path(), which
+   always joins against g_path - Copy/Move destinations are a directory
+   the user just typed, not the current directory). Adds the separating
+   backslash only if destDir doesn't already end with one, so both
+   "B:\SUBDIR" and "B:\SUBDIR\" work as input. Same bounds discipline as
+   build_full_path()/sappend() everywhere else in this file. */
+void join_dir_name(char *out, int cap, char *destDir, char *name)
+{
+  int p;
+  int dlen;
+
+  p = 0;
+  sappend(out, &p, destDir, cap);
+  dlen = strlen(destDir);
+  if (dlen == 0 || destDir[dlen - 1] != '\\') {
+    sappend(out, &p, "\\", cap);
+  }
+  sappend(out, &p, name, cap);
+}
+
+/* true if a (non-directory) file already exists at path. Reuses
+   dos_setdta()/dos_findfirst() as a one-off lookup; this is safe even
+   though read_dir() also uses g_dta for its own FindFirst/FindNext scan,
+   because the two never run at the same time - read_dir() always calls
+   dos_setdta() again itself the next time it runs. The search attribute
+   mask intentionally omits ATTR_DIR: DOS's FindFirst always matches
+   plain files regardless of the mask, but only matches a directory if
+   ATTR_DIR is set in it, so this looks for "a file with this name",
+   which is exactly the overwrite question Copy/Move need answered. */
+int file_exists(char *path)
+{
+  int ok;
+
+  dos_setdta(g_dta);
+  ok = dos_findfirst(path, ATTR_RDONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_ARCHIVE);
+  return (ok == 0) ? 1 : 0;
+}
+
+/* the destination drive letter implied by a typed destDir string: its
+   own "X:" prefix if it has one, otherwise the current directory's drive
+   (g_path[0], always an uppercase letter - see read_path()). Used by
+   do_move() to decide same-drive rename vs. cross-drive copy+delete. */
+char dest_drive(char *destDir)
+{
+  char c;
+
+  if (destDir[0] != 0 && destDir[1] == ':') {
+    c = destDir[0];
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    return c;
+  }
+  return g_path[0];
+}
+
+/* case-insensitive path comparison (no stricmp() in this program's
+   string.h subset). Used only to guard against a Move whose destination
+   turns out to be identical to its source (e.g. the user retyped the
+   current directory) - without this check, move_confirm_and_move()'s
+   overwrite handling would delete the file and then fail to recreate
+   it. */
+int path_eq(char *a, char *b)
+{
+  int i;
+  char ca;
+  char cb;
+
+  i = 0;
+  for (;;) {
+    ca = a[i];
+    cb = b[i];
+    if (ca >= 'a' && ca <= 'z') ca = (char)(ca - 'a' + 'A');
+    if (cb >= 'a' && cb <= 'z') cb = (char)(cb - 'a' + 'A');
+    if (ca != cb) return 0;
+    if (ca == 0) return 1;
+    i++;
+  }
+}
+
+/* copies one file from srcPath to dstPath (INT 21h AH=3Dh open / 3Fh
+   read / 3Ch create / 40h write / 3Eh close), then copies the source's
+   timestamp onto the destination with AH=57h - get it from the still-open
+   source handle, set it on the still-open destination handle, both
+   before either is closed. Uses the single global g_copybuf (see its
+   declaration) in COPY_BUF_SIZE-byte chunks rather than a stack buffer:
+   SmallerC's small model keeps all data in one 64KB segment, and this
+   program's directory-listing arrays (g_name et al., sized by
+   MAX_ENTRIES) already claim a large share of it, so a second
+   already-large buffer must not also be duplicated on the stack.
+   Returns 0 on success, nonzero on failure. On failure, a partially
+   written destination file is deliberately left as-is rather than
+   deleted - do_move() relies on a nonzero return here to mean "the
+   source must NOT be deleted", and guessing at cleanup here would risk
+   destroying data instead. */
+int copy_one_file(char *srcPath, char *dstPath)
+{
+  int srcH;
+  int dstH;
+  int n;
+  int ok;
+  unsigned int ftime;
+  unsigned int fdate;
+
+  srcH = dos_open(srcPath, 0);
+  if (srcH < 0) return -1;
+
+  dstH = dos_create(dstPath, 0);
+  if (dstH < 0) {
+    dos_close((unsigned int)srcH);
+    return -1;
+  }
+
+  ok = 0;
+  for (;;) {
+    n = dos_read((unsigned int)srcH, g_copybuf, COPY_BUF_SIZE);
+    if (n < 0) { ok = -1; break; }
+    if (n == 0) break; /* end of file */
+    if (dos_wfile((unsigned int)dstH, g_copybuf, (unsigned int)n) != n) {
+      ok = -1;
+      break;
+    }
+  }
+
+  if (ok == 0) {
+    if (dos_getftime((unsigned int)srcH, &ftime, &fdate) == 0) {
+      dos_setftime((unsigned int)dstH, ftime, fdate);
+    }
+  }
+
+  dos_close((unsigned int)srcH);
+  dos_close((unsigned int)dstH);
+  return ok;
+}
+
+/* per-file Copy step, shared by the "cursor only" and "marked set" paths
+   in do_copy(): builds the source/destination paths, asks Y/N/ESC before
+   clobbering an existing destination file (the original refuses same-
+   name copies outright with no prompt at all - see do_copy()'s header
+   comment for why this implementation asks instead), then copies.
+   Returns 1 = copied, 0 = skipped (N to the overwrite prompt; not an
+   error), -1 = failed (an error dialog was already shown), -2 = the user
+   pressed ESC at the overwrite prompt, meaning "abort the whole
+   operation", not just this one file. */
+int copy_confirm_and_copy(int idx, char *destDir)
+{
+  char srcPath[96];
+  char dstPath[96];
+  char msg[128];
+  char *name;
+  int p;
+  int key;
+
+  name = &g_name[idx * NAME_LEN];
+  build_full_path(srcPath, sizeof(srcPath), name);
+  join_dir_name(dstPath, sizeof(dstPath), destDir, name);
+
+  if (file_exists(dstPath)) {
+    p = 0;
+    sappend(msg, &p, MSG(MSG_OVERWRITE_PRE), sizeof(msg));
+    sappend(msg, &p, name, sizeof(msg));
+    sappend(msg, &p, MSG(MSG_OVERWRITE_SUF), sizeof(msg));
+    draw_dialog(msg, 0);
+    key = dos_getch();
+    if (key == KEY_ESC) return -2;
+    if (key != 'y' && key != 'Y') return 0;
+  }
+
+  if (copy_one_file(srcPath, dstPath) != 0) {
+    p = 0;
+    sappend(msg, &p, MSG(MSG_COPY_ERR_PRE), sizeof(msg));
+    sappend(msg, &p, name, sizeof(msg));
+    draw_dialog(msg, 0);
+    dos_getch();
+    return -1;
+  }
+  return 1;
+}
+
+/* per-file Move step - see copy_confirm_and_copy() for the return-value
+   meanings, which are the same here. sameDrive is computed once by
+   do_move() (destDir is the same for every file in one Move operation,
+   so its implied drive letter does not need recomputing per file). On
+   the same drive, INT 21h AH=56h renames in place - no data is copied at
+   all. Across drives, this falls back to copy_one_file() and only
+   deletes the source once the copy has actually succeeded, so a failed
+   cross-drive Move never loses the original file. */
+int move_confirm_and_move(int idx, char *destDir, int sameDrive)
+{
+  char srcPath[96];
+  char dstPath[96];
+  char msg[128];
+  char *name;
+  int p;
+  int key;
+  int ok;
+
+  name = &g_name[idx * NAME_LEN];
+  build_full_path(srcPath, sizeof(srcPath), name);
+  join_dir_name(dstPath, sizeof(dstPath), destDir, name);
+
+  if (path_eq(srcPath, dstPath)) return 1; /* already there; nothing to do */
+
+  if (file_exists(dstPath)) {
+    p = 0;
+    sappend(msg, &p, MSG(MSG_OVERWRITE_PRE), sizeof(msg));
+    sappend(msg, &p, name, sizeof(msg));
+    sappend(msg, &p, MSG(MSG_OVERWRITE_SUF), sizeof(msg));
+    draw_dialog(msg, 0);
+    key = dos_getch();
+    if (key == KEY_ESC) return -2;
+    if (key != 'y' && key != 'Y') return 0;
+    /* AH=56h (rename) fails if the destination name already exists, so
+       a confirmed same-drive overwrite must clear it first. The
+       cross-drive path doesn't need this - dos_create() inside
+       copy_one_file() overwrites an existing file on its own. */
+    if (sameDrive) dos_delete(dstPath);
+  }
+
+  if (sameDrive) {
+    ok = dos_rename(srcPath, dstPath);
+  } else {
+    ok = copy_one_file(srcPath, dstPath);
+    if (ok == 0) dos_delete(srcPath);
+  }
+
+  if (ok != 0) {
+    p = 0;
+    sappend(msg, &p, MSG(MSG_MOVE_ERR_PRE), sizeof(msg));
+    sappend(msg, &p, name, sizeof(msg));
+    draw_dialog(msg, 0);
+    dos_getch();
+    return -1;
+  }
+  return 1;
+}
+
+/* C/c: copies the marked files, or (when nothing is marked) the single
+   file under the cursor - the same target rule as do_delete(): "marked
+   set if non-empty, else the cursor entry", not two cases that can
+   disagree. Directories are never in the marked set (mark_cursor()
+   refuses them), so the only way one can be "the target" is the
+   no-mark/cursor-on-a-directory case; that is caught up front and
+   refused with an explicit error dialog, the same as do_delete().
+   Unlike the original filer, which refuses a same-name copy outright
+   with no confirmation at all (measured; see README's independence
+   notes), this asks a Y/N/ESC overwrite question per colliding file
+   instead - silently overwriting or silently skipping are both worse
+   than asking. A completion dialog is shown on success (also unlike
+   Delete, which shows nothing - matching the original's behaviour for
+   each of those two commands respectively). */
+void do_copy(void)
+{
+  int i;
+  int r;
+  int did;
+  int aborted;
+  char destDir[DEST_MAXLEN + 1];
+  char *err;
+  int confirmed;
+  char msg[64];
+  int p;
+
+  if (count_marked() == 0) {
+    if (g_count == 0) return;
+    if (is_dir_entry(g_cursor)) {
+      draw_dialog(MSG(MSG_CM_ERR_HASDIR), 0);
+      dos_getch();
+      draw_screen();
+      return;
+    }
+  }
+
+  destDir[0] = 0;
+  err = 0;
+  for (;;) {
+    confirmed = input_dialog(MSG(MSG_COPY_PROMPT), destDir, DEST_MAXLEN, err);
+    if (!confirmed) { draw_screen(); return; }
+    if (destDir[0] == 0) { err = MSG(MSG_CM_ERR_EMPTY); continue; }
+    break;
+  }
+
+  did = 0;
+  aborted = 0;
+
+  if (count_marked() == 0) {
+    r = copy_confirm_and_copy(g_cursor, destDir);
+    if (r == 1) did = 1;
+    if (r == -2) aborted = 1;
+  } else {
+    for (i = 0; i < g_count; i++) {
+      if (!g_marked[i]) continue;
+      r = copy_confirm_and_copy(i, destDir);
+      if (r == 1) did++;
+      if (r == -2) { aborted = 1; break; }
+    }
+  }
+
+  if (!aborted && did > 0) {
+    p = 0;
+    sappend(msg, &p, MSG(MSG_COPY_DONE_PRE), sizeof(msg));
+    sappend_uint(msg, &p, (unsigned int)did, sizeof(msg));
+    sappend(msg, &p, MSG(MSG_COPY_DONE_SUF), sizeof(msg));
+    draw_dialog(msg, 0);
+    dos_getch();
+  }
+
+  read_dir();
+  clear_marks();
+  if (g_cursor >= g_count) g_cursor = (g_count > 0) ? g_count - 1 : 0;
+  draw_screen();
+}
+
+/* M/m: moves the marked files, or (when nothing is marked) the single
+   file under the cursor - same target rule, same up-front directory
+   refusal, same per-file Y/N/ESC overwrite prompt, and same completion
+   dialog as do_copy() (see its header comment); the only difference is
+   move_confirm_and_move()'s same-drive-rename vs. cross-drive-copy+
+   delete choice. Timestamps are always the original file's, never
+   "now" - on the same drive that falls out of AH=56h renaming in place;
+   across drives, copy_one_file() explicitly carries it over. */
+void do_move(void)
+{
+  int i;
+  int r;
+  int did;
+  int aborted;
+  int sameDrive;
+  char destDir[DEST_MAXLEN + 1];
+  char *err;
+  int confirmed;
+  char msg[64];
+  int p;
+
+  if (count_marked() == 0) {
+    if (g_count == 0) return;
+    if (is_dir_entry(g_cursor)) {
+      draw_dialog(MSG(MSG_CM_ERR_HASDIR), 0);
+      dos_getch();
+      draw_screen();
+      return;
+    }
+  }
+
+  destDir[0] = 0;
+  err = 0;
+  for (;;) {
+    confirmed = input_dialog(MSG(MSG_MOVE_PROMPT), destDir, DEST_MAXLEN, err);
+    if (!confirmed) { draw_screen(); return; }
+    if (destDir[0] == 0) { err = MSG(MSG_CM_ERR_EMPTY); continue; }
+    break;
+  }
+
+  sameDrive = (dest_drive(destDir) == g_path[0]) ? 1 : 0;
+
+  did = 0;
+  aborted = 0;
+
+  if (count_marked() == 0) {
+    r = move_confirm_and_move(g_cursor, destDir, sameDrive);
+    if (r == 1) did = 1;
+    if (r == -2) aborted = 1;
+  } else {
+    for (i = 0; i < g_count; i++) {
+      if (!g_marked[i]) continue;
+      r = move_confirm_and_move(i, destDir, sameDrive);
+      if (r == 1) did++;
+      if (r == -2) { aborted = 1; break; }
+    }
+  }
+
+  if (!aborted && did > 0) {
+    p = 0;
+    sappend(msg, &p, MSG(MSG_MOVE_DONE_PRE), sizeof(msg));
+    sappend_uint(msg, &p, (unsigned int)did, sizeof(msg));
+    sappend(msg, &p, MSG(MSG_MOVE_DONE_SUF), sizeof(msg));
+    draw_dialog(msg, 0);
+    dos_getch();
+  }
+
+  read_dir();
+  clear_marks();
+  if (g_cursor >= g_count) g_cursor = (g_count > 0) ? g_count - 1 : 0;
+  draw_screen();
+}
+
 /* ---- screen drawing ------------------------------------------------------ */
 
 void build_entry_text(int idx, char *buf)
@@ -1674,19 +2288,26 @@ void draw_screen_frame(void)
   buf_color(37);
 
   buf_goto(ROW_CMD, 0);
+  buf_color(37);
   {
-    char cmdline[CMDLINE_WIDTH + 1];
     int ci;
+    int wordCount;
 
-    /* zero-fill first so put_str_cells (which never writes past the
-       cells it truncates to and never appends a NUL itself) leaves a
-       valid, NUL-terminated string no matter how much of MSG_CMDLINE
-       fit. Truncation never splits a multi-byte character - see
-       put_str_cells(). */
-    for (ci = 0; ci <= CMDLINE_WIDTH; ci++) cmdline[ci] = 0;
-    put_str_cells(cmdline, 0, MSG(MSG_CMDLINE), CMDLINE_WIDTH);
-    buf_puts(cmdline);
+    /* language-independent: see g_cmdWords[]/g_cmdHiPos[] above. The
+       visible text this assembles (ignoring the ESC[...]m sequences
+       cmdline_put_word() adds around each highlighted key, which are
+       never counted as cells - see text_width()/check.py) is verified
+       by check.py to stay within CMDLINE_WIDTH cells; it is built here
+       exactly the same way check.py reconstructs it: g_cmdWords[0] as
+       is, then a single space plus each remaining word. */
+    wordCount = sizeof(g_cmdWords) / sizeof(g_cmdWords[0]);
+    buf_puts(g_cmdWords[0]);
+    for (ci = 1; ci < wordCount; ci++) {
+      buf_putc(' ');
+      cmdline_put_word(g_cmdWords[ci], g_cmdHiPos[ci]);
+    }
   }
+  buf_color(37);
 }
 
 void draw_screen(void)
@@ -1796,6 +2417,10 @@ int main(int argc, char *argv[])
       do_rename();
     } else if (key == 'k' || key == 'K') {
       do_mkdir();
+    } else if (key == 'c' || key == 'C') {
+      do_copy();
+    } else if (key == 'm' || key == 'M') {
+      do_move();
     } else if (key == 'q' || key == 'Q' || key == KEY_ESC) {
       running = 0;
     }

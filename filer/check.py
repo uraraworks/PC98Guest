@@ -22,11 +22,8 @@ Checks (all must pass, otherwise this exits non-zero):
      (see MSG_LIMITS below) into one of:
        - "box"    : placed alone into a header-box row (box_row()), must
                     fit within BOX_WIDTH cells.
-       - "cmdline": the bottom-row help text (MSG_CMDLINE), must fit within
-                    CMDLINE_WIDTH cells (the cap draw_screen_frame() now
-                    truncates it to).
-       - "dialog" : placed alone into a draw_dialog() box, must fit within
-                    DIALOG_WIDTH cells.
+       - "dialog" : placed alone into a draw_dialog() or draw_input_box()
+                    box, must fit within DIALOG_WIDTH cells.
        - "fragment": concatenated at runtime with other fragments and/or
                     variable-length data (a path, a filename, a number)
                     before being placed into a row. The combined row is
@@ -37,8 +34,22 @@ Checks (all must pass, otherwise this exits non-zero):
                     deliberately NOT length-checked here. They are still
                     listed in the report so the exclusion is visible
                     rather than silent.
-     BOX_WIDTH, CMDLINE_WIDTH and DIALOG_WIDTH are all read out of
-     FILER.C's #define lines, never hard-coded here.
+     BOX_WIDTH and DIALOG_WIDTH are both read out of FILER.C's #define
+     lines, never hard-coded here.
+  6. The bottom command line (g_cmdWords[] - since milestone 4 this is no
+     longer part of g_msgJA/g_msgEN at all, see the module note below)
+     is reconstructed exactly the way draw_screen_frame() assembles it -
+     g_cmdWords[0] as-is, then a single space plus each remaining word -
+     and the *visible* character count (no ESC[...]m sequences; those are
+     never part of the on-screen cell count - see FILER.C's text_width())
+     must not exceed CMDLINE_WIDTH cells.
+
+Milestone 4 note: the old bilingual MSG_CMDLINE message (one long
+"key:description" string capped at CMDLINE_WIDTH) has been replaced by
+g_cmdWords[]/g_cmdHiPos[] - a language-independent array of English
+command words plus the index of each word's highlighted key letter. It is
+plain C data, not part of g_msgJA/g_msgEN, so it is checked separately
+(check 6) rather than through MSG_LIMITS/extract_array.
 
 Usage:
   python3 check.py [path-to-FILER.C]
@@ -54,7 +65,6 @@ import os
 # or their call sites change how they're assembled onto the screen.
 #
 #   "box"      -> checked against BOX_WIDTH
-#   "cmdline"  -> checked against CMDLINE_WIDTH
 #   "dialog"   -> checked against DIALOG_WIDTH
 #   "fragment" -> not length-checked (see module docstring); listed only
 MSG_LIMITS = {
@@ -70,20 +80,31 @@ MSG_LIMITS = {
     "MSG_DISK_FREE":            ("fragment", 9),
     "MSG_BYTES_SUFFIX":         ("fragment", 10),
     "MSG_ATTR_LABEL":           ("fragment", 11),
-    "MSG_CMDLINE":              ("cmdline",  12),
-    "MSG_MARKED_LABEL":         ("fragment", 13),
-    "MSG_DEL_CONFIRM_ONE_PRE":  ("fragment", 14),
-    "MSG_DEL_CONFIRM_ONE_SUF":  ("fragment", 15),
-    "MSG_DEL_CONFIRM_MARK_PRE": ("fragment", 16),
-    "MSG_DEL_CONFIRM_MARK_SUF": ("fragment", 17),
-    "MSG_DEL_ERR_ISDIR":        ("dialog",   18),
-    "MSG_DEL_ERR_FAILED":       ("dialog",   19),
-    "MSG_RENAME_PROMPT":        ("fragment", 20),
-    "MSG_RENAME_ERR_EMPTY":     ("dialog",   21),
-    "MSG_RENAME_ERR_FAILED":    ("dialog",   22),
-    "MSG_MKDIR_PROMPT":         ("fragment", 23),
-    "MSG_MKDIR_ERR_EMPTY":      ("dialog",   24),
-    "MSG_MKDIR_ERR_FAILED":     ("dialog",   25),
+    "MSG_MARKED_LABEL":         ("fragment", 12),
+    "MSG_DEL_CONFIRM_ONE_PRE":  ("fragment", 13),
+    "MSG_DEL_CONFIRM_ONE_SUF":  ("fragment", 14),
+    "MSG_DEL_CONFIRM_MARK_PRE": ("fragment", 15),
+    "MSG_DEL_CONFIRM_MARK_SUF": ("fragment", 16),
+    "MSG_DEL_ERR_ISDIR":        ("dialog",   17),
+    "MSG_DEL_ERR_FAILED":       ("dialog",   18),
+    "MSG_RENAME_PROMPT":        ("fragment", 19),
+    "MSG_RENAME_ERR_EMPTY":     ("dialog",   20),
+    "MSG_RENAME_ERR_FAILED":    ("dialog",   21),
+    "MSG_MKDIR_PROMPT":         ("fragment", 22),
+    "MSG_MKDIR_ERR_EMPTY":      ("dialog",   23),
+    "MSG_MKDIR_ERR_FAILED":     ("dialog",   24),
+    "MSG_CM_ERR_HASDIR":        ("dialog",   25),
+    "MSG_COPY_PROMPT":          ("fragment", 26),
+    "MSG_MOVE_PROMPT":          ("fragment", 27),
+    "MSG_CM_ERR_EMPTY":         ("dialog",   28),
+    "MSG_COPY_ERR_PRE":         ("fragment", 29),
+    "MSG_MOVE_ERR_PRE":         ("fragment", 30),
+    "MSG_OVERWRITE_PRE":        ("fragment", 31),
+    "MSG_OVERWRITE_SUF":        ("fragment", 32),
+    "MSG_COPY_DONE_PRE":        ("fragment", 33),
+    "MSG_COPY_DONE_SUF":        ("fragment", 34),
+    "MSG_MOVE_DONE_PRE":        ("fragment", 35),
+    "MSG_MOVE_DONE_SUF":        ("fragment", 36),
 }
 
 
@@ -111,10 +132,11 @@ def cell_width(raw_bytes):
 
 def extract_array(text, name):
     """pulls the double-quoted string literals out of
-    'const char *name[] = { ... };'. FILER.C's message tables use plain
-    literals with no escaped quotes, so a straightforward literal scan is
-    enough (no need for a full C string-literal parser)."""
-    m = re.search(r"const char \*" + re.escape(name) + r"\[\]\s*=\s*\{(.*?)\};", text, re.S)
+    '[const ]char *name[] = { ... };'. FILER.C's message tables (and,
+    since milestone 4, g_cmdWords[]) use plain literals with no escaped
+    quotes, so a straightforward literal scan is enough (no need for a
+    full C string-literal parser)."""
+    m = re.search(r"(?:const\s+)?char \*" + re.escape(name) + r"\[\]\s*=\s*\{(.*?)\};", text, re.S)
     if m is None:
         fail("could not find array %s[] in FILER.C" % name)
     body = m.group(1)
@@ -173,7 +195,6 @@ def main():
     # ---- check 5: every message fits the cell limit its use site implies --
     limits = {
         "box": box_width,
-        "cmdline": cmdline_width,
         "dialog": dialog_width,
     }
     n = len(ja)
@@ -200,8 +221,8 @@ def main():
             if w > limit:
                 fail("%s[%s] (index %d) is %d cells wide, exceeds the %s "
                      "limit (%d cells) - %r" %
-                     (label, name, idx, w, kind.upper() + "_WIDTH" if kind != "box"
-                      else "BOX_WIDTH", limit, s))
+                     (label, name, idx, w, "BOX_WIDTH" if kind == "box"
+                      else "DIALOG_WIDTH", limit, s))
         ja_w = cell_width(ja[idx].encode("cp932"))
         en_w = cell_width(en[idx].encode("cp932"))
         report.append("  [%2d] %-26s %-8s limit=%3d  JA=%3d  EN=%3d" %
@@ -209,10 +230,27 @@ def main():
 
     print("PASS: 5) every message fits the cell limit implied by its use "
           "site, in both languages")
-    print("     (box=%d cmdline=%d dialog=%d cells)" %
-          (box_width, cmdline_width, dialog_width))
+    print("     (box=%d dialog=%d cells)" % (box_width, dialog_width))
     for line in report:
         print(line)
+
+    # ---- check 6: bottom command line (g_cmdWords[]) fits CMDLINE_WIDTH --
+    # Reconstructed the same way draw_screen_frame() assembles it: word 0
+    # as-is, then " " + each remaining word. Highlight escape sequences
+    # (ESC[7m/ESC[0m, added around one character of each command word by
+    # cmdline_put_word()) are never part of this text - only the visible
+    # characters below are - matching text_width()'s "never count escape
+    # bytes as cells" rule.
+    cmd_words = extract_array(text, "g_cmdWords")
+    if len(cmd_words) == 0:
+        fail("g_cmdWords[] in FILER.C is empty")
+    visible = cmd_words[0] + "".join(" " + w for w in cmd_words[1:])
+    visible_width = cell_width(visible.encode("cp932"))
+    if visible_width > cmdline_width:
+        fail("g_cmdWords[] assembles to %d cells, exceeds CMDLINE_WIDTH "
+             "(%d cells) - %r" % (visible_width, cmdline_width, visible))
+    print("PASS: 6) g_cmdWords[] assembles to %d cells (limit=%d): %r" %
+          (visible_width, cmdline_width, visible))
 
     print("ALL CHECKS PASSED")
     return 0
