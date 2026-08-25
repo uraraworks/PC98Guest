@@ -37,6 +37,37 @@
 #define VISIBLE_MAX   34     /* 17 rows x 2 columns; see README for the
                                  milestone-1 "no paging yet" limitation */
 
+/* ---- cursor movement directions (used by move_cursor) ---------------- */
+#define DIR_UP    1
+#define DIR_DOWN  2
+#define DIR_LEFT  3
+#define DIR_RIGHT 4
+
+/* ---- key codes returned by DOS INT 21h AH=08h (console input, no echo)
+ * Measured on real DOS/PC-98 with a probe program: unlike the IBM PC
+ * convention of a 0x00 prefix byte followed by an extended scan code,
+ * PC-98 DOS returns arrow keys as single control codes. The old
+ * "if (key == 0) key2 = dos_getch();" two-byte read never saw its
+ * prefix byte and so the arrow keys did nothing.
+ * ------------------------------------------------------------------- */
+#define KEY_UP     0x0b
+#define KEY_DOWN   0x0a
+#define KEY_LEFT   0x08   /* same code as BS; treated as left in the list */
+#define KEY_RIGHT  0x0c
+#define KEY_HOME   0x1a
+#define KEY_ESC    0x1b
+#define KEY_TAB    0x09
+#define KEY_ENTER  0x0d
+/* WordStar-style alternates, up/down only. ^S (0x13, "left" in the
+ * WordStar scheme) must NOT be bound here: real DOS's console driver
+ * treats ^S as XOFF and freezes screen output until ^Q is pressed
+ * (confirmed on real hardware). A BIOS/VRAM-direct program can use ^S
+ * safely; this program goes through the DOS console API (AH=08h/40h),
+ * so ^S is not usable. ^D is left unbound too: unlike ^E/^X it has not
+ * been confirmed not to collide with anything. */
+#define KEY_CTRL_E 0x05   /* alternate for up */
+#define KEY_CTRL_X 0x18   /* alternate for down */
+
 #define ATTR_RDONLY   0x01
 #define ATTR_HIDDEN   0x02
 #define ATTR_SYSTEM   0x04
@@ -1052,7 +1083,7 @@ void draw_screen(void)
 
 /* ---- input / cursor movement -------------------------------------------- */
 
-void move_cursor(int key2)
+void move_cursor(int dir)
 {
   int leftCount;
   int rightCount;
@@ -1067,15 +1098,15 @@ void move_cursor(int key2)
 
   if (g_cursor < leftCount) {
     row = g_cursor;
-    if (key2 == 0x48) { if (row > 0) g_cursor = row - 1; }             /* up */
-    else if (key2 == 0x50) { if (row < leftCount - 1) g_cursor = row + 1; } /* down */
-    else if (key2 == 0x4d) { if (row < rightCount) g_cursor = leftCount + row; } /* right */
+    if (dir == DIR_UP) { if (row > 0) g_cursor = row - 1; }
+    else if (dir == DIR_DOWN) { if (row < leftCount - 1) g_cursor = row + 1; }
+    else if (dir == DIR_RIGHT) { if (row < rightCount) g_cursor = leftCount + row; }
     /* left: already in left column, nothing to do */
   } else {
     row = g_cursor - leftCount;
-    if (key2 == 0x48) { if (row > 0) g_cursor = leftCount + row - 1; }
-    else if (key2 == 0x50) { if (row < rightCount - 1) g_cursor = leftCount + row + 1; }
-    else if (key2 == 0x4b) { g_cursor = row; } /* left */
+    if (dir == DIR_UP) { if (row > 0) g_cursor = leftCount + row - 1; }
+    else if (dir == DIR_DOWN) { if (row < rightCount - 1) g_cursor = leftCount + row + 1; }
+    else if (dir == DIR_LEFT) { g_cursor = row; }
     /* right: already in right column, nothing to do */
   }
 }
@@ -1101,7 +1132,6 @@ void parse_args(int argc, char *argv[])
 int main(int argc, char *argv[])
 {
   int key;
-  int key2;
   int running;
 
   if (!msg_selftest()) {
@@ -1122,11 +1152,19 @@ int main(int argc, char *argv[])
   running = 1;
   while (running) {
     key = dos_getch();
-    if (key == 0) {
-      key2 = dos_getch();
-      move_cursor(key2);
+    if (key == KEY_UP || key == KEY_CTRL_E) {
+      move_cursor(DIR_UP);
       draw_screen();
-    } else if (key == 'q' || key == 'Q' || key == 0x1b) {
+    } else if (key == KEY_DOWN || key == KEY_CTRL_X) {
+      move_cursor(DIR_DOWN);
+      draw_screen();
+    } else if (key == KEY_LEFT) {
+      move_cursor(DIR_LEFT);
+      draw_screen();
+    } else if (key == KEY_RIGHT) {
+      move_cursor(DIR_RIGHT);
+      draw_screen();
+    } else if (key == 'q' || key == 'Q' || key == KEY_ESC) {
       running = 0;
     }
   }
