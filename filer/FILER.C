@@ -486,29 +486,58 @@ void right_justify(char *buf, int col, int width, char *s)
 /* appends the NUL-terminated string s to dst at byte offset *lenp, then
    re-terminates dst; *lenp is advanced past the appended bytes. Used to
    assemble row content (label + number + label + ...) into a plain
-   buffer before it is placed into a header box row. */
-void sappend(char *dst, int *lenp, char *s)
+   buffer before it is placed into a header box row.
+   'cap' is the total size (in bytes, including room for the NUL) of the
+   dst buffer as declared by the caller; sappend() never writes at or
+   past dst[cap-1] other than the terminating NUL, and never writes only
+   half of a 2-byte SJIS/box-drawing character - if the remaining room is
+   not enough for both bytes of such a character, that character (and
+   everything after it in s) is silently dropped and dst stays a valid,
+   NUL-terminated C string. */
+void sappend(char *dst, int *lenp, char *s, int cap)
 {
   int i;
+  int lp;
+  unsigned char c;
+  int chBytes;
 
+  lp = *lenp;
   i = 0;
   while (s[i] != 0) {
-    dst[*lenp] = s[i];
-    (*lenp)++;
+    c = (unsigned char)s[i];
+    if ((c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC)) {
+      chBytes = (s[i + 1] != 0) ? 2 : 1; /* truncated lead byte: treat as 1 */
+    } else {
+      chBytes = 1;
+    }
+    if (lp + chBytes > cap - 1) break; /* leave room for the NUL */
+    dst[lp] = s[i];
+    lp++;
     i++;
+    if (chBytes == 2) {
+      dst[lp] = s[i];
+      lp++;
+      i++;
+    }
   }
-  dst[*lenp] = 0;
+  dst[lp] = 0;
+  *lenp = lp;
 }
 
-/* same as sappend(), but for an unsigned int formatted as plain decimal */
-void sappend_uint(char *dst, int *lenp, unsigned int v)
+/* same as sappend(), but for an unsigned int formatted as plain decimal;
+   'cap' has the same meaning as in sappend(). Digits are ASCII (1 byte
+   each), so no multi-byte character can ever be split here, but each
+   digit is still checked against the remaining room before it is
+   written. */
+void sappend_uint(char *dst, int *lenp, unsigned int v, int cap)
 {
   char tmp[6];
   int n;
+  int lp;
 
   n = 0;
   if (v == 0) {
-    sappend(dst, lenp, "0");
+    sappend(dst, lenp, "0", cap);
     return;
   }
   while (v > 0) {
@@ -516,12 +545,15 @@ void sappend_uint(char *dst, int *lenp, unsigned int v)
     v = v / 10;
     n++;
   }
+  lp = *lenp;
   while (n > 0) {
     n--;
-    dst[*lenp] = tmp[n];
-    (*lenp)++;
+    if (lp + 1 > cap - 1) break;
+    dst[lp] = tmp[n];
+    lp++;
   }
-  dst[*lenp] = 0;
+  dst[lp] = 0;
+  *lenp = lp;
 }
 
 /* copies s into buf starting at cell offset col, at most 'width' screen
@@ -588,23 +620,33 @@ void box_row(int row, char *lb, char *rb, char *content)
 
 /* fills out[] with exactly BOX_WIDTH cells (2*BOX_WIDTH... no, BOX_WIDTH
    is even, so BOX_WIDTH bytes) of the horizontal line character; used for
-   the header box's plain separator/border rows. */
-void build_dash_row(char *out)
+   the header box's plain separator/border rows. 'cap' is the total size
+   of the out[] buffer as declared by the caller (see sappend()); it
+   bounds the writes here too, defensively, in case BOX_WIDTH is ever
+   changed without the caller's buffer growing to match. */
+void build_dash_row(char *out, int cap)
 {
   int p;
   int i;
 
   p = 0;
   for (i = 0; i < BOX_WIDTH / 2; i++) {
-    sappend(out, &p, BOXCH_H);
+    sappend(out, &p, BOXCH_H, cap);
   }
 }
 
 /* builds the top border row's content: horizontal line, the title
    message centered-ish, horizontal line, filling exactly BOX_WIDTH
    cells. Width is computed in cells via text_width(), never assumed, so
-   this adapts to either language table without hardcoding a length. */
-void build_title_row(char *out)
+   this adapts to either language table without hardcoding a length.
+   'cap' is the total size of the out[] buffer as declared by the caller
+   (see sappend()); if the title message is too long to fit, sappend()
+   truncates it (without splitting a multi-byte character) rather than
+   overflowing out[], and the fill/border logic below still runs against
+   the (possibly negative, clamped to 0) remaining cell count so the
+   fixed-width box_row() caller always gets a validly NUL-terminated
+   string back. */
+void build_title_row(char *out, int cap)
 {
   char *title;
   int p;
@@ -615,20 +657,21 @@ void build_title_row(char *out)
   title = MSG(MSG_TITLE);
 
   p = 0;
-  sappend(out, &p, BOXCH_H);
-  sappend(out, &p, BOXCH_H);
-  sappend(out, &p, " ");
-  sappend(out, &p, title);
-  sappend(out, &p, " ");
+  sappend(out, &p, BOXCH_H, cap);
+  sappend(out, &p, BOXCH_H, cap);
+  sappend(out, &p, " ", cap);
+  sappend(out, &p, title, cap);
+  sappend(out, &p, " ", cap);
 
   /* byte offset == cell offset here: every string appended above is
      either 1-byte ASCII or a 2-byte SJIS/box char, so p already equals
-     the number of cells used. */
+     the number of cells used (as long as none of it got truncated by
+     sappend(); if it did, fillCells below simply clamps to 0). */
   fillCells = BOX_WIDTH - p;
   if (fillCells < 0) fillCells = 0; /* defensive: title too wide to fit */
   fillPairs = fillCells / 2;
-  for (i = 0; i < fillPairs; i++) sappend(out, &p, BOXCH_H);
-  if ((fillCells % 2) == 1) sappend(out, &p, " ");
+  for (i = 0; i < fillPairs; i++) sappend(out, &p, BOXCH_H, cap);
+  if ((fillCells % 2) == 1) sappend(out, &p, " ", cap);
 }
 
 /* ---- screen frame buffer (replaces stdio for all screen output) ------- */
@@ -846,7 +889,7 @@ void draw_disk_line(void)
 
   p = 0;
   if (secPerClus == 0xFFFF) {
-    sappend(row, &p, MSG(MSG_DISK_UNAVAIL));
+    sappend(row, &p, MSG(MSG_DISK_UNAVAIL), sizeof(row));
     box_row(ROW_DISK, BOXCH_V, BOXCH_V, row);
     return;
   }
@@ -860,17 +903,17 @@ void draw_disk_line(void)
   format_u32(usedHi, usedLo, usedBuf);
   format_u32(freeHi, freeLo, freeBuf);
 
-  sappend(row, &p, MSG(MSG_DISK_TOTAL));
-  sappend(row, &p, totalBuf);
-  sappend(row, &p, MSG(MSG_BYTES_SUFFIX));
-  sappend(row, &p, " ");
-  sappend(row, &p, MSG(MSG_DISK_USED));
-  sappend(row, &p, usedBuf);
-  sappend(row, &p, MSG(MSG_BYTES_SUFFIX));
-  sappend(row, &p, " ");
-  sappend(row, &p, MSG(MSG_DISK_FREE));
-  sappend(row, &p, freeBuf);
-  sappend(row, &p, MSG(MSG_BYTES_SUFFIX));
+  sappend(row, &p, MSG(MSG_DISK_TOTAL), sizeof(row));
+  sappend(row, &p, totalBuf, sizeof(row));
+  sappend(row, &p, MSG(MSG_BYTES_SUFFIX), sizeof(row));
+  sappend(row, &p, " ", sizeof(row));
+  sappend(row, &p, MSG(MSG_DISK_USED), sizeof(row));
+  sappend(row, &p, usedBuf, sizeof(row));
+  sappend(row, &p, MSG(MSG_BYTES_SUFFIX), sizeof(row));
+  sappend(row, &p, " ", sizeof(row));
+  sappend(row, &p, MSG(MSG_DISK_FREE), sizeof(row));
+  sappend(row, &p, freeBuf, sizeof(row));
+  sappend(row, &p, MSG(MSG_BYTES_SUFFIX), sizeof(row));
 
   box_row(ROW_DISK, BOXCH_V, BOXCH_V, row);
 }
@@ -885,12 +928,12 @@ void draw_path_line(void)
   int p;
 
   p = 0;
-  sappend(row, &p, MSG(MSG_PATH_PREFIX));
-  sappend(row, &p, g_path);
+  sappend(row, &p, MSG(MSG_PATH_PREFIX), sizeof(row));
+  sappend(row, &p, g_path, sizeof(row));
   if (g_truncated) {
-    sappend(row, &p, MSG(MSG_TRUNC_PREFIX));
-    sappend_uint(row, &p, (unsigned int)MAX_ENTRIES);
-    sappend(row, &p, MSG(MSG_TRUNC_SUFFIX));
+    sappend(row, &p, MSG(MSG_TRUNC_PREFIX), sizeof(row));
+    sappend_uint(row, &p, (unsigned int)MAX_ENTRIES, sizeof(row));
+    sappend(row, &p, MSG(MSG_TRUNC_SUFFIX), sizeof(row));
   }
 
   box_row(ROW_PATH, BOXCH_V, BOXCH_V, row);
@@ -911,8 +954,8 @@ void draw_info_line(int visibleCount)
 
   p = 0;
   if (visibleCount == 0) {
-    sappend(row, &p, MSG(MSG_INFO_PREFIX));
-    sappend(row, &p, MSG(MSG_INFO_EMPTY));
+    sappend(row, &p, MSG(MSG_INFO_PREFIX), sizeof(row));
+    sappend(row, &p, MSG(MSG_INFO_EMPTY), sizeof(row));
     box_row(ROW_INFO, BOXCH_V, BOXCH_V, row);
     return;
   }
@@ -928,18 +971,18 @@ void draw_info_line(int visibleCount)
   format_date(g_date[g_cursor], datebuf);
   format_time(g_time[g_cursor], timebuf);
 
-  sappend(row, &p, MSG(MSG_INFO_PREFIX));
-  sappend(row, &p, &g_name[g_cursor * NAME_LEN]);
-  sappend(row, &p, "  ");
-  sappend(row, &p, sizebuf);
-  sappend(row, &p, MSG(MSG_BYTES_SUFFIX));
-  sappend(row, &p, "  ");
-  sappend(row, &p, datebuf);
-  sappend(row, &p, " ");
-  sappend(row, &p, timebuf);
-  sappend(row, &p, "  ");
-  sappend(row, &p, MSG(MSG_ATTR_LABEL));
-  sappend(row, &p, attrbuf);
+  sappend(row, &p, MSG(MSG_INFO_PREFIX), sizeof(row));
+  sappend(row, &p, &g_name[g_cursor * NAME_LEN], sizeof(row));
+  sappend(row, &p, "  ", sizeof(row));
+  sappend(row, &p, sizebuf, sizeof(row));
+  sappend(row, &p, MSG(MSG_BYTES_SUFFIX), sizeof(row));
+  sappend(row, &p, "  ", sizeof(row));
+  sappend(row, &p, datebuf, sizeof(row));
+  sappend(row, &p, " ", sizeof(row));
+  sappend(row, &p, timebuf, sizeof(row));
+  sappend(row, &p, "  ", sizeof(row));
+  sappend(row, &p, MSG(MSG_ATTR_LABEL), sizeof(row));
+  sappend(row, &p, attrbuf, sizeof(row));
 
   box_row(ROW_INFO, BOXCH_V, BOXCH_V, row);
 }
@@ -968,12 +1011,12 @@ void draw_screen(void)
   /* header box, rows 0-5: full-width box-drawing borders around the
      title/disk/path/info lines (see BOXCH_* above for why full-width
      chars rather than the half-width single-line set). */
-  build_title_row(titleRow);
+  build_title_row(titleRow, sizeof(titleRow));
   box_row(ROW_TITLE, BOXCH_TL, BOXCH_TR, titleRow);
 
   draw_disk_line();
 
-  build_dash_row(dashRow);
+  build_dash_row(dashRow, sizeof(dashRow));
   box_row(ROW_SEP1, BOXCH_LT, BOXCH_RT, dashRow);
 
   draw_path_line();
