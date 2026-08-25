@@ -1,5 +1,5 @@
 /*
- * FILER.C - PC-98 / FreeDOS(98) directory browser (milestone 2)
+ * FILER.C - PC-98 / FreeDOS(98) directory browser (milestone 5)
  *
  * Independent, from-scratch implementation. See README.md in this
  * directory for the independence declaration. All on-screen text below
@@ -26,19 +26,35 @@
  * capped at CMDLINE_WIDTH cells, it now shows English command words with
  * their key letter in reverse video, matching the original's own
  * measured convention (see g_cmdWords[]/cmdline_put_word()).
+ * Milestone 5 replaces the DOS-console/ANSI screen writer with direct
+ * text-VRAM writes (see below), draws the header/dialog frames with the
+ * original's half-width line-drawing codes instead of full-width ones
+ * (BOX_WIDTH grows from 76 to 78 cells accordingly), reproduces the
+ * cursor-row/command-key highlight with the VRAM attribute byte's
+ * reverse-video bit instead of ESC[7m, and only ever writes the cells
+ * that actually changed between frames instead of clearing the whole
+ * screen first.
  *
  * Built with SmallerC (C89-ish subset, 16-bit small-model MZ EXE).
- * Screen I/O uses ANSI-style escape sequences (measured against
- * WebNP2/FreeDOS(98); see docs/escape-measure-01.md). Directory access
- * uses plain DOS INT 21h services (AH=1Ah/4Eh/4Fh/47h/19h/36h), which
- * are documented, generic DOS APIs and not derived from any particular
- * program's source code.
+ * Milestone 5 moves all screen *content* drawing off the DOS console and
+ * onto direct text-VRAM writes (see the vram_* functions below and
+ * docs/tvram-measure-01.md / docs/filer-measure-03.md) - this fixes a
+ * header frame that measured as invisible (this font has no glyph for
+ * the full-width box-drawing characters milestones 1-4 used), a
+ * flickering per-frame ESC[2J, and lets the original's own half-width
+ * line-drawing codes be used, which the DOS console cannot pass through
+ * (it treats 0x81-0x9F as Shift_JIS lead bytes). A few small, purely
+ * ASCII pieces (showing/hiding the hardware text cursor, positioning it
+ * during input_dialog(), releasing/restoring the bottom function-key
+ * line) still go through DOS console ANSI-style escape sequences
+ * (measured against WebNP2/FreeDOS(98); see docs/escape-measure-01.md) -
+ * none of that carries SJIS text, so none of it is affected by the
+ * problem VRAM writes solve. Directory access uses plain DOS INT 21h
+ * services (AH=1Ah/4Eh/4Fh/47h/19h/36h), which are documented, generic
+ * DOS APIs and not derived from any particular program's source code.
  *
- * Output is written directly to DOS via INT 21h AH=40h (handle 1),
- * not through stdio: a full-screen redraw is assembled into an in
- * memory buffer and flushed with a single write. stdio's line
- * buffering never flushes here because the screen has no newlines,
- * so printf()/puts()/putchar() must not be used for screen output.
+ * Screen output never goes through stdio - printf()/puts()/putchar()
+ * must not be used for it.
  *
  * Screen text is bilingual (Japanese / English); see the message
  * table below. Select with the /J (Japanese, default) or /E (English)
@@ -120,26 +136,29 @@
 #define COL_LEFT      0
 #define COL_RIGHT     40
 
-#define SCRBUF_SIZE   8192
-
-/* ---- header box (rows 0-5) drawn with full-width box-drawing chars ---
- * Measured against the real console: the DOS-console text output path
- * treats bytes 0x81-0x9F as Shift_JIS lead bytes, so the half-width
- * single-line box characters (0x9C-0x9F etc.) cannot be sent through it
- * (see docs/ for the measurement). Full-width box-drawing characters
- * (each 2 screen cells) are used instead; all width math below is in
- * screen cells via text_width(), never byte counts or strlen().
+/* ---- header box (rows 0-5) drawn with half-width box-drawing chars ----
+ * Milestone 5: screen output moved to direct text-VRAM writes (see the
+ * vram_* functions below), so the half-width single-line box characters
+ * (0x9C-0x9F etc.) can be used directly - it was only the DOS console
+ * output path (AH=40h through ANSI.SYS) that mangled them by treating
+ * 0x81-0x9F as Shift_JIS lead bytes (measured; see
+ * docs/filer-measure-03.md). These are ANK (1 screen cell) codes, not
+ * SJIS text, so they are plain byte constants here, not C strings - they
+ * must never be handed to a CP932-aware function like vram_puts_cells()
+ * (which would misparse 0x9C.. as an SJIS lead byte needing a trail
+ * byte). All width math below is in screen cells via text_width() for
+ * real message text, and by direct column counting for these.
  * ------------------------------------------------------------------- */
-#define BOX_WIDTH     76   /* interior width in cells, between the borders */
+#define BOX_WIDTH     78   /* interior width in cells, between the borders */
 
-#define BOXCH_TL      "\x84\xa1"  /* topleft corner  */
-#define BOXCH_TR      "\x84\xa2"  /* topright corner */
-#define BOXCH_BL      "\x84\xa4"  /* bottomleft corner  */
-#define BOXCH_BR      "\x84\xa3"  /* bottomright corner */
-#define BOXCH_H       "\x84\x9f"  /* horizontal line */
-#define BOXCH_V       "\x84\xa0"  /* vertical line   */
-#define BOXCH_LT      "\x84\xa5"  /* left T (mid separator, left end)  */
-#define BOXCH_RT      "\x84\xa7"  /* right T (mid separator, right end) */
+#define BOXCH_TL      0x9c  /* topleft corner  */
+#define BOXCH_TR      0x9d  /* topright corner */
+#define BOXCH_BL      0x9e  /* bottomleft corner  */
+#define BOXCH_BR      0x9f  /* bottomright corner */
+#define BOXCH_H       0x95  /* horizontal line */
+#define BOXCH_V       0x96  /* vertical line   */
+#define BOXCH_LT      0x93  /* left T (mid separator, left end)  */
+#define BOXCH_RT      0x92  /* right T (mid separator, right end) */
 
 /* ---- language / message table ----------------------------------------
  * All on-screen text is collected here and looked up by index; no
@@ -346,9 +365,6 @@ char g_copybuf[COPY_BUF_SIZE]; /* single shared Copy/Move I/O buffer -
                                     see COPY_BUF_SIZE's comment; never put
                                     a buffer this size on the stack in a
                                     16-bit small-model program. */
-
-char g_scrbuf[SCRBUF_SIZE]; /* one full-screen frame, flushed in one write */
-unsigned int g_scrlen;
 
 /* ---- low level DOS calls (inline asm; see doc/smlrc.md "asm()") ------- */
 
@@ -883,230 +899,338 @@ void sappend_uint(char *dst, int *lenp, unsigned int v, int cap)
   *lenp = lp;
 }
 
-/* copies s into buf starting at cell offset col, at most 'width' screen
-   cells (as measured by text_width's SJIS-aware rules), silently
-   truncating on the right without ever splitting a multi-byte character.
-   Unlike put_str_n, the limit here is in cells, not bytes. Does not pad;
-   caller must pre-fill buf with spaces for a fixed-width field. */
-void put_str_cells(char *buf, int col, char *s, int width)
+/* ---- text VRAM (direct screen writes; milestone 5) --------------------
+ * Screen output no longer goes through the DOS console (AH=40h + ANSI.SYS
+ * escapes) at all for content - it writes straight to the two PC-98 text
+ * VRAM planes, char plane at 0xA0000 and attribute plane at 0xA2000, both
+ * 80x25 cells x 2 bytes/cell, laid out identically (measured; see
+ * docs/tvram-measure-01.md). This fixes three things measured against
+ * the real console path: (1) the full-width box-drawing glyphs this
+ * program used to draw a header frame with have no glyph in the font
+ * used here and drew nothing at all; (2) every redraw sent ESC[2J first,
+ * clearing the whole screen before repainting it, which flickers; (3)
+ * the original's own half-width line-drawing codes (0x9C-0x9F etc., see
+ * BOXCH_* above) cannot be sent through the DOS console because
+ * 0x81-0x9F are Shift_JIS lead bytes there - direct VRAM writes have no
+ * such interpretation, so they can be used exactly as the original does.
+ *
+ * ANK (half-width) cells: high byte 0x00, low byte = the character code
+ * (this is also how the half-width box-drawing codes above are stored -
+ * they are ANK codes, not SJIS). Zenkaku (full-width) cells: the source
+ * text here is CP932 (Shift_JIS); VRAM wants JIS X 0208 instead, so
+ * sjis_to_jis() converts each pair of SJIS bytes first, then the cell's
+ * low byte = (JIS first byte - 0x20), high byte = JIS second byte
+ * (measured; see docs/tvram-measure-01.md). A zenkaku character occupies
+ * two screen cells; the right-hand cell's content does not affect
+ * rendering (also measured), but it is still given a definite value (a
+ * blank ANK space) rather than left stale, so a later redraw that only
+ * changes what is in the left-hand cell cannot leave old data sitting in
+ * the right-hand one where something might later read it.
+ *
+ * No full-screen clear happens on every redraw. Instead, g_curChar[]/
+ * g_curAttr[] mirror what is currently actually sitting in VRAM for each
+ * of the 2000 cells; every put-a-cell call compares the new value against
+ * that mirror first and only touches hardware (and updates the mirror)
+ * when something actually changed. draw_screen_frame() (and everything
+ * under it - draw_dialog(), draw_input_box()) always regenerates the
+ * *entire* frame's content on every call, cell by cell, through these
+ * functions, so this comparison alone is what keeps a redraw from
+ * flickering or blanking anything: unchanged cells are simply never
+ * written again, and changed ones are updated in place with nothing in
+ * between ever going blank.
+ * ------------------------------------------------------------------- */
+
+#define VRAM_ROWS  25
+#define VRAM_COLS  80
+#define VRAM_CELLS (VRAM_ROWS * VRAM_COLS)
+
+/* attribute byte (see docs/tvram-measure-01.md): bits 7-5 = color (GRB),
+   b3 = underline (never used - measured rendering bug, shifts the glyph
+   4 dots right), b2 = reverse video, b0 = character displayed at all
+   (must stay set or the cell goes blank). ATTR_BASE is plain white;
+   ATTR_REV is the same color with the cell reversed, used for the
+   cursor row and for highlighting a command letter - see README. */
+#define ATTR_BASE  0xE1
+#define ATTR_REV   0xE5
+
+unsigned int g_curChar[VRAM_CELLS];  /* mirrors what is actually in VRAM */
+unsigned char g_curAttr[VRAM_CELLS];
+
+/* the only function that actually touches hardware. offset is a byte
+   offset into either plane (0, 2, 4, ... 3998 - i.e. cellIndex*2);
+   chWord is stored as a 16-bit word (low byte at offset, high byte at
+   offset+1, i.e. the plain x86 little-endian store this is), attr's low
+   byte is stored as a single byte at the same offset in the attribute
+   plane. Segments are loaded through a general register (cx) because
+   x86 cannot move an immediate directly into a segment register; es is
+   saved/restored around this the same way dos_rename() above saves/
+   restores it around int 21h, since the caller cannot be assumed to not
+   care what es holds afterward. */
+void vram_put_raw(unsigned int offset, unsigned int chWord, unsigned int attr)
+{
+  asm("mov di, [bp+4]\n"
+      "mov ax, [bp+6]\n"
+      "push es\n"
+      "mov cx, 0xa000\n"
+      "mov es, cx\n"
+      "mov [es:di], ax\n"
+      "mov cx, 0xa200\n"
+      "mov es, cx\n"
+      "mov al, [bp+8]\n"
+      "mov [es:di], al\n"
+      "pop es");
+}
+
+/* CP932 (Shift_JIS) -> JIS X 0208, one character. Verified against a
+   table of 16 kanji/kana measured from the real screen (see the
+   milestone 5 commit message / docs) before this was ever used to draw
+   anything - not derived from reading any existing conversion table.
+   s1/s2 must be a valid SJIS lead/trail byte pair (0x81-0x9F or
+   0xE0-0xFC lead, 0x40-0xFC trail excluding 0x7F - the same range
+   text_width()/sappend() already assume elsewhere in this file). */
+void sjis_to_jis(unsigned char s1, unsigned char s2, unsigned char *j1Out, unsigned char *j2Out)
+{
+  unsigned char t1;
+  unsigned char t2;
+
+  t1 = (s1 <= 0x9f) ? (unsigned char)(s1 - 0x71) : (unsigned char)(s1 - 0xb1);
+  t1 = (unsigned char)(t1 * 2 + 1);
+  if (s2 >= 0x9f) {
+    t2 = (unsigned char)(s2 - 0x7e);
+    t1 = (unsigned char)(t1 + 1);
+  } else if (s2 >= 0x7f) {
+    t2 = (unsigned char)(s2 - 0x20);
+  } else {
+    t2 = (unsigned char)(s2 - 0x1f);
+  }
+  *j1Out = t1;
+  *j2Out = t2;
+}
+
+/* clears the mirror to a state that cannot match any real cell content
+   this program ever writes (chWord 0 only ever occurs as a would-be ANK
+   NUL, which is never written - see vram_ank()/vram_zenkaku()), so the
+   very first frame always writes every cell it touches instead of
+   trusting stale BSS zero-init. Called once at startup. */
+void vram_shadow_init(void)
+{
+  int i;
+
+  for (i = 0; i < VRAM_CELLS; i++) {
+    g_curChar[i] = 0;
+    g_curAttr[i] = 0;
+  }
+}
+
+/* writes one cell if (and only if) it differs from what the mirror says
+   is already there. row/col are cell coordinates (0-24 / 0-79); out of
+   range is silently ignored (defensive - every caller below already
+   stays in range, but a fixed-width field computed from a message that
+   somehow ran long must never be allowed to index past VRAM_CELLS). */
+void vram_set_cell(int row, int col, unsigned int chWord, unsigned int attr)
+{
+  unsigned int idx;
+
+  if (row < 0 || row >= VRAM_ROWS || col < 0 || col >= VRAM_COLS) return;
+  idx = (unsigned int)(row * VRAM_COLS + col);
+  if (g_curChar[idx] == chWord && g_curAttr[idx] == (unsigned char)attr) return;
+  vram_put_raw((unsigned int)(idx * 2), chWord, attr);
+  g_curChar[idx] = chWord;
+  g_curAttr[idx] = (unsigned char)attr;
+}
+
+/* one ANK (half-width) cell: high byte 0x00, low byte = code as-is. Used
+   both for real ANK text and for the half-width box-drawing codes
+   (BOXCH_* above), which are plain byte constants, never C strings. */
+void vram_ank(int row, int col, unsigned char code, unsigned int attr)
+{
+  vram_set_cell(row, col, (unsigned int)code, attr);
+}
+
+/* one zenkaku (full-width) character spanning two cells at (row,col) and
+   (row,col+1); s1/s2 is the raw CP932 byte pair. See the file-header
+   comment above for the cell encoding and why the right-hand cell is
+   written too. */
+void vram_zenkaku(int row, int col, unsigned char s1, unsigned char s2, unsigned int attr)
+{
+  unsigned char j1;
+  unsigned char j2;
+  unsigned int chWord;
+
+  sjis_to_jis(s1, s2, &j1, &j2);
+  chWord = (unsigned int)(((unsigned int)j2 << 8) | (unsigned int)(j1 - 0x20));
+  vram_set_cell(row, col, chWord, attr);
+  vram_ank(row, col + 1, 0x20, attr);
+}
+
+/* places a NUL-terminated CP932 string at (row,col), at most 'width'
+   screen cells (same SJIS lead-byte rule as text_width()/sappend()
+   elsewhere in this file), then pads whatever is left of 'width' with
+   blanks - replaces put_str_cells() (which built a byte buffer for the
+   old ANSI writer) now that every cell is written straight through this.
+   Padding the remainder is required now that there is no more per-frame
+   ESC[2J: without it, a shorter string would leave older, longer
+   content sitting in the cells past its end. */
+void vram_puts_cells(int row, int col, char *s, unsigned int attr, int width)
 {
   int i;
   int cell;
-  int outpos;
   unsigned char c;
 
   i = 0;
   cell = 0;
-  outpos = col;
-  while (s[i] != 0) {
+  while (s[i] != 0 && cell < width) {
     c = (unsigned char)s[i];
     if ((c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC)) {
       if (s[i + 1] != 0) {
         if (cell + 2 > width) break;
-        buf[outpos] = s[i];
-        buf[outpos + 1] = s[i + 1];
-        outpos += 2;
+        vram_zenkaku(row, col + cell, c, (unsigned char)s[i + 1], attr);
         cell += 2;
         i += 2;
       } else {
-        if (cell + 1 > width) break;
-        buf[outpos] = s[i];
-        outpos++;
-        cell++;
-        i++;
+        vram_ank(row, col + cell, c, attr); /* truncated lead byte: ANK fallback */
+        cell += 1;
+        i += 1;
       }
     } else {
-      if (cell + 1 > width) break;
-      buf[outpos] = s[i];
-      outpos++;
-      cell++;
-      i++;
+      vram_ank(row, col + cell, c, attr);
+      cell += 1;
+      i += 1;
     }
+  }
+  while (cell < width) {
+    vram_ank(row, col + cell, 0x20, attr);
+    cell++;
   }
 }
 
-/* writes one command-line word, byte by byte, highlighting exactly the
-   character at cell index hlPos (its key) in reverse video. Measured on
-   real hardware: ESC[7m is reverse video (attribute b2) and works;
-   ESC[1m (bold/highlight) does not change anything visible; ESC[4m
-   (underline) shifts the following glyph 4 dots to the right, a real
-   rendering bug, so neither of those is used here. ESC[0m resets *all*
-   attributes, including color, not just reverse video - so color 37 (the
-   line's base color, set by the caller before this is used, matching
-   draw_screen_frame()'s buf_color(37) before the whole entries loop) is
-   re-applied right after every ESC[0m, keeping the rest of the word (and
-   whatever this program draws next) at the intended color rather than
-   whatever "no color set" defaults to.
-   Command words are plain ASCII (see g_cmdWords[]), so this indexes by
-   byte, not by text_width() cell - unlike the JA/EN message text
-   elsewhere in this file, no SJIS multi-byte handling is needed here.
-   hlPos == -1 (used for g_cmdWords[0], the plain legend text) disables
-   the highlight entirely. */
-void cmdline_put_word(char *word, int hlPos)
+/* blanks every one of the 2000 cells to a plain white space - used once
+   at startup (to get rid of whatever the boot/DOS prompt left behind
+   before the first frame is drawn) and once at exit (to leave the
+   screen in a state DOS can use again). Both go through vram_set_cell(),
+   so like everything else here this only actually writes the cells that
+   need it. */
+void vram_clear_all(void)
+{
+  int i;
+
+  for (i = 0; i < VRAM_CELLS; i++) {
+    vram_set_cell(i / VRAM_COLS, i % VRAM_COLS, 0x0020, ATTR_BASE);
+  }
+}
+
+/* positions the DOS/BIOS text cursor (the blinking hardware cursor,
+   shown only during input_dialog() - see its "\x1b[>5l"/"\x1b[>5h"
+   calls) via a plain ANSI CUP escape. This is unrelated to the SJIS/
+   half-width-box problem the vram_* functions above solve - it carries
+   no text, only ASCII digits - so it is still sent through the DOS
+   console exactly like write_str() below, rather than through VRAM. */
+void ansi_goto(int row, int col)
+{
+  char out[16];
+  char numbuf[6];
+  int p;
+  int i;
+
+  p = 0;
+  out[p++] = 0x1b;
+  out[p++] = '[';
+  format_u32_plain(0, (unsigned int)(row + 1), numbuf);
+  for (i = 0; numbuf[i] != 0; i++) out[p++] = numbuf[i];
+  out[p++] = ';';
+  format_u32_plain(0, (unsigned int)(col + 1), numbuf);
+  for (i = 0; numbuf[i] != 0; i++) out[p++] = numbuf[i];
+  out[p++] = 'H';
+  out[p] = 0;
+  write_str(out);
+}
+
+/* draws one row of the header box: left border char + content
+   (space-padded/truncated to BOX_WIDTH cells) + right border char. */
+void box_row(int row, unsigned char lb, unsigned char rb, char *content)
+{
+  vram_ank(row, 0, lb, ATTR_BASE);
+  vram_puts_cells(row, 1, content, ATTR_BASE, BOX_WIDTH);
+  vram_ank(row, 1 + BOX_WIDTH, rb, ATTR_BASE);
+}
+
+/* draws a header-box separator row: border char, BOX_WIDTH horizontal
+   line cells, border char. Replaces build_dash_row() + box_row(), which
+   used to build a BOX_WIDTH-cell string of the (2-cell, full-width)
+   horizontal line character first - now that the line character is a
+   1-cell ANK code, and ANK codes cannot be handed to vram_puts_cells()
+   (see the file-header comment above), the cells are written directly. */
+void box_dash_row(int row, unsigned char lb, unsigned char rb)
+{
+  int i;
+
+  vram_ank(row, 0, lb, ATTR_BASE);
+  for (i = 0; i < BOX_WIDTH; i++) vram_ank(row, 1 + i, BOXCH_H, ATTR_BASE);
+  vram_ank(row, 1 + BOX_WIDTH, rb, ATTR_BASE);
+}
+
+/* draws the header box's top border row (row 0): corners, horizontal
+   line, the title message, horizontal line, filling exactly BOX_WIDTH
+   interior cells. Width is computed in cells via text_width(), never
+   assumed, so this adapts to either language table without hardcoding a
+   length. Replaces build_title_row() + box_row() for the same reason as
+   box_dash_row() above - BOXCH_H is now an ANK code, not SJIS text, so
+   it cannot be mixed into a plain string with the (real, CP932) title
+   text and handed to vram_puts_cells() in one call. */
+void draw_title_row(void)
+{
+  char *title;
+  int titleCells;
+  int used;
+  int fillCells;
+  int fillPairs;
+  int i;
+  int col;
+
+  vram_ank(ROW_TITLE, 0, BOXCH_TL, ATTR_BASE);
+  vram_ank(ROW_TITLE, 1 + BOX_WIDTH, BOXCH_TR, ATTR_BASE);
+
+  title = MSG(MSG_TITLE);
+  titleCells = text_width(title);
+  used = 2 + 1 + titleCells + 1; /* "--" + " " + title + " " */
+  fillCells = BOX_WIDTH - used;
+  if (fillCells < 0) fillCells = 0; /* defensive: title too wide to fit */
+  fillPairs = fillCells / 2;
+
+  col = 1;
+  vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE); col++;
+  vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE); col++;
+  vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++;
+  vram_puts_cells(ROW_TITLE, col, title, ATTR_BASE, titleCells);
+  col += titleCells;
+  vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++;
+  for (i = 0; i < fillPairs; i++) { vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE); col++; }
+  if ((fillCells % 2) == 1) { vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++; }
+}
+
+/* draws the bottom command line's one command word, cell by cell,
+   highlighting exactly the cell at index hlPos (its key) with ATTR_REV
+   (reverse video - see docs/tvram-measure-01.md; measured to be bit b2
+   of the attribute byte). hlPos == -1 (used for g_cmdWords[0], the plain
+   legend text) disables the highlight entirely. Command words are plain
+   ASCII (see g_cmdWords[]), so this indexes by byte, not by a SJIS-aware
+   cell count - unlike the JA/EN message text elsewhere in this file, no
+   multi-byte handling is needed here. Returns the column just past the
+   word, for the caller to chain further words/spaces from. */
+int cmdline_put_word(int col, char *word, int hlPos)
 {
   int i;
 
   for (i = 0; word[i] != 0; i++) {
-    if (i == hlPos) {
-      buf_puts("\x1b[7m");
-      buf_putc(word[i]);
-      buf_puts("\x1b[0m");
-      buf_color(37);
-    } else {
-      buf_putc(word[i]);
-    }
+    vram_ank(ROW_CMD, col, (unsigned char)word[i], (i == hlPos) ? ATTR_REV : ATTR_BASE);
+    col++;
   }
-}
-
-/* draws one row of the header box: left border char(s) + content
-   (space-padded/truncated to BOX_WIDTH cells) + right border char(s).
-   'content' may be shorter than BOX_WIDTH (padded with spaces) or exactly
-   BOX_WIDTH (e.g. an all-dashes separator row); it is never split mid
-   multi-byte character. */
-void box_row(int row, char *lb, char *rb, char *content)
-{
-  char cell[BOX_WIDTH + 1];
-  int i;
-
-  for (i = 0; i < BOX_WIDTH; i++) cell[i] = ' ';
-  cell[BOX_WIDTH] = 0;
-  put_str_cells(cell, 0, content, BOX_WIDTH);
-
-  buf_goto(row, 0);
-  buf_puts(lb);
-  buf_puts(cell);
-  buf_puts(rb);
-}
-
-/* fills out[] with exactly BOX_WIDTH cells (2*BOX_WIDTH... no, BOX_WIDTH
-   is even, so BOX_WIDTH bytes) of the horizontal line character; used for
-   the header box's plain separator/border rows. 'cap' is the total size
-   of the out[] buffer as declared by the caller (see sappend()); it
-   bounds the writes here too, defensively, in case BOX_WIDTH is ever
-   changed without the caller's buffer growing to match. */
-void build_dash_row(char *out, int cap)
-{
-  int p;
-  int i;
-
-  p = 0;
-  for (i = 0; i < BOX_WIDTH / 2; i++) {
-    sappend(out, &p, BOXCH_H, cap);
-  }
-}
-
-/* builds the top border row's content: horizontal line, the title
-   message centered-ish, horizontal line, filling exactly BOX_WIDTH
-   cells. Width is computed in cells via text_width(), never assumed, so
-   this adapts to either language table without hardcoding a length.
-   'cap' is the total size of the out[] buffer as declared by the caller
-   (see sappend()); if the title message is too long to fit, sappend()
-   truncates it (without splitting a multi-byte character) rather than
-   overflowing out[], and the fill/border logic below still runs against
-   the (possibly negative, clamped to 0) remaining cell count so the
-   fixed-width box_row() caller always gets a validly NUL-terminated
-   string back. */
-void build_title_row(char *out, int cap)
-{
-  char *title;
-  int p;
-  int fillCells;
-  int fillPairs;
-  int i;
-
-  title = MSG(MSG_TITLE);
-
-  p = 0;
-  sappend(out, &p, BOXCH_H, cap);
-  sappend(out, &p, BOXCH_H, cap);
-  sappend(out, &p, " ", cap);
-  sappend(out, &p, title, cap);
-  sappend(out, &p, " ", cap);
-
-  /* byte offset == cell offset here: every string appended above is
-     either 1-byte ASCII or a 2-byte SJIS/box char, so p already equals
-     the number of cells used (as long as none of it got truncated by
-     sappend(); if it did, fillCells below simply clamps to 0). */
-  fillCells = BOX_WIDTH - p;
-  if (fillCells < 0) fillCells = 0; /* defensive: title too wide to fit */
-  fillPairs = fillCells / 2;
-  for (i = 0; i < fillPairs; i++) sappend(out, &p, BOXCH_H, cap);
-  if ((fillCells % 2) == 1) sappend(out, &p, " ", cap);
-}
-
-/* ---- screen frame buffer (replaces stdio for all screen output) ------- */
-
-void buf_reset(void)
-{
-  g_scrlen = 0;
-}
-
-void buf_putc(char c)
-{
-  g_scrbuf[g_scrlen] = c;
-  g_scrlen++;
-}
-
-void buf_puts(char *s)
-{
-  int i;
-
-  i = 0;
-  while (s[i] != 0) {
-    buf_putc(s[i]);
-    i++;
-  }
-}
-
-void buf_putuint(unsigned int v)
-{
-  char tmp[6];
-  int n;
-
-  n = 0;
-  if (v == 0) {
-    buf_putc('0');
-    return;
-  }
-  while (v > 0) {
-    tmp[n] = (char)('0' + (v % 10));
-    v = v / 10;
-    n++;
-  }
-  while (n > 0) {
-    n--;
-    buf_putc(tmp[n]);
-  }
-}
-
-void buf_goto(int row, int col)
-{
-  buf_puts("\x1b[");
-  buf_putuint((unsigned int)(row + 1));
-  buf_putc(';');
-  buf_putuint((unsigned int)(col + 1));
-  buf_putc('H');
-}
-
-void buf_color(int code)
-{
-  buf_puts("\x1b[");
-  buf_putuint((unsigned int)code);
-  buf_putc('m');
-}
-
-void buf_clear(void)
-{
-  buf_puts("\x1b[2J");
-}
-
-void buf_flush(void)
-{
-  dos_write(g_scrbuf, g_scrlen);
+  return col;
 }
 
 /* immediate one-off write, used only for the pre/post-frame terminal mode
-   escapes in main() (not part of a screen frame) */
+   escapes in main() (not part of a screen frame) and by ansi_goto()
+   above. */
 void write_str(char *s)
 {
   dos_write(s, (unsigned int)strlen(s));
@@ -1280,55 +1404,46 @@ void enter_selected(void)
 /* ---- delete -------------------------------------------------------------- */
 
 /* draws the base screen, then overlays a small modal dialog box (2 lines:
-   the prompt, and optionally an error line under it) and flushes once.
-   This is the "no dedicated bottom status line; errors appear inside the
-   dialog, prompt stays up" behaviour measured from the original - see the
-   milestone doc. errmsg may be 0 for "no error line". */
+   the prompt, and optionally an error line under it). Every cell this
+   touches goes straight through vram_set_cell()'s "skip if unchanged"
+   check (see the vram_* section above), so this never blanks anything -
+   the underlying list stays visible right up until the exact cells the
+   dialog box occupies change. This is the "no dedicated bottom status
+   line; errors appear inside the dialog, prompt stays up" behaviour
+   measured from the original - see the milestone doc. errmsg may be 0
+   for "no error line". */
 #define DIALOG_WIDTH  60
 #define DIALOG_ROW    10
 #define DIALOG_COL    8
 
 void draw_dialog(char *msg, char *errmsg)
 {
-  char cell[DIALOG_WIDTH + 1];
   int i;
   int row;
 
   draw_screen_frame();
 
   row = DIALOG_ROW;
-  buf_goto(row, DIALOG_COL);
-  buf_puts(BOXCH_TL);
-  for (i = 0; i < DIALOG_WIDTH / 2; i++) buf_puts(BOXCH_H);
-  buf_puts(BOXCH_TR);
+  vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BASE);
+  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BASE);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_TR, ATTR_BASE);
   row++;
 
-  for (i = 0; i < DIALOG_WIDTH; i++) cell[i] = ' ';
-  cell[DIALOG_WIDTH] = 0;
-  put_str_cells(cell, 0, msg, DIALOG_WIDTH);
-  buf_goto(row, DIALOG_COL);
-  buf_puts(BOXCH_V);
-  buf_puts(cell);
-  buf_puts(BOXCH_V);
+  vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BASE);
+  vram_puts_cells(row, DIALOG_COL + 1, msg, ATTR_BASE, DIALOG_WIDTH);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BASE);
   row++;
 
   if (errmsg != 0) {
-    for (i = 0; i < DIALOG_WIDTH; i++) cell[i] = ' ';
-    cell[DIALOG_WIDTH] = 0;
-    put_str_cells(cell, 0, errmsg, DIALOG_WIDTH);
-    buf_goto(row, DIALOG_COL);
-    buf_puts(BOXCH_V);
-    buf_puts(cell);
-    buf_puts(BOXCH_V);
+    vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BASE);
+    vram_puts_cells(row, DIALOG_COL + 1, errmsg, ATTR_BASE, DIALOG_WIDTH);
+    vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BASE);
     row++;
   }
 
-  buf_goto(row, DIALOG_COL);
-  buf_puts(BOXCH_BL);
-  for (i = 0; i < DIALOG_WIDTH / 2; i++) buf_puts(BOXCH_H);
-  buf_puts(BOXCH_BR);
-
-  buf_flush();
+  vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BASE);
+  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BASE);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BASE);
 }
 
 /* ---- reusable text-input dialog (Rename / mKdir) -----------------------
@@ -1352,7 +1467,6 @@ void draw_dialog(char *msg, char *errmsg)
    the same discipline as every other row-building function above. */
 void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
 {
-  char cell[DIALOG_WIDTH + 1];
   char line[DIALOG_WIDTH * 2 + NAME_LEN + 4];
   int i;
   int row;
@@ -1364,10 +1478,9 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   draw_screen_frame();
 
   row = DIALOG_ROW;
-  buf_goto(row, DIALOG_COL);
-  buf_puts(BOXCH_TL);
-  for (i = 0; i < DIALOG_WIDTH / 2; i++) buf_puts(BOXCH_H);
-  buf_puts(BOXCH_TR);
+  vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BASE);
+  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BASE);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_TR, ATTR_BASE);
   row++;
 
   p = 0;
@@ -1376,38 +1489,28 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   buf[len] = 0; /* line/sappend below need a NUL-terminated C string */
   sappend(line, &p, buf, sizeof(line));
 
-  for (i = 0; i < DIALOG_WIDTH; i++) cell[i] = ' ';
-  cell[DIALOG_WIDTH] = 0;
-  put_str_cells(cell, 0, line, DIALOG_WIDTH);
-  buf_goto(row, DIALOG_COL);
-  buf_puts(BOXCH_V);
-  buf_puts(cell);
-  buf_puts(BOXCH_V);
+  vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BASE);
+  vram_puts_cells(row, DIALOG_COL + 1, line, ATTR_BASE, DIALOG_WIDTH);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BASE);
   fieldRow = row;
   row++;
 
   if (errmsg != 0) {
-    for (i = 0; i < DIALOG_WIDTH; i++) cell[i] = ' ';
-    cell[DIALOG_WIDTH] = 0;
-    put_str_cells(cell, 0, errmsg, DIALOG_WIDTH);
-    buf_goto(row, DIALOG_COL);
-    buf_puts(BOXCH_V);
-    buf_puts(cell);
-    buf_puts(BOXCH_V);
+    vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BASE);
+    vram_puts_cells(row, DIALOG_COL + 1, errmsg, ATTR_BASE, DIALOG_WIDTH);
+    vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BASE);
     row++;
   }
 
-  buf_goto(row, DIALOG_COL);
-  buf_puts(BOXCH_BL);
-  for (i = 0; i < DIALOG_WIDTH / 2; i++) buf_puts(BOXCH_H);
-  buf_puts(BOXCH_BR);
+  vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BASE);
+  for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BASE);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BASE);
 
-  /* BOXCH_V is a 2-cell full-width character (see BOXCH_* comments
-     above), so the field text starts 2 cells past the border column. */
-  fieldCol = DIALOG_COL + 2 + promptCells + len;
-  buf_goto(fieldRow, fieldCol);
-
-  buf_flush();
+  /* BOXCH_V is now a 1-cell ANK border character, so the field text
+     starts 1 cell past the border column (this used to be 2, when the
+     border was a 2-cell full-width character). */
+  fieldCol = DIALOG_COL + 1 + promptCells + len;
+  ansi_goto(fieldRow, fieldCol);
 }
 
 /* runs the modal edit loop for one text field. 'buf' holds the initial
@@ -2230,6 +2333,39 @@ void draw_info_line(int visibleCount)
   box_row(ROW_INFO, BOXCH_V, BOXCH_V, row);
 }
 
+/* draws the bottom command line (row 24): g_cmdWords[0] (the plain
+   movement/mark/open legend) as-is, then a space plus each remaining
+   command word with its key letter highlighted (see cmdline_put_word()),
+   then blanks whatever is left of the row. This is verified by check.py
+   to stay within CMDLINE_WIDTH cells (check.py reconstructs the same
+   "word0, then space+word for each remaining word" text and measures it
+   the same SJIS-aware way text_width() does - though these words are all
+   plain ASCII so that never actually matters here); it is built here
+   exactly the same way check.py reconstructs it. */
+void draw_cmdline(void)
+{
+  int ci;
+  int wordCount;
+  int col;
+
+  col = 0;
+  vram_puts_cells(ROW_CMD, col, g_cmdWords[0], ATTR_BASE, text_width(g_cmdWords[0]));
+  col += text_width(g_cmdWords[0]);
+
+  wordCount = sizeof(g_cmdWords) / sizeof(g_cmdWords[0]);
+  for (ci = 1; ci < wordCount; ci++) {
+    vram_ank(ROW_CMD, col, ' ', ATTR_BASE);
+    col++;
+    col = cmdline_put_word(col, g_cmdWords[ci], g_cmdHiPos[ci]);
+  }
+
+  while (col < VRAM_COLS) {
+    vram_ank(ROW_CMD, col, ' ', ATTR_BASE);
+    col++;
+  }
+}
+
+
 void draw_screen_frame(void)
 {
   int leftCount;
@@ -2239,34 +2375,29 @@ void draw_screen_frame(void)
   int leftIdx;
   int rightIdx;
   char entrybuf[40];
-  char titleRow[BOX_WIDTH + 1];
-  char dashRow[BOX_WIDTH + 1];
-  int i;
 
   visibleCount = g_count;
   if (visibleCount > VISIBLE_MAX) visibleCount = VISIBLE_MAX;
   leftCount = (visibleCount > LEFT_ROWS) ? LEFT_ROWS : visibleCount;
   rightCount = visibleCount - leftCount;
 
-  buf_reset();
-  buf_clear();
-
-  /* header box, rows 0-5: full-width box-drawing borders around the
-     title/disk/path/info lines (see BOXCH_* above for why full-width
-     chars rather than the half-width single-line set). */
-  build_title_row(titleRow, sizeof(titleRow));
-  box_row(ROW_TITLE, BOXCH_TL, BOXCH_TR, titleRow);
+  /* No full-screen clear here (see the vram_* section above): every row
+     below is fully regenerated on every call, so leftover content is
+     only ever a stale value in a cell this frame does *not* revisit -
+     which the two "else" branches in the entries loop, and the
+     always-run trailing fill in draw_cmdline(), exist specifically to
+     rule out. header box, rows 0-5: half-width box-drawing borders. */
+  draw_title_row();
 
   draw_disk_line();
 
-  build_dash_row(dashRow, sizeof(dashRow));
-  box_row(ROW_SEP1, BOXCH_LT, BOXCH_RT, dashRow);
+  box_dash_row(ROW_SEP1, BOXCH_LT, BOXCH_RT);
 
   draw_path_line();
 
   draw_info_line(visibleCount);
 
-  box_row(ROW_SEP2, BOXCH_BL, BOXCH_BR, dashRow);
+  box_dash_row(ROW_SEP2, BOXCH_BL, BOXCH_BR);
 
   for (row = 0; row < LEFT_ROWS; row++) {
     leftIdx = row;
@@ -2274,46 +2405,30 @@ void draw_screen_frame(void)
 
     if (leftIdx < leftCount) {
       build_entry_text(leftIdx, entrybuf);
-      buf_color(leftIdx == g_cursor ? 33 : 37);
-      buf_goto(ROW_LIST_TOP + row, COL_LEFT);
-      buf_puts(entrybuf);
+      vram_puts_cells(ROW_LIST_TOP + row, COL_LEFT, entrybuf,
+                       (leftIdx == g_cursor) ? ATTR_REV : ATTR_BASE, 39);
+    } else {
+      /* nothing here now - blank it explicitly; a shrunk directory
+         listing (after Delete, or moving into a smaller directory) must
+         not leave a previous frame's row sitting here, now that there is
+         no per-frame ESC[2J to have done that for free. */
+      vram_puts_cells(ROW_LIST_TOP + row, COL_LEFT, "", ATTR_BASE, 39);
     }
     if (rightIdx < visibleCount) {
       build_entry_text(rightIdx, entrybuf);
-      buf_color(rightIdx == g_cursor ? 33 : 37);
-      buf_goto(ROW_LIST_TOP + row, COL_RIGHT);
-      buf_puts(entrybuf);
+      vram_puts_cells(ROW_LIST_TOP + row, COL_RIGHT, entrybuf,
+                       (rightIdx == g_cursor) ? ATTR_REV : ATTR_BASE, 39);
+    } else {
+      vram_puts_cells(ROW_LIST_TOP + row, COL_RIGHT, "", ATTR_BASE, 39);
     }
   }
-  buf_color(37);
 
-  buf_goto(ROW_CMD, 0);
-  buf_color(37);
-  {
-    int ci;
-    int wordCount;
-
-    /* language-independent: see g_cmdWords[]/g_cmdHiPos[] above. The
-       visible text this assembles (ignoring the ESC[...]m sequences
-       cmdline_put_word() adds around each highlighted key, which are
-       never counted as cells - see text_width()/check.py) is verified
-       by check.py to stay within CMDLINE_WIDTH cells; it is built here
-       exactly the same way check.py reconstructs it: g_cmdWords[0] as
-       is, then a single space plus each remaining word. */
-    wordCount = sizeof(g_cmdWords) / sizeof(g_cmdWords[0]);
-    buf_puts(g_cmdWords[0]);
-    for (ci = 1; ci < wordCount; ci++) {
-      buf_putc(' ');
-      cmdline_put_word(g_cmdWords[ci], g_cmdHiPos[ci]);
-    }
-  }
-  buf_color(37);
+  draw_cmdline();
 }
 
 void draw_screen(void)
 {
   draw_screen_frame();
-  buf_flush();
 }
 
 /* ---- input / cursor movement -------------------------------------------- */
@@ -2379,6 +2494,12 @@ int main(int argc, char *argv[])
   write_str("\x1b[>1h"); /* release the bottom function-key line */
   write_str("\x1b[>5h"); /* hide the text cursor */
 
+  vram_shadow_init();
+  vram_clear_all(); /* one-time clear of whatever the boot/DOS prompt left
+                        behind; every redraw after this only ever touches
+                        the cells that actually change - see the vram_*
+                        section above. */
+
   read_path();
   read_dir();
   g_cursor = 0;
@@ -2426,7 +2547,14 @@ int main(int argc, char *argv[])
     }
   }
 
-  write_str("\x1b[2J");
+  /* leave the screen in a state DOS can use again: clear it via the same
+     direct VRAM write everything else in this program uses (not
+     ESC[2J/ANSI.SYS - this program never set the DOS console's own
+     notion of the current color, so asking it to clear "with the
+     current attribute" would be relying on state nothing here ever set)
+     and re-home the cursor before showing it. */
+  vram_clear_all();
+  ansi_goto(0, 0);
   write_str("\x1b[>5l"); /* show the text cursor again */
   write_str("\x1b[>1l"); /* restore the function-key line */
 
