@@ -11,8 +11,13 @@
  * a directory (Enter, "." and ".." shown like the original), and
  * deleting the marked files (or the file under the cursor when nothing
  * is marked) with a confirm dialog. Directories are never marked and
- * are never deleted by this command. Copy/Move/Rename/mkdir are still
- * not implemented.
+ * are never deleted by this command.
+ * Milestone 3 adds: a reusable modal text-input dialog (input_dialog()),
+ * used by Rename (R, single entry under the cursor) and mKdir (K, create
+ * a directory in the current path). Both re-use the same dialog and show
+ * a failure message inline in the same box rather than a separate line,
+ * keeping the prompt and the partially-typed text on screen. Copy/Move
+ * are still not implemented.
  *
  * Built with SmallerC (C89-ish subset, 16-bit small-model MZ EXE).
  * Screen I/O uses ANSI-style escape sequences (measured against
@@ -38,6 +43,9 @@
 
 #define MAX_ENTRIES   1024
 #define NAME_LEN      13     /* 8.3 name + dot + NUL, as returned by DOS */
+#define INPUT_MAXLEN  12     /* max chars (not counting NUL) enterable in
+                                 input_dialog(): an 8.3 name, same limit as
+                                 NAME_LEN-1; see do_rename()/do_mkdir() */
 #define LEFT_ROWS     17
 #define VISIBLE_MAX   34     /* 17 rows x 2 columns; see README for the
                                  milestone-1 "no paging yet" limitation */
@@ -147,6 +155,12 @@
 #define MSG_DEL_CONFIRM_MARK_SUF  17
 #define MSG_DEL_ERR_ISDIR      18
 #define MSG_DEL_ERR_FAILED     19
+#define MSG_RENAME_PROMPT       20
+#define MSG_RENAME_ERR_EMPTY    21
+#define MSG_RENAME_ERR_FAILED   22
+#define MSG_MKDIR_PROMPT        23
+#define MSG_MKDIR_ERR_EMPTY     24
+#define MSG_MKDIR_ERR_FAILED    25
 
 const char *g_msgJA[] = {
   "PC98Guest ファイラ - ディレクトリビューア（マイルストーン2・開発中）",
@@ -161,14 +175,20 @@ const char *g_msgJA[] = {
   "空き:",
   "バイト",
   "属性:",
-  "矢印:移動　SPACE/TAB:マーク　HOME:全マーク切替　Enter:移動　D:削除　Q/ESC:終了",
+  "矢印移動 SP/TAB:マーク HOME:全マーク Enter:開く R:改名 K:新規 D:削除 Q/ESC:終了",
   "マーク:",
   "このファイルを削除しますか: ",
   " (Y/N)",
   "マークした ",
   " 件を削除します (Y/N)",
   "ディレクトリは削除できません（何かキーを押してください）",
-  "削除に失敗しました（読み取り専用？）キーを押してください"
+  "削除に失敗しました（読み取り専用？）キーを押してください",
+  "新しい名前: ",
+  "名前を入力してください",
+  "リネームに失敗しました（同名がある？）",
+  "新しいディレクトリ名: ",
+  "名前を入力してください",
+  "作成に失敗しました（同名がある？）"
 };
 
 const char *g_msgEN[] = {
@@ -184,14 +204,20 @@ const char *g_msgEN[] = {
   "Free:",
   " bytes",
   "Attr:",
-  "Arrows:move SPACE/TAB:mark HOME:toggle all Enter:open D:delete Q/ESC:quit",
+  "Arrows:move SP/TAB:mark HOME:all Enter:open R:ren K:mkdir D:del Q/ESC:quit",
   "Marked:",
   "Delete this file: ",
   " (Y/N)",
   "Delete the ",
   " marked file(s)? (Y/N)",
   "Cannot delete a directory (press any key)",
-  "Delete failed (read-only?) - press any key"
+  "Delete failed (read-only?) - press any key",
+  "New name: ",
+  "Enter a name",
+  "Rename failed (name already exists?)",
+  "New directory name: ",
+  "Enter a name",
+  "Create failed (name already exists?)"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -284,6 +310,34 @@ int dos_delete(char *path)
   asm("mov dx, [bp+4]\n"
       "mov ah, 0x41\n"
       "int 0x21\n"
+      "sbb ax, ax");
+}
+
+/* create a directory (INT 21h AH=39h, DS:DX = ASCIZ path). Returns 0 on
+   success, nonzero on failure (e.g. name already exists). */
+int dos_mkdir(char *path)
+{
+  asm("mov dx, [bp+4]\n"
+      "mov ah, 0x39\n"
+      "int 0x21\n"
+      "sbb ax, ax");
+}
+
+/* rename/move a file or directory (INT 21h AH=56h, DS:DX = old ASCIZ
+   path, ES:DI = new ASCIZ path). ES is not guaranteed to already equal
+   DS in the general case, so it is saved/set/restored here rather than
+   assumed. Returns 0 on success, nonzero on failure (e.g. a name that
+   already exists at the destination). */
+int dos_rename(char *oldPath, char *newPath)
+{
+  asm("mov dx, [bp+4]\n"
+      "mov di, [bp+6]\n"
+      "push es\n"
+      "mov ax, ds\n"
+      "mov es, ax\n"
+      "mov ah, 0x56\n"
+      "int 0x21\n"
+      "pop es\n"
       "sbb ax, ax");
 }
 
@@ -1049,6 +1103,145 @@ void draw_dialog(char *msg, char *errmsg)
   buf_flush();
 }
 
+/* ---- reusable text-input dialog (Rename / mKdir) -----------------------
+ * Draws the same kind of box as draw_dialog() (base screen still visible
+ * underneath - only the dialog area is overwritten) but with one editable
+ * field: a prompt fragment followed by the text being typed. Used by both
+ * do_rename() and do_mkdir() so the box, the edit keys, and the "error
+ * shown inline, prompt stays up, keep typing" behaviour exist in exactly
+ * one place.
+ * ------------------------------------------------------------------- */
+
+/* renders one frame of the input dialog: base screen, box border, the
+   prompt+typed-text line, an optional error line below it, and leaves
+   the (temporarily visible) text cursor positioned right after the last
+   typed character so the user can see where they are. 'buf' holds
+   'len' already-typed characters (not necessarily NUL-terminated at
+   'len' yet - the caller NUL-terminates on return, not per frame).
+   'line' is sized generously: prompt fragments here are short JA/EN
+   labels and 'buf' is at most INPUT_MAXLEN ASCII bytes, so this never
+   comes close to overflowing; sappend() bounds it defensively anyway,
+   the same discipline as every other row-building function above. */
+void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
+{
+  char cell[DIALOG_WIDTH + 1];
+  char line[DIALOG_WIDTH * 2 + NAME_LEN + 4];
+  int i;
+  int row;
+  int fieldRow;
+  int fieldCol;
+  int p;
+  int promptCells;
+
+  draw_screen_frame();
+
+  row = DIALOG_ROW;
+  buf_goto(row, DIALOG_COL);
+  buf_puts(BOXCH_TL);
+  for (i = 0; i < DIALOG_WIDTH / 2; i++) buf_puts(BOXCH_H);
+  buf_puts(BOXCH_TR);
+  row++;
+
+  p = 0;
+  sappend(line, &p, prompt, sizeof(line));
+  promptCells = text_width(line);
+  buf[len] = 0; /* line/sappend below need a NUL-terminated C string */
+  sappend(line, &p, buf, sizeof(line));
+
+  for (i = 0; i < DIALOG_WIDTH; i++) cell[i] = ' ';
+  cell[DIALOG_WIDTH] = 0;
+  put_str_cells(cell, 0, line, DIALOG_WIDTH);
+  buf_goto(row, DIALOG_COL);
+  buf_puts(BOXCH_V);
+  buf_puts(cell);
+  buf_puts(BOXCH_V);
+  fieldRow = row;
+  row++;
+
+  if (errmsg != 0) {
+    for (i = 0; i < DIALOG_WIDTH; i++) cell[i] = ' ';
+    cell[DIALOG_WIDTH] = 0;
+    put_str_cells(cell, 0, errmsg, DIALOG_WIDTH);
+    buf_goto(row, DIALOG_COL);
+    buf_puts(BOXCH_V);
+    buf_puts(cell);
+    buf_puts(BOXCH_V);
+    row++;
+  }
+
+  buf_goto(row, DIALOG_COL);
+  buf_puts(BOXCH_BL);
+  for (i = 0; i < DIALOG_WIDTH / 2; i++) buf_puts(BOXCH_H);
+  buf_puts(BOXCH_BR);
+
+  /* BOXCH_V is a 2-cell full-width character (see BOXCH_* comments
+     above), so the field text starts 2 cells past the border column. */
+  fieldCol = DIALOG_COL + 2 + promptCells + len;
+  buf_goto(fieldRow, fieldCol);
+
+  buf_flush();
+}
+
+/* runs the modal edit loop for one text field. 'buf' holds the initial
+   value on entry (may be empty; must already be NUL-terminated) and
+   receives the edited text (also NUL-terminated) on return, whether
+   confirmed or cancelled. 'buf' must be declared with at least
+   maxlen+1 bytes - see INPUT_MAXLEN, the limit every caller in this
+   file uses (an 8.3 DOS name). 'errmsg' may be 0 for "no error line to
+   start"; passing a non-0 errmsg lets a caller re-enter this loop after
+   a failed DOS operation with the error still showing next to the same
+   prompt and the same typed text, rather than losing the prompt behind
+   a separate "press any key" dialog.
+   Editing: BS (0x08 - the same code KEY_LEFT uses outside this dialog,
+   but here it is always backspace, never "move left") deletes the last
+   character; printable ASCII (0x20-0x7E) is appended if there is still
+   room under maxlen; anything else is ignored. Any edit keypress clears
+   a currently-shown error, since the user is now acting on it.
+   The text cursor is hidden everywhere else in this program (see
+   main()'s "\x1b[>5h" at start), so it is shown just for the lifetime
+   of this loop and hidden again before returning, on every exit path.
+   Returns 1 if Enter confirmed the input, 0 if ESC cancelled it. */
+int input_dialog(char *prompt, char *buf, int maxlen, char *errmsg)
+{
+  int len;
+  int key;
+
+  len = strlen(buf);
+  if (len > maxlen) len = maxlen; /* defensive */
+
+  write_str("\x1b[>5l"); /* show the text cursor while editing */
+
+  for (;;) {
+    draw_input_box(prompt, buf, len, errmsg);
+    key = dos_getch();
+
+    if (key == KEY_ESC) {
+      buf[len] = 0;
+      write_str("\x1b[>5h");
+      return 0;
+    }
+    if (key == KEY_ENTER) {
+      buf[len] = 0;
+      write_str("\x1b[>5h");
+      return 1;
+    }
+    if (key == 0x08) { /* BS; same code as KEY_LEFT, treated as BS here */
+      if (len > 0) len--;
+      errmsg = 0;
+      continue;
+    }
+    if (key >= 0x20 && key <= 0x7e) {
+      if (len < maxlen) {
+        buf[len] = (char)key;
+        len++;
+      }
+      errmsg = 0;
+      continue;
+    }
+    /* any other key (arrows, TAB, HOME, ...): ignored in this dialog */
+  }
+}
+
 /* D/d: deletes the marked files, or (when nothing is marked) the single
    file under the cursor. The target rule is one rule, not two cases that
    can disagree: "marked set if non-empty, else the cursor entry" - see
@@ -1137,6 +1330,90 @@ void do_delete(void)
   draw_screen();
 }
 
+/* R/r: renames the single entry under the cursor (marks are not used -
+   the target is always the cursor entry, unlike D which prefers the
+   marked set). "." and ".." are not renameable and are silently
+   ignored, matching enter_selected()'s treatment of "." as a no-op.
+   The input dialog is pre-filled with the current name; on confirm,
+   dos_rename() is attempted and, on failure, the dialog re-opens with
+   an error line and the text the user typed still in the field so they
+   can correct it without retyping everything. */
+void do_rename(void)
+{
+  char buf[INPUT_MAXLEN + 1];
+  char oldPath[96];
+  char newPath[96];
+  char *name;
+  char *err;
+  int ok;
+  int idx;
+  int confirmed;
+
+  if (g_count == 0) return;
+  idx = g_cursor;
+  name = &g_name[idx * NAME_LEN];
+  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return;
+
+  strcpy(buf, name); /* name is at most NAME_LEN-1 = INPUT_MAXLEN chars */
+
+  err = 0;
+  for (;;) {
+    confirmed = input_dialog(MSG(MSG_RENAME_PROMPT), buf, INPUT_MAXLEN, err);
+    if (!confirmed) {
+      draw_screen();
+      return;
+    }
+    if (buf[0] == 0) {
+      err = MSG(MSG_RENAME_ERR_EMPTY);
+      continue;
+    }
+
+    build_full_path(oldPath, sizeof(oldPath), name);
+    build_full_path(newPath, sizeof(newPath), buf);
+    ok = dos_rename(oldPath, newPath);
+    if (ok == 0) break;
+    err = MSG(MSG_RENAME_ERR_FAILED);
+  }
+
+  read_dir();
+  draw_screen();
+}
+
+/* K/k: creates a new directory in the current path (g_path). The input
+   dialog starts empty; on confirm, dos_mkdir() is attempted and, on
+   failure (e.g. a name that already exists), the dialog re-opens with
+   an error line, same shape as do_rename() above. */
+void do_mkdir(void)
+{
+  char buf[INPUT_MAXLEN + 1];
+  char newPath[96];
+  char *err;
+  int ok;
+  int confirmed;
+
+  buf[0] = 0;
+  err = 0;
+  for (;;) {
+    confirmed = input_dialog(MSG(MSG_MKDIR_PROMPT), buf, INPUT_MAXLEN, err);
+    if (!confirmed) {
+      draw_screen();
+      return;
+    }
+    if (buf[0] == 0) {
+      err = MSG(MSG_MKDIR_ERR_EMPTY);
+      continue;
+    }
+
+    build_full_path(newPath, sizeof(newPath), buf);
+    ok = dos_mkdir(newPath);
+    if (ok == 0) break;
+    err = MSG(MSG_MKDIR_ERR_FAILED);
+  }
+
+  read_dir();
+  draw_screen();
+}
+
 /* ---- screen drawing ------------------------------------------------------ */
 
 void build_entry_text(int idx, char *buf)
@@ -1161,23 +1438,33 @@ void build_entry_text(int idx, char *buf)
   if (g_marked[idx]) buf[0] = '*';
 
   rawname = &g_name[idx * NAME_LEN];
-  dot = -1;
-  for (i = 0; rawname[i] != 0; i++) {
-    if (rawname[i] == '.') { dot = i; break; }
-  }
-  if (dot < 0) {
-    namelen = strlen(rawname);
-    if (namelen > 8) namelen = 8;
-    put_str_n(buf, 2, rawname, namelen);
+
+  /* "." and ".." are not 8.3 name+extension pairs - splitting them on
+     '.' puts an empty name and a "." extension, landing ".." at column
+     10-11 (the extension slot) with the name column left blank. The
+     original shows them unsplit in the name column instead, so they are
+     special-cased here before the normal dot search. */
+  if (strcmp(rawname, ".") == 0 || strcmp(rawname, "..") == 0) {
+    put_str_n(buf, 2, rawname, strlen(rawname));
   } else {
-    namelen = dot;
-    if (namelen > 8) namelen = 8;
-    put_str_n(buf, 2, rawname, namelen);
-    extlen = strlen(rawname + dot + 1);
-    if (extlen > 3) extlen = 3;
-    if (extlen > 0) {
-      buf[10] = '.';
-      put_str_n(buf, 11, rawname + dot + 1, extlen);
+    dot = -1;
+    for (i = 0; rawname[i] != 0; i++) {
+      if (rawname[i] == '.') { dot = i; break; }
+    }
+    if (dot < 0) {
+      namelen = strlen(rawname);
+      if (namelen > 8) namelen = 8;
+      put_str_n(buf, 2, rawname, namelen);
+    } else {
+      namelen = dot;
+      if (namelen > 8) namelen = 8;
+      put_str_n(buf, 2, rawname, namelen);
+      extlen = strlen(rawname + dot + 1);
+      if (extlen > 3) extlen = 3;
+      if (extlen > 0) {
+        buf[10] = '.';
+        put_str_n(buf, 11, rawname + dot + 1, extlen);
+      }
     }
   }
 
@@ -1311,7 +1598,13 @@ void draw_info_line(int visibleCount)
   sappend(row, &p, &g_name[g_cursor * NAME_LEN], sizeof(row));
   sappend(row, &p, "  ", sizeof(row));
   sappend(row, &p, sizebuf, sizeof(row));
-  sappend(row, &p, MSG(MSG_BYTES_SUFFIX), sizeof(row));
+  /* "<DIR>" is not a byte count, so the bytes-suffix label ("bytes"/
+     "バイト") is only appended for an actual file, matching the
+     size column in the file list (build_entry_text) which never shows a
+     unit at all next to "<DIR>". */
+  if (!(g_attr[g_cursor] & ATTR_DIR)) {
+    sappend(row, &p, MSG(MSG_BYTES_SUFFIX), sizeof(row));
+  }
   sappend(row, &p, "  ", sizeof(row));
   sappend(row, &p, datebuf, sizeof(row));
   sappend(row, &p, " ", sizeof(row));
@@ -1499,6 +1792,10 @@ int main(int argc, char *argv[])
       enter_selected();
     } else if (key == 'd' || key == 'D') {
       do_delete();
+    } else if (key == 'r' || key == 'R') {
+      do_rename();
+    } else if (key == 'k' || key == 'K') {
+      do_mkdir();
     } else if (key == 'q' || key == 'Q' || key == KEY_ESC) {
       running = 0;
     }

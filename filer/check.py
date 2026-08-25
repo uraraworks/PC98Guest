@@ -78,6 +78,12 @@ MSG_LIMITS = {
     "MSG_DEL_CONFIRM_MARK_SUF": ("fragment", 17),
     "MSG_DEL_ERR_ISDIR":        ("dialog",   18),
     "MSG_DEL_ERR_FAILED":       ("dialog",   19),
+    "MSG_RENAME_PROMPT":        ("fragment", 20),
+    "MSG_RENAME_ERR_EMPTY":     ("dialog",   21),
+    "MSG_RENAME_ERR_FAILED":    ("dialog",   22),
+    "MSG_MKDIR_PROMPT":         ("fragment", 23),
+    "MSG_MKDIR_ERR_EMPTY":      ("dialog",   24),
+    "MSG_MKDIR_ERR_FAILED":     ("dialog",   25),
 }
 
 
