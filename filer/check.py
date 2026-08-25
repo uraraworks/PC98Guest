@@ -36,20 +36,31 @@ Checks (all must pass, otherwise this exits non-zero):
                     rather than silent.
      BOX_WIDTH and DIALOG_WIDTH are both read out of FILER.C's #define
      lines, never hard-coded here.
-  6. The bottom command line (g_cmdWords[] - since milestone 4 this is no
-     longer part of g_msgJA/g_msgEN at all, see the module note below)
-     is reconstructed exactly the way draw_screen_frame() assembles it -
-     g_cmdWords[0] as-is, then a single space plus each remaining word -
-     and the *visible* character count (no ESC[...]m sequences; those are
-     never part of the on-screen cell count - see FILER.C's text_width())
-     must not exceed CMDLINE_WIDTH cells.
+  6. The bottom row (g_fkeyLabel[]/g_fkeyCol[] - since milestone 6 this is
+     the measured PC-98 function-key assignment, no longer a sentence-like
+     command line at all, see the module note below):
+       - g_fkeyLabel[], g_fkeyCol[] and g_fkeyHiPos[] all have FKEY_COUNT
+         entries (FKEY_COUNT is read out of FILER.C's #define, never
+         hard-coded here).
+       - every g_fkeyLabel[i] fits within FKEY_FIELD_WIDTH screen cells
+         (same text_width()-style rule as check 5; these labels happen to
+         be plain ASCII so the 2-cells-per-SJIS-char rule never actually
+         triggers, but the same measurement code is reused rather than
+         assuming that).
+       - every field (g_fkeyCol[i] .. g_fkeyCol[i]+FKEY_FIELD_WIDTH-1)
+         stays inside the 80-column screen and does not overlap the next
+         field.
+       - g_fkeyHiPos[i] is either -1 (only valid when g_fkeyLabel[i] is
+         empty) or a valid index into g_fkeyLabel[i].
 
-Milestone 4 note: the old bilingual MSG_CMDLINE message (one long
-"key:description" string capped at CMDLINE_WIDTH) has been replaced by
-g_cmdWords[]/g_cmdHiPos[] - a language-independent array of English
-command words plus the index of each word's highlighted key letter. It is
-plain C data, not part of g_msgJA/g_msgEN, so it is checked separately
-(check 6) rather than through MSG_LIMITS/extract_array.
+Milestone 6 note: the milestone-4/5 bilingual-independent command line
+(g_cmdWords[]/g_cmdHiPos[]/cmdline_put_word(), one sentence-like row of
+English command words) has been replaced by g_fkeyLabel[]/g_fkeyCol[]/
+g_fkeyHiPos[] - ten fixed-position fields matching the real product's
+function-key row, measured off real hardware (see
+docs/filer-measure-05.md). It is plain C data, not part of g_msgJA/
+g_msgEN, so it is checked separately (check 6) rather than through
+MSG_LIMITS/extract_array.
 
 Usage:
   python3 check.py [path-to-FILER.C]
@@ -150,6 +161,18 @@ def extract_define_int(text, name):
     return int(m.group(1))
 
 
+def extract_int_array(text, name):
+    """pulls the (bare, non-negative-or-negative decimal) integer literals
+    out of 'int name[...][] = { ... };' - used for g_fkeyCol[]/
+    g_fkeyHiPos[], which (unlike g_msgJA/g_msgEN/g_fkeyLabel) hold ints,
+    not string literals."""
+    m = re.search(r"int " + re.escape(name) + r"\[[^\]]*\]\s*=\s*\{(.*?)\};", text, re.S)
+    if m is None:
+        fail("could not find array %s[] in FILER.C" % name)
+    body = m.group(1)
+    return [int(x) for x in re.findall(r"-?\d+", body)]
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "FILER.C")
@@ -234,23 +257,59 @@ def main():
     for line in report:
         print(line)
 
-    # ---- check 6: bottom command line (g_cmdWords[]) fits CMDLINE_WIDTH --
-    # Reconstructed the same way draw_screen_frame() assembles it: word 0
-    # as-is, then " " + each remaining word. Highlight escape sequences
-    # (ESC[7m/ESC[0m, added around one character of each command word by
-    # cmdline_put_word()) are never part of this text - only the visible
-    # characters below are - matching text_width()'s "never count escape
-    # bytes as cells" rule.
-    cmd_words = extract_array(text, "g_cmdWords")
-    if len(cmd_words) == 0:
-        fail("g_cmdWords[] in FILER.C is empty")
-    visible = cmd_words[0] + "".join(" " + w for w in cmd_words[1:])
-    visible_width = cell_width(visible.encode("cp932"))
-    if visible_width > cmdline_width:
-        fail("g_cmdWords[] assembles to %d cells, exceeds CMDLINE_WIDTH "
-             "(%d cells) - %r" % (visible_width, cmdline_width, visible))
-    print("PASS: 6) g_cmdWords[] assembles to %d cells (limit=%d): %r" %
-          (visible_width, cmdline_width, visible))
+    # ---- check 6: bottom row (g_fkeyLabel[]/g_fkeyCol[]/g_fkeyHiPos[]) ---
+    # ten fixed-position function-key fields, measured off real hardware
+    # (see docs/filer-measure-05.md) - not a sentence-like line any more,
+    # so this checks field placement/width instead of an assembled string.
+    fkey_count = extract_define_int(text, "FKEY_COUNT")
+    fkey_field_width = extract_define_int(text, "FKEY_FIELD_WIDTH")
+    fkey_labels = extract_array(text, "g_fkeyLabel")
+    fkey_cols = extract_int_array(text, "g_fkeyCol")
+    fkey_hipos = extract_int_array(text, "g_fkeyHiPos")
+
+    for name, arr in (("g_fkeyLabel", fkey_labels), ("g_fkeyCol", fkey_cols),
+                       ("g_fkeyHiPos", fkey_hipos)):
+        if len(arr) != fkey_count:
+            fail("%s[] has %d entries, expected FKEY_COUNT (%d)" %
+                 (name, len(arr), fkey_count))
+
+    screen_cols = extract_define_int(text, "VRAM_COLS")
+
+    report = []
+    prev_end = -1
+    for i in range(fkey_count):
+        label = fkey_labels[i]
+        col = fkey_cols[i]
+        hipos = fkey_hipos[i]
+        w = cell_width(label.encode("cp932"))
+
+        if w > fkey_field_width:
+            fail("g_fkeyLabel[%d] (%r) is %d cells wide, exceeds "
+                 "FKEY_FIELD_WIDTH (%d cells)" % (i, label, w, fkey_field_width))
+        if col < 0 or col + fkey_field_width > screen_cols:
+            fail("g_fkeyCol[%d] (%d) places F%d's field outside the "
+                 "%d-column screen (field is %d cells wide)" %
+                 (i, col, i + 1, screen_cols, fkey_field_width))
+        if col < prev_end:
+            fail("g_fkeyCol[%d] (%d) overlaps the previous field, which "
+                 "ends at column %d" % (i, col, prev_end))
+        prev_end = col + fkey_field_width
+        if label == "":
+            if hipos != -1:
+                fail("g_fkeyHiPos[%d] is %d but g_fkeyLabel[%d] is empty "
+                     "(unassigned key slots must use hiPos -1)" % (i, hipos, i))
+        else:
+            if hipos < 0 or hipos >= len(label):
+                fail("g_fkeyHiPos[%d] (%d) is not a valid index into "
+                     "g_fkeyLabel[%d] (%r)" % (i, hipos, i, label))
+        report.append("  F%-2d col=%2d width<=%d  %r" %
+                       (i + 1, col, fkey_field_width, label))
+
+    print("PASS: 6) all %d function-key fields fit FKEY_FIELD_WIDTH (%d) "
+          "cells and stay inside the %d-column screen without overlapping" %
+          (fkey_count, fkey_field_width, screen_cols))
+    for line in report:
+        print(line)
 
     print("ALL CHECKS PASSED")
     return 0

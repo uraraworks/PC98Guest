@@ -1,5 +1,5 @@
 /*
- * FILER.C - PC-98 / FreeDOS(98) directory browser (milestone 5)
+ * FILER.C - PC-98 / FreeDOS(98) directory browser (milestone 6)
  *
  * Independent, from-scratch implementation. See README.md in this
  * directory for the independence declaration. All on-screen text below
@@ -24,8 +24,7 @@
  * why this implementation asks instead). It also replaces the bottom
  * command line: instead of one long bilingual "key:description" message
  * capped at CMDLINE_WIDTH cells, it now shows English command words with
- * their key letter in reverse video, matching the original's own
- * measured convention (see g_cmdWords[]/cmdline_put_word()).
+ * their key letter in reverse video.
  * Milestone 5 replaces the DOS-console/ANSI screen writer with direct
  * text-VRAM writes (see below), draws the header/dialog frames with the
  * original's half-width line-drawing codes instead of full-width ones
@@ -59,6 +58,18 @@
  * Screen text is bilingual (Japanese / English); see the message
  * table below. Select with the /J (Japanese, default) or /E (English)
  * command line switch.
+ *
+ * Milestone 6 replaces the milestone-4 command line with the measured
+ * real-product bottom row: ten fixed function-key fields (see
+ * g_fkeyLabel[]/g_fkeyCol[]/draw_cmdline() and docs/filer-measure-05.md),
+ * with F3/F4/F5 kept at the original's own Copy/Delete/Rename positions
+ * and the rest of this program's commands placed in unused slots; slots
+ * for commands this program does not implement (Logdsk/eXec/Sort/Find/
+ * Tree/...) are left blank rather than named. Every command remains
+ * reachable by its plain letter key exactly as before - the function
+ * keys are an additional entry point. Reading a function key means
+ * telling its 0x1B first byte apart from a bare ESC keypress; see
+ * dos_kbhit() and main()'s KEY_ESC handling.
  */
 
 #include <string.h>
@@ -112,6 +123,24 @@
  * been confirmed not to collide with anything. */
 #define KEY_CTRL_E 0x05   /* alternate for up */
 #define KEY_CTRL_X 0x18   /* alternate for down */
+
+/* second byte of a PC-98 function-key code (see KEY_ESC above and
+ * dos_kbhit() below): DOS INT 21h AH=08h returns a function key as two
+ * bytes, 0x1B (ESC) followed by one of these - measured on real hardware
+ * with a probe program; see docs/filer-measure-05.md. An ESC keypress by
+ * itself is only ever the single byte 0x1B (also measured), so the two
+ * cases are told apart by checking dos_kbhit() right after reading
+ * 0x1B, never by looking at the second byte's value alone. */
+#define FKEY_CODE_F1  'S'
+#define FKEY_CODE_F2  'T'
+#define FKEY_CODE_F3  'U'
+#define FKEY_CODE_F4  'V'
+#define FKEY_CODE_F5  'W'
+#define FKEY_CODE_F6  'E'
+#define FKEY_CODE_F7  'J'
+#define FKEY_CODE_F8  'P'
+#define FKEY_CODE_F9  'Q'
+#define FKEY_CODE_F10 'Z'
 
 #define ATTR_RDONLY   0x01
 #define ATTR_HIDDEN   0x02
@@ -312,35 +341,42 @@ int msg_selftest(void)
   return 1;
 }
 
-/* ---- bottom command line (language-independent) ------------------------
- * Milestone 4 replaces the old "key:description" MSG_CMDLINE line (which
- * was pinned to CMDLINE_WIDTH cells and could not fit more than a
- * handful of keys once written out in full words) with the original's
- * own convention, measured from the real product: command *names* in
- * English, with the letter that is the actual key shown in reverse video
- * (see cmdline_put_word()), so many more commands fit on one line. This
- * line is the same in both languages by design - the command words and
- * the short movement/mark/open legend are plain English abbreviations,
- * not translated text, so they live here as ordinary C data rather than
- * in g_msgJA/g_msgEN.
- * g_cmdWords[0] is the plain (non-highlighted) legend text; g_cmdHiPos[0]
- * is -1 to mark it as "no highlight". Every other g_cmdWords[i] is a
- * command name whose key is g_cmdWords[i][g_cmdHiPos[i]] - e.g. mKdir's
- * key is 'K', the character at index 1, matching the 'k'/'K' dispatch in
- * main(). check.py reconstructs this exact same line (prefix, then a
- * single space plus each word) to verify it never exceeds CMDLINE_WIDTH
- * screen cells - see draw_screen_frame()'s cmdline block below, which
- * must keep assembling it the same way. */
-char *g_cmdWords[] = {
-  "Arrow:move SP/Tab:mark HOME:all Enter:open",
-  "Copy",
-  "Move",
-  "Delete",
-  "Rename",
-  "mKdir",
-  "Quit"
+/* ---- bottom row: PC-98 function-key assignment (language-independent) --
+ * Milestone 6 replaces the milestone-4 "key:description" command line
+ * with the original's own bottom-row convention, measured directly off a
+ * real FD 3.13(98) unit (see docs/filer-measure-05.md): ten fixed 6-cell
+ * fields, one per function key F1..F10 (g_fkeyLabel[i] is F(i+1)'s
+ * label), left-aligned at the columns measured off the real attribute
+ * plane in g_fkeyCol[]. This line is the same in both languages by
+ * design - command names are plain English abbreviations, not translated
+ * text - so it lives here as ordinary C data, not in g_msgJA/g_msgEN.
+ * The old movement/mark/open legend ("Arrow:move SP/Tab:mark ...") is
+ * gone: the measured original does not show operation help on this row
+ * at all, only command locations, and those operations remain available
+ * exactly as before (see main()'s key dispatch) - only where they were
+ * *described on screen* changed.
+ * An empty g_fkeyLabel[i] ("") means that function key is not
+ * implemented yet by this program (e.g. the original's Logdsk/eXec/Sort/
+ * Find/Tree/... slots) - its position is still reserved (drawn blank,
+ * same as the gaps between fields) rather than reused, so a later
+ * milestone can add the command without moving anything else and without
+ * this program claiming to offer a command it does not have.
+ * g_fkeyHiPos[i] is the index into g_fkeyLabel[i] of the character that
+ * is the actual dispatch key in main() - e.g. mKdir's is 'K' at index 1,
+ * matching the 'k'/'K' case there; -1 disables the highlight (used only
+ * together with an empty label). Every non-empty label's key here is
+ * also still reachable as a plain letter key, unchanged from milestone
+ * 4/5 - the function keys are an additional entry point, not a
+ * replacement. */
+#define FKEY_COUNT       10
+#define FKEY_FIELD_WIDTH 6
+
+int g_fkeyCol[] = { 4, 11, 18, 25, 32, 42, 49, 56, 63, 70 };
+
+char *g_fkeyLabel[] = {
+  "", "", "Copy", "Delete", "Rename", "Move", "mKdir", "", "", "Quit"
 };
-int g_cmdHiPos[] = { -1, 0, 0, 0, 0, 1, 0 };
+int g_fkeyHiPos[] = { -1, -1, 0, 0, 0, 0, 1, -1, -1, 0 };
 
 /* ---- global state ------------------------------------------------------ */
 
@@ -371,6 +407,21 @@ char g_copybuf[COPY_BUF_SIZE]; /* single shared Copy/Move I/O buffer -
 int dos_getch(void)
 {
   asm("mov ah, 8\n"
+      "int 0x21\n"
+      "mov ah, 0");
+}
+
+/* AH=0Bh (DOS console input status): returns AL=0xFF if a character is
+   already waiting in the keyboard buffer, AL=0x00 if not (measured on
+   real hardware; see docs/filer-measure-05.md). Used right after reading
+   a 0x1B (KEY_ESC) from dos_getch() to tell a bare ESC keypress (which
+   never has a second byte queued) apart from the first byte of a
+   function-key code (whose second byte is measured to already be
+   sitting in the buffer at that point - never call this after any other
+   keyboard read or delay, or the second byte may already be gone). */
+int dos_kbhit(void)
+{
+  asm("mov ah, 0x0b\n"
       "int 0x21\n"
       "mov ah, 0");
 }
@@ -953,6 +1004,16 @@ void sappend_uint(char *dst, int *lenp, unsigned int v, int cap)
 #define ATTR_BASE  0xE1
 #define ATTR_REV   0xE5
 
+/* bottom function-key row attributes (row 24 only) - measured off the
+ * real product's attribute plane, a different convention from ATTR_REV
+ * above: the whole label is reversed AND uses a non-white color, and the
+ * single character that is the actual key gets its own (yellow) color on
+ * top of that same reverse bit - it is not simply "the key letter
+ * reversed, rest plain" the way the old command line worked. See
+ * docs/filer-measure-05.md. */
+#define ATTR_FKEY_LABEL 0xA5  /* reversed, color 101 - the label text */
+#define ATTR_FKEY_KEY   0xC5  /* reversed, color 110 (yellow) - the key char only */
+
 unsigned int g_curChar[VRAM_CELLS];  /* mirrors what is actually in VRAM */
 unsigned char g_curAttr[VRAM_CELLS];
 
@@ -1206,26 +1267,6 @@ void draw_title_row(void)
   vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++;
   for (i = 0; i < fillPairs; i++) { vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE); col++; }
   if ((fillCells % 2) == 1) { vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++; }
-}
-
-/* draws the bottom command line's one command word, cell by cell,
-   highlighting exactly the cell at index hlPos (its key) with ATTR_REV
-   (reverse video - see docs/tvram-measure-01.md; measured to be bit b2
-   of the attribute byte). hlPos == -1 (used for g_cmdWords[0], the plain
-   legend text) disables the highlight entirely. Command words are plain
-   ASCII (see g_cmdWords[]), so this indexes by byte, not by a SJIS-aware
-   cell count - unlike the JA/EN message text elsewhere in this file, no
-   multi-byte handling is needed here. Returns the column just past the
-   word, for the caller to chain further words/spaces from. */
-int cmdline_put_word(int col, char *word, int hlPos)
-{
-  int i;
-
-  for (i = 0; word[i] != 0; i++) {
-    vram_ank(ROW_CMD, col, (unsigned char)word[i], (i == hlPos) ? ATTR_REV : ATTR_BASE);
-    col++;
-  }
-  return col;
 }
 
 /* immediate one-off write, used only for the pre/post-frame terminal mode
@@ -2333,35 +2374,46 @@ void draw_info_line(int visibleCount)
   box_row(ROW_INFO, BOXCH_V, BOXCH_V, row);
 }
 
-/* draws the bottom command line (row 24): g_cmdWords[0] (the plain
-   movement/mark/open legend) as-is, then a space plus each remaining
-   command word with its key letter highlighted (see cmdline_put_word()),
-   then blanks whatever is left of the row. This is verified by check.py
-   to stay within CMDLINE_WIDTH cells (check.py reconstructs the same
-   "word0, then space+word for each remaining word" text and measures it
-   the same SJIS-aware way text_width() does - though these words are all
-   plain ASCII so that never actually matters here); it is built here
-   exactly the same way check.py reconstructs it. */
+/* draws the bottom row (row 24) as the measured PC-98 function-key
+   assignment: the whole row is blanked to ATTR_BASE first (this is what
+   the 1-cell gaps between fields, the 4-cell F5/F6 gap, and any reserved
+   (unimplemented) field end up showing - see docs/filer-measure-05.md's
+   0xE1 "outside a field" measurement), then each non-empty g_fkeyLabel[i]
+   is placed at g_fkeyCol[i], roughly centered within FKEY_FIELD_WIDTH
+   cells (left-biased when the label's length is odd, same as an integer
+   divide - the original's own centering is not exact either). Every cell
+   of the label uses ATTR_FKEY_LABEL (reversed) except the single
+   character at g_fkeyHiPos[i], which uses ATTR_FKEY_KEY instead (still
+   reversed, different color) - matching the measured "reverse the whole
+   label, recolor only the key letter" convention, not the milestone 4/5
+   "reverse only the key letter" one. Labels are plain ASCII (see
+   g_fkeyLabel[]), so this indexes by byte, not by a SJIS-aware cell
+   count. check.py verifies every g_fkeyLabel[] entry fits
+   FKEY_FIELD_WIDTH cells and that every g_fkeyCol[]/FKEY_FIELD_WIDTH
+   field stays inside VRAM_COLS. */
 void draw_cmdline(void)
 {
-  int ci;
-  int wordCount;
+  int i;
   int col;
+  int len;
+  int pad;
+  int c;
+  char *label;
 
-  col = 0;
-  vram_puts_cells(ROW_CMD, col, g_cmdWords[0], ATTR_BASE, text_width(g_cmdWords[0]));
-  col += text_width(g_cmdWords[0]);
-
-  wordCount = sizeof(g_cmdWords) / sizeof(g_cmdWords[0]);
-  for (ci = 1; ci < wordCount; ci++) {
+  for (col = 0; col < VRAM_COLS; col++) {
     vram_ank(ROW_CMD, col, ' ', ATTR_BASE);
-    col++;
-    col = cmdline_put_word(col, g_cmdWords[ci], g_cmdHiPos[ci]);
   }
 
-  while (col < VRAM_COLS) {
-    vram_ank(ROW_CMD, col, ' ', ATTR_BASE);
-    col++;
+  for (i = 0; i < FKEY_COUNT; i++) {
+    label = g_fkeyLabel[i];
+    len = (int)strlen(label);
+    if (len == 0) continue; /* reserved (not implemented yet): leave blank */
+    pad = (FKEY_FIELD_WIDTH - len) / 2;
+    if (pad < 0) pad = 0;
+    for (c = 0; c < len && (pad + c) < FKEY_FIELD_WIDTH; c++) {
+      vram_ank(ROW_CMD, g_fkeyCol[i] + pad + c, (unsigned char)label[c],
+                (c == g_fkeyHiPos[i]) ? ATTR_FKEY_KEY : ATTR_FKEY_LABEL);
+    }
   }
 }
 
@@ -2542,8 +2594,33 @@ int main(int argc, char *argv[])
       do_copy();
     } else if (key == 'm' || key == 'M') {
       do_move();
-    } else if (key == 'q' || key == 'Q' || key == KEY_ESC) {
+    } else if (key == 'q' || key == 'Q') {
       running = 0;
+    } else if (key == KEY_ESC) {
+      /* 0x1B alone is ESC; 0x1B immediately followed by a queued second
+         byte is a function key - see dos_kbhit()'s comment and
+         docs/filer-measure-05.md. Must check dos_kbhit() before any
+         other keyboard read. */
+      if (dos_kbhit()) {
+        key = dos_getch();
+        if (key == FKEY_CODE_F3) {
+          do_copy();
+        } else if (key == FKEY_CODE_F4) {
+          do_delete();
+        } else if (key == FKEY_CODE_F5) {
+          do_rename();
+        } else if (key == FKEY_CODE_F6) {
+          do_move();
+        } else if (key == FKEY_CODE_F7) {
+          do_mkdir();
+        } else if (key == FKEY_CODE_F10) {
+          running = 0;
+        }
+        /* F1/F2/F8/F9 (and anything else): no command assigned yet -
+           see g_fkeyLabel[]'s reserved ("") entries - so ignored. */
+      } else {
+        running = 0; /* bare ESC: quit, same as Q */
+      }
     }
   }
 
