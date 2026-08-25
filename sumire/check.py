@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-check.py - integrity checks for FILER.C
+check.py - integrity checks for SUMIRE.C
 
-FILER.C is encoded as CP932 (Shift_JIS) and contains raw Japanese bytes in
+SUMIRE.C is encoded as CP932 (Shift_JIS) and contains raw Japanese bytes in
 its message table. This script must never itself convert the file's
-encoding: it reads FILER.C as bytes and only decodes to text for parsing,
+encoding: it reads SUMIRE.C as bytes and only decodes to text for parsing,
 never writes the file back.
 
 Checks (all must pass, otherwise this exits non-zero):
-  1. FILER.C decodes as CP932 without error.
+  1. SUMIRE.C decodes as CP932 without error.
   2. The byte sequence EF BF BD (the UTF-8 encoding of U+FFFD, the mark left
      behind when non-UTF-8 bytes get force-converted and lossily replaced)
      does not appear anywhere in the file.
   3. g_msgJA and g_msgEN have the same number of entries.
   4. Neither message table contains an empty string.
   5. Every message in g_msgJA/g_msgEN is checked against the screen-cell
-     limit that applies to how FILER.C actually uses it, in both languages.
-     Screen-cell width follows the same rule as FILER.C's own text_width():
+     limit that applies to how SUMIRE.C actually uses it, in both languages.
+     Screen-cell width follows the same rule as SUMIRE.C's own text_width():
      a lead byte in 0x81-0x9F or 0xE0-0xFC (and the byte after it) counts as
      2 cells, anything else counts as 1. Each message index is classified
      (see MSG_LIMITS below) into one of:
@@ -34,13 +34,13 @@ Checks (all must pass, otherwise this exits non-zero):
                     deliberately NOT length-checked here. They are still
                     listed in the report so the exclusion is visible
                     rather than silent.
-     BOX_WIDTH and DIALOG_WIDTH are both read out of FILER.C's #define
+     BOX_WIDTH and DIALOG_WIDTH are both read out of SUMIRE.C's #define
      lines, never hard-coded here.
   6. The bottom row (g_fkeyLabel[]/g_fkeyCol[] - since milestone 6 this is
      the measured PC-98 function-key assignment, no longer a sentence-like
      command line at all, see the module note below):
        - g_fkeyLabel[], g_fkeyCol[] and g_fkeyHiPos[] all have FKEY_COUNT
-         entries (FKEY_COUNT is read out of FILER.C's #define, never
+         entries (FKEY_COUNT is read out of SUMIRE.C's #define, never
          hard-coded here).
        - every g_fkeyLabel[i] fits within FKEY_FIELD_WIDTH screen cells
          (same text_width()-style rule as check 5; these labels happen to
@@ -63,7 +63,7 @@ g_msgEN, so it is checked separately (check 6) rather than through
 MSG_LIMITS/extract_array.
 
 Usage:
-  python3 check.py [path-to-FILER.C]
+  python3 check.py [path-to-SUMIRE.C]
 """
 import re
 import sys
@@ -71,8 +71,8 @@ import os
 
 
 # Classification of every g_msgJA/g_msgEN index, by the #define name used
-# as its index in FILER.C (see the MSG_* #defines near the top of
-# FILER.C). Keep this in sync with FILER.C if messages are added, removed,
+# as its index in SUMIRE.C (see the MSG_* #defines near the top of
+# SUMIRE.C). Keep this in sync with SUMIRE.C if messages are added, removed,
 # or their call sites change how they're assembled onto the screen.
 #
 #   "box"      -> checked against BOX_WIDTH
@@ -116,6 +116,9 @@ MSG_LIMITS = {
     "MSG_COPY_DONE_SUF":        ("fragment", 34),
     "MSG_MOVE_DONE_PRE":        ("fragment", 35),
     "MSG_MOVE_DONE_SUF":        ("fragment", 36),
+    "MSG_EXEC_ERR_NOTEXE":      ("dialog",   37),
+    "MSG_EXEC_ERR_FAILED":      ("dialog",   38),
+    "MSG_EXEC_PRESS_KEY":       ("dialog",   39),
 }
 
 
@@ -126,7 +129,7 @@ def fail(msg):
 
 def cell_width(raw_bytes):
     """screen-cell width of a CP932-encoded byte string, using the same
-    lead-byte rule as FILER.C's text_width()."""
+    lead-byte rule as SUMIRE.C's text_width()."""
     w = 0
     i = 0
     n = len(raw_bytes)
@@ -143,13 +146,13 @@ def cell_width(raw_bytes):
 
 def extract_array(text, name):
     """pulls the double-quoted string literals out of
-    '[const ]char *name[] = { ... };'. FILER.C's message tables (and,
+    '[const ]char *name[] = { ... };'. SUMIRE.C's message tables (and,
     since milestone 4, g_cmdWords[]) use plain literals with no escaped
     quotes, so a straightforward literal scan is enough (no need for a
     full C string-literal parser)."""
     m = re.search(r"(?:const\s+)?char \*" + re.escape(name) + r"\[\]\s*=\s*\{(.*?)\};", text, re.S)
     if m is None:
-        fail("could not find array %s[] in FILER.C" % name)
+        fail("could not find array %s[] in SUMIRE.C" % name)
     body = m.group(1)
     return re.findall(r'"((?:[^"\\]|\\.)*)"', body)
 
@@ -157,7 +160,7 @@ def extract_array(text, name):
 def extract_define_int(text, name):
     m = re.search(r"#define\s+" + re.escape(name) + r"\s+(\d+)", text)
     if m is None:
-        fail("could not find #define %s in FILER.C" % name)
+        fail("could not find #define %s in SUMIRE.C" % name)
     return int(m.group(1))
 
 
@@ -168,14 +171,14 @@ def extract_int_array(text, name):
     not string literals."""
     m = re.search(r"int " + re.escape(name) + r"\[[^\]]*\]\s*=\s*\{(.*?)\};", text, re.S)
     if m is None:
-        fail("could not find array %s[] in FILER.C" % name)
+        fail("could not find array %s[] in SUMIRE.C" % name)
     body = m.group(1)
     return [int(x) for x in re.findall(r"-?\d+", body)]
 
 
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "FILER.C")
+        os.path.dirname(os.path.abspath(__file__)), "SUMIRE.C")
 
     with open(path, "rb") as f:
         data = f.read()
@@ -184,8 +187,8 @@ def main():
     try:
         text = data.decode("cp932")
     except UnicodeDecodeError as e:
-        fail("FILER.C is not valid CP932: %s" % e)
-    print("PASS: 1) FILER.C decodes as CP932")
+        fail("SUMIRE.C is not valid CP932: %s" % e)
+    print("PASS: 1) SUMIRE.C decodes as CP932")
 
     # ---- check 2: no U+FFFD replacement-character bytes --------------
     fffd_count = data.count(b"\xef\xbf\xbd")
@@ -199,9 +202,9 @@ def main():
     cmdline_width = extract_define_int(text, "CMDLINE_WIDTH")
     dialog_width = extract_define_int(text, "DIALOG_WIDTH")
     # MSG_TITLE (row 0) shares its row with a right-hand clock field
-    # ("YY-MM-DD HH:MM:SS", see draw_title_row() in FILER.C), so its real
+    # ("YY-MM-DD HH:MM:SS", see draw_title_row() in SUMIRE.C), so its real
     # on-screen budget is BOX_WIDTH minus that field, its gap, and the
-    # title's own "--"/" "/" " decoration - all read out of FILER.C's
+    # title's own "--"/" "/" " decoration - all read out of SUMIRE.C's
     # #defines, never hardcoded here, so this tracks draw_title_row()'s
     # own arithmetic (used = TITLE_DECOR_WIDTH + titleCells; fillCells =
     # BOX_WIDTH - used - TITLE_DATETIME_GAP - DATETIME_WIDTH) automatically.
@@ -243,9 +246,9 @@ def main():
     if known_indices != set(range(n)):
         missing = sorted(set(range(n)) - known_indices)
         extra = sorted(known_indices - set(range(n)))
-        fail("MSG_LIMITS in check.py is out of sync with FILER.C's message "
+        fail("MSG_LIMITS in check.py is out of sync with SUMIRE.C's message "
              "table (%d entries): missing indices %r, unknown indices %r - "
-             "update MSG_LIMITS to match FILER.C's MSG_* #defines and how "
+             "update MSG_LIMITS to match SUMIRE.C's MSG_* #defines and how "
              "each one is used" % (n, missing, extra))
 
     report = []

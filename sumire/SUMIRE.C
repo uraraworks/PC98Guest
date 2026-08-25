@@ -1,5 +1,11 @@
 /*
- * FILER.C - PC-98 / FreeDOS(98) directory browser (milestone 6)
+ * SUMIRE.C - PC-98 / FreeDOS(98) directory browser (milestone 7)
+ * Milestone 7 renames this program to Sumire/すみれ (from its earlier
+ * placeholder name FILER), fixes a measured row-0 flicker (see
+ * draw_title_row() below), right-justifies the disk-totals row's numbers
+ * and drops their unit suffix (see draw_disk_line()), and adds F2/eXec
+ * (do_exec()), the original's own program-launch command, at the
+ * original's own F2 position.
  *
  * Independent, from-scratch implementation. See README.md in this
  * directory for the independence declaration. All on-screen text below
@@ -197,15 +203,18 @@
  * Row 1 (合計/使用/空き - total/used/free) gets two 0x96 dividers (see
  * docs/filer-measure-03.md); row 0's border and row 2's separator must
  * place a junction char (0x91 / 0x90) directly above/below each divider.
- * The first two fields are padded to a fixed cell width so the divider
- * columns are the same every frame, independent of how many digits the
- * current disk's byte counts have - DISK_FIELD_WIDTH (25) covers the
- * widest possible field: a 6-cell label + format_u32()'s widest output
- * ("4,294,967,295", 13 cells) + a 6-cell " bytes"/"バイト" suffix, in
- * either language (measured with check.py's cell_width()). The third
- * (free) field is left unpadded - box_row()'s own BOX_WIDTH truncation
- * covers it. */
-#define DISK_FIELD_WIDTH 25
+ * Milestone 7 measured the real product's own disk-totals row and found
+ * its numbers right-justified with a 1-cell blank margin at the field's
+ * right edge, and no "bytes"/"バイト" unit suffix at all (the label
+ * already says what it is) - see sappend_field_rj() and draw_disk_line()
+ * below. All three fields (total/used/free) are padded/right-justified to
+ * a fixed DISK_FIELD_WIDTH cell width so the divider columns are the same
+ * every frame, independent of how many digits the current disk's byte
+ * counts have. DISK_FIELD_WIDTH (20) covers the widest possible field: a
+ * 6-cell label + format_u32()'s widest output ("4,294,967,295", 13 cells)
+ * + the 1-cell trailing margin, in either language (measured with
+ * check.py's cell_width()). */
+#define DISK_FIELD_WIDTH 20
 #define DISK_SEP_COL1     (1 + DISK_FIELD_WIDTH)
 #define DISK_SEP_COL2     (1 + DISK_FIELD_WIDTH + 1 + DISK_FIELD_WIDTH)
 
@@ -267,9 +276,12 @@
 #define MSG_COPY_DONE_SUF       34
 #define MSG_MOVE_DONE_PRE       35
 #define MSG_MOVE_DONE_SUF       36
+#define MSG_EXEC_ERR_NOTEXE     37
+#define MSG_EXEC_ERR_FAILED     38
+#define MSG_EXEC_PRESS_KEY      39
 
 const char *g_msgJA[] = {
-  "PC98Guest ファイラ - ディレクトリビューア",
+  "すみれ - ディレクトリビューア",
   "パス=",
   "　（※上限",
   "件を超えたため一覧を打ち切りました ※）",
@@ -305,11 +317,14 @@ const char *g_msgJA[] = {
   "コピー完了: ",
   " 件",
   "移動完了: ",
-  " 件"
+  " 件",
+  "COM/EXEのみ実行できます（何かキーを押してください）",
+  "実行に失敗しました（何かキーを押してください）",
+  "実行を終了しました（何かキーを押してください）"
 };
 
 const char *g_msgEN[] = {
-  "PC98Guest Filer - directory viewer",
+  "Sumire - Directory viewer",
   "Path=",
   "   (** over ",
   " entries, list truncated **)",
@@ -345,7 +360,10 @@ const char *g_msgEN[] = {
   "Copied ",
   " file(s)",
   "Moved ",
-  " file(s)"
+  " file(s)",
+  "Only COM/EXE files can be executed (press any key)",
+  "Execute failed (press any key)",
+  "Finished executing (press any key)"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -409,9 +427,9 @@ int msg_selftest(void)
 int g_fkeyCol[] = { 4, 11, 18, 25, 32, 42, 49, 56, 63, 70 };
 
 char *g_fkeyLabel[] = {
-  "", "", "Copy", "Delete", "Rename", "Move", "mKdir", "", "", "Quit"
+  "", "eXec", "Copy", "Delete", "Rename", "Move", "mKdir", "", "", "Quit"
 };
-int g_fkeyHiPos[] = { -1, -1, 0, 0, 0, 0, 1, -1, -1, 0 };
+int g_fkeyHiPos[] = { -1, 1, 0, 0, 0, 0, 1, -1, -1, 0 };
 
 /* ---- global state ------------------------------------------------------ */
 
@@ -521,6 +539,46 @@ int dos_rename(char *oldPath, char *newPath)
       "mov ax, ds\n"
       "mov es, ax\n"
       "mov ah, 0x56\n"
+      "int 0x21\n"
+      "pop es\n"
+      "sbb ax, ax");
+}
+
+/* returns the current value of DS (the data segment every global/static
+   variable in this small-model program lives in - see COPY_BUF_SIZE's
+   comment). Needed only by dos_exec() below: the EXEC parameter block it
+   builds contains explicit offset:segment far pointers to buffers that
+   live in this same segment, and C in this dialect has no way to spell a
+   segment value directly - it has to come from a register read like this
+   one. */
+unsigned int get_ds(void)
+{
+  asm("mov ax, ds");
+}
+
+/* run a child program and wait for it to finish (INT 21h AH=4Bh AL=0,
+   EXEC "load and execute"). path is the ASCIIZ program path; paramBlock
+   is the 14-byte EXEC parameter block do_exec() below builds (word env
+   segment, then three offset:segment far pointers - command tail, first
+   default FCB, second default FCB). Returns 0 on success, nonzero on
+   failure (e.g. file not found, not enough memory).
+   Like dos_rename() above, ES is swapped to DS (the segment paramBlock
+   itself lives in, since it is always one of do_exec()'s local buffers)
+   only for the duration of the call and restored before returning, since
+   the caller cannot be assumed not to care what ES holds afterward. DS:DX
+   is left as whatever it already is (the correct data segment for path,
+   exactly like every other dos_* path argument in this file) - AH=4Bh
+   never needs ES to differ from DS here, because every buffer this
+   function touches lives in the same one small-model data segment. */
+int dos_exec(char *path, unsigned char *paramBlock)
+{
+  asm("mov dx, [bp+4]\n"
+      "mov bx, [bp+6]\n"
+      "push es\n"
+      "mov ax, ds\n"
+      "mov es, ax\n"
+      "mov al, 0\n"
+      "mov ah, 0x4b\n"
       "int 0x21\n"
       "pop es\n"
       "sbb ax, ax");
@@ -1080,6 +1138,34 @@ void sappend_padded(char *dst, int *lenp, char *s, int width, int cap)
   for (i = w; i < width; i++) sappend(dst, lenp, " ", cap);
 }
 
+/* like sappend_padded() above, but right-justifies label+number within
+   'width' screen cells instead of left-aligning: pad spaces go between
+   the label and the number, not after the number, and the number's own
+   last digit always lands exactly 1 cell short of the field's right edge
+   (a fixed 1-cell trailing margin), matching the real product's own
+   disk-totals row (measured; see draw_disk_line() and the
+   DISK_FIELD_WIDTH comment above) - "各欄で数値は右詰め、右端に1桁ぶんの
+   余白". If label+number+the 1-cell margin is already 'width' cells or
+   wider, no padding is added (draw_disk_line() sizes DISK_FIELD_WIDTH to
+   the true worst case, so this should not happen in practice, but as
+   with sappend_padded() it is not treated as an error). */
+void sappend_field_rj(char *dst, int *lenp, char *label, char *number, int width, int cap)
+{
+  int labelCells;
+  int numberCells;
+  int pad;
+  int i;
+
+  labelCells = text_width(label);
+  numberCells = text_width(number);
+  pad = width - labelCells - numberCells - 1;
+  if (pad < 0) pad = 0;
+  sappend(dst, lenp, label, cap);
+  for (i = 0; i < pad; i++) sappend(dst, lenp, " ", cap);
+  sappend(dst, lenp, number, cap);
+  sappend(dst, lenp, " ", cap);
+}
+
 /* ---- text VRAM (direct screen writes; milestone 5) --------------------
  * Screen output no longer goes through the DOS console (AH=40h + ANSI.SYS
  * escapes) at all for content - it writes straight to the two PC-98 text
@@ -1368,6 +1454,35 @@ void box_dash_row(int row, unsigned char lb, unsigned char rb)
    box_dash_row() above - BOXCH_H is now an ANK code, not SJIS text, so
    it cannot be mixed into a plain string with the (real, CP932) title
    text and handed to vram_puts_cells() in one call. */
+/* Milestone 7 fix: measured on real hardware, column DISK_SEP_COL1 (the
+   disk-line divider's row-0 junction) flickered between a blank space and
+   the junction char 0x91 - roughly 5:9 over 14 samples - even though this
+   function always converges to the same final content every frame. The
+   cause: the previous version wrote every cell of the fill run first
+   (plain dashes, unconditionally) and only afterward, in two more calls at
+   the very end, overwrote DISK_SEP_COL1/2 with the junction char. Both
+   writes happen on *every single frame*, not just when something actually
+   changed - vram_set_cell()'s mirror only skips a write when the *new*
+   value already matches the *last* value written to that cell, and here
+   the two stages genuinely write two different values in sequence, every
+   frame. So real hardware saw two real writes to that cell every frame -
+   dash, then junction - and the screen could be sampled mid-frame, between
+   them. (Separately measured: the right-hand cell of a full-width
+   character does not affect what is drawn, but it still holds whatever
+   value was last written to it - so a junction char placed over a title
+   character's right-hand cell changes the byte in VRAM without changing
+   what is visible, which is consistent with the space/junction pattern
+   observed here landing on such a cell.)
+   The fix: decide each cell's final content exactly once, in a single pass
+   over the row, so a cell is written at most once per frame (zero times
+   once the mirror already holds that value). The junction char is placed
+   only while iterating the dash-fill run itself - i.e. only in columns not
+   already occupied by the title text, the "--"/space decoration, the gap
+   before the clock, or the clock digits. If DISK_SEP_COL1/2 land inside
+   one of those occupied regions instead (a long title in the other
+   language, say), the junction is simply not drawn there - that column
+   keeps whatever the occupying content drew, once, matching this file's
+   "occupied columns don't get a junction" rule. */
 void draw_title_row(void)
 {
   char *title;
@@ -1401,20 +1516,24 @@ void draw_title_row(void)
   vram_puts_cells(ROW_TITLE, col, title, ATTR_BASE, titleCells);
   col += titleCells;
   vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++;
-  for (i = 0; i < fillCells; i++) { vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE); col++; }
+  for (i = 0; i < fillCells; i++) {
+    /* the only place this row ever places the disk-separator junction
+       char - see the function comment above for why doing it here,
+       inline with the fill loop, instead of as a separate unconditional
+       pass afterward, is what stops this cell from flickering. */
+    if (col == DISK_SEP_COL1 || col == DISK_SEP_COL2) {
+      vram_ank(ROW_TITLE, col, BOXCH_TJ, ATTR_BASE);
+    } else {
+      vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BASE);
+    }
+    col++;
+  }
   for (i = 0; i < TITLE_DATETIME_GAP; i++) { vram_ank(ROW_TITLE, col, ' ', ATTR_BASE); col++; }
 
   format_datetime(datetime);
   for (i = 0; i < DATETIME_WIDTH; i++) {
     vram_ank(ROW_TITLE, col, (unsigned char)datetime[i], ATTR_BASE); col++;
   }
-
-  /* row-0 junctions above the disk-line's two vertical dividers (row 1) -
-     written last so they land on top of whatever the dash-fill loop put
-     there; DISK_SEP_COL1/2 are always inside the dash-fill run because
-     check.py caps the title well short of reaching them. */
-  vram_ank(ROW_TITLE, DISK_SEP_COL1, BOXCH_TJ, ATTR_BASE);
-  vram_ank(ROW_TITLE, DISK_SEP_COL2, BOXCH_TJ, ATTR_BASE);
 }
 
 /* immediate one-off write, used only for the pre/post-frame terminal mode
@@ -1934,6 +2053,135 @@ void do_mkdir(void)
   draw_screen();
 }
 
+/* ---- execute (F2 / eXec) ------------------------------------------------- */
+
+/* X/x, F2: runs the file under the cursor (marks are not used - the
+   target is always the cursor entry, the same "single, cursor-only"
+   target rule do_rename() uses, not do_delete()/do_copy()/do_move()'s
+   "marked set if non-empty" rule - running more than one program per
+   keypress does not make sense). Only a .COM or .EXE file is run;
+   anything else - a directory, a file with no extension or a different
+   one - is refused with an explicit error dialog, never silently doing
+   nothing (see the do_exec() task's requirement).
+   Runs the child with INT 21h AH=4Bh (dos_exec() above): this program's
+   MZ header sets minalloc == maxalloc (confirmed by measurement, not
+   assumed here), so it never claims all of conventional memory at load
+   time and there is free memory left for DOS to load a child into.
+   The child is free to leave the screen in any state at all (an ordinary
+   console program will have overwritten most or all of it) and this
+   program has no way to know what it left behind, so on return this
+   always invalidates the VRAM shadow mirror (vram_shadow_init() - see the
+   vram_* section above) before drawing anything else, forcing every one
+   of the next redraw's cells to actually be written instead of trusting
+   stale "what's already on screen" state that no longer matches reality.
+   A "press any key" dialog is shown first (success or failure) so the
+   user actually gets to see whatever the child printed before this
+   program's own full-screen redraw overwrites it. */
+void do_exec(void)
+{
+  char *name;
+  char path[96];
+  char ext[4];
+  char cmdTail[2];
+  char fcb1[16];
+  char fcb2[16];
+  char param[14];
+  unsigned int ds;
+  unsigned int off;
+  int i;
+  int len;
+  int dotpos;
+  int extlen;
+  int rc;
+  char c;
+
+  if (g_count == 0) return;
+
+  if (is_dir_entry(g_cursor)) {
+    draw_dialog(MSG(MSG_EXEC_ERR_NOTEXE), 0);
+    dos_getch();
+    draw_screen();
+    return;
+  }
+
+  name = &g_name[g_cursor * NAME_LEN];
+  len = strlen(name);
+  dotpos = -1;
+  for (i = 0; i < len; i++) {
+    if (name[i] == '.') dotpos = i;
+  }
+  extlen = (dotpos >= 0) ? (len - dotpos - 1) : 0;
+  if (dotpos < 0 || extlen != 3) {
+    draw_dialog(MSG(MSG_EXEC_ERR_NOTEXE), 0);
+    dos_getch();
+    draw_screen();
+    return;
+  }
+  for (i = 0; i < 3; i++) {
+    c = name[dotpos + 1 + i];
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    ext[i] = c;
+  }
+  ext[3] = 0;
+  if (strcmp(ext, "COM") != 0 && strcmp(ext, "EXE") != 0) {
+    draw_dialog(MSG(MSG_EXEC_ERR_NOTEXE), 0);
+    dos_getch();
+    draw_screen();
+    return;
+  }
+
+  build_full_path(path, sizeof(path), name);
+
+  /* command tail: a length-prefixed string (count byte, then that many
+     characters, then a trailing CR) - empty here (count 0), same as
+     pressing Enter at a DOS prompt with no arguments typed. */
+  cmdTail[0] = 0;
+  cmdTail[1] = 0x0d;
+  for (i = 0; i < 16; i++) { fcb1[i] = 0; fcb2[i] = 0; }
+  for (i = 0; i < 14; i++) param[i] = 0;
+
+  /* EXEC parameter block (INT 21h AH=4Bh): word env segment (0 = copy
+     this program's own environment to the child - the normal case), then
+     three offset:segment far pointers (command tail, FCB1, FCB2). Every
+     pointer here targets a buffer in this same small-model data segment,
+     so the segment half of each one is just get_ds() repeated. */
+  ds = get_ds();
+  off = (unsigned int)cmdTail;
+  param[2] = (char)(off & 0xff);
+  param[3] = (char)(off >> 8);
+  param[4] = (char)(ds & 0xff);
+  param[5] = (char)(ds >> 8);
+  off = (unsigned int)fcb1;
+  param[6] = (char)(off & 0xff);
+  param[7] = (char)(off >> 8);
+  param[8] = (char)(ds & 0xff);
+  param[9] = (char)(ds >> 8);
+  off = (unsigned int)fcb2;
+  param[10] = (char)(off & 0xff);
+  param[11] = (char)(off >> 8);
+  param[12] = (char)(ds & 0xff);
+  param[13] = (char)(ds >> 8);
+
+  rc = dos_exec(path, (unsigned char *)param);
+
+  /* the child may have written anything to the screen (or nothing, if
+     dos_exec() itself failed before ever loading it) - invalidate the
+     mirror unconditionally so every write below actually happens; see
+     this function's header comment above. */
+  vram_shadow_init();
+
+  if (rc != 0) {
+    draw_dialog(MSG(MSG_EXEC_ERR_FAILED), 0);
+    dos_getch();
+    draw_screen();
+    return;
+  }
+
+  draw_dialog(MSG(MSG_EXEC_PRESS_KEY), 0);
+  dos_getch();
+  draw_screen();
+}
+
 /* ---- copy / move --------------------------------------------------------- */
 
 /* builds destDir + "\" + name into out[] (unlike build_full_path(), which
@@ -2407,10 +2655,8 @@ void draw_disk_line(void)
   char totalBuf[16];
   char usedBuf[16];
   char freeBuf[16];
-  char field[40];
   char row[128];
   int p;
-  int fp;
 
   drive = dos_getdrive();
   secPerClus = dos_diskfree(drive + 1, &availClus, &bytesPerSec, &totalClus);
@@ -2431,28 +2677,18 @@ void draw_disk_line(void)
   format_u32(usedHi, usedLo, usedBuf);
   format_u32(freeHi, freeLo, freeBuf);
 
-  /* total and used are padded to DISK_FIELD_WIDTH so the divider after
-     each one lands at DISK_SEP_COL1/DISK_SEP_COL2 every frame (see the
-     comment on those #defines); free is left as-is. */
-  fp = 0;
-  sappend(field, &fp, MSG(MSG_DISK_TOTAL), sizeof(field));
-  sappend(field, &fp, totalBuf, sizeof(field));
-  sappend(field, &fp, MSG(MSG_BYTES_SUFFIX), sizeof(field));
-  sappend_padded(row, &p, field, DISK_FIELD_WIDTH, sizeof(row));
+  /* right-justified, no unit suffix - measured off the real product's own
+     disk-totals row (see the DISK_FIELD_WIDTH comment above and
+     sappend_field_rj()). All three fields (not just total/used) use the
+     same fixed field width, so the row reads consistently even though
+     only total/used need it for divider alignment. */
+  sappend_field_rj(row, &p, MSG(MSG_DISK_TOTAL), totalBuf, DISK_FIELD_WIDTH, sizeof(row));
   sappend(row, &p, " ", sizeof(row)); /* divider cell; overwritten below */
 
-  fp = 0;
-  sappend(field, &fp, MSG(MSG_DISK_USED), sizeof(field));
-  sappend(field, &fp, usedBuf, sizeof(field));
-  sappend(field, &fp, MSG(MSG_BYTES_SUFFIX), sizeof(field));
-  sappend_padded(row, &p, field, DISK_FIELD_WIDTH, sizeof(row));
+  sappend_field_rj(row, &p, MSG(MSG_DISK_USED), usedBuf, DISK_FIELD_WIDTH, sizeof(row));
   sappend(row, &p, " ", sizeof(row)); /* divider cell; overwritten below */
 
-  fp = 0;
-  sappend(field, &fp, MSG(MSG_DISK_FREE), sizeof(field));
-  sappend(field, &fp, freeBuf, sizeof(field));
-  sappend(field, &fp, MSG(MSG_BYTES_SUFFIX), sizeof(field));
-  sappend(row, &p, field, sizeof(row));
+  sappend_field_rj(row, &p, MSG(MSG_DISK_FREE), freeBuf, DISK_FIELD_WIDTH, sizeof(row));
 
   box_row(ROW_DISK, BOXCH_V, BOXCH_V, row);
 
@@ -2720,7 +2956,7 @@ int main(int argc, char *argv[])
   int running;
 
   if (!msg_selftest()) {
-    write_str("FILER: message table error (JA/EN mismatch)\r\n");
+    write_str("SUMIRE: message table error (JA/EN mismatch)\r\n");
     return 1;
   }
 
@@ -2792,6 +3028,8 @@ int main(int argc, char *argv[])
       do_copy();
     } else if (key == 'm' || key == 'M') {
       do_move();
+    } else if (key == 'x' || key == 'X') {
+      do_exec();
     } else if (key == 'q' || key == 'Q') {
       running = 0;
     } else if (key == KEY_ESC) {
@@ -2801,7 +3039,9 @@ int main(int argc, char *argv[])
          other keyboard read. */
       if (dos_kbhit()) {
         key = dos_getch();
-        if (key == FKEY_CODE_F3) {
+        if (key == FKEY_CODE_F2) {
+          do_exec();
+        } else if (key == FKEY_CODE_F3) {
           do_copy();
         } else if (key == FKEY_CODE_F4) {
           do_delete();
@@ -2814,8 +3054,9 @@ int main(int argc, char *argv[])
         } else if (key == FKEY_CODE_F10) {
           running = 0;
         }
-        /* F1/F2/F8/F9 (and anything else): no command assigned yet -
-           see g_fkeyLabel[]'s reserved ("") entries - so ignored. */
+        /* F1/F8/F9 (and anything else): no command assigned yet - see
+           g_fkeyLabel[]'s reserved ("") entries - so ignored. F2 is
+           handled above (do_exec()). */
       } else {
         running = 0; /* bare ESC: quit, same as Q */
       }
