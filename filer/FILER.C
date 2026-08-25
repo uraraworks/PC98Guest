@@ -1,5 +1,5 @@
 /*
- * FILER.C - PC-98 / FreeDOS(98) directory browser (milestone 1)
+ * FILER.C - PC-98 / FreeDOS(98) directory browser (milestone 2)
  *
  * Independent, from-scratch implementation. See README.md in this
  * directory for the independence declaration. All on-screen text below
@@ -7,7 +7,12 @@
  * any text from any existing product.
  *
  * Milestone 1 scope: directory listing, cursor movement, quit only.
- * No file operations (copy/delete/rename/mkdir/...) are implemented yet.
+ * Milestone 2 adds: marking files (SPACE/TAB/HOME), moving into/out of
+ * a directory (Enter, "." and ".." shown like the original), and
+ * deleting the marked files (or the file under the cursor when nothing
+ * is marked) with a confirm dialog. Directories are never marked and
+ * are never deleted by this command. Copy/Move/Rename/mkdir are still
+ * not implemented.
  *
  * Built with SmallerC (C89-ish subset, 16-bit small-model MZ EXE).
  * Screen I/O uses ANSI-style escape sequences (measured against
@@ -57,6 +62,7 @@
 #define KEY_HOME   0x1a
 #define KEY_ESC    0x1b
 #define KEY_TAB    0x09
+#define KEY_SPACE  0x20
 #define KEY_ENTER  0x0d
 /* WordStar-style alternates, up/down only. ^S (0x13, "left" in the
  * WordStar scheme) must NOT be bound here: real DOS's console driver
@@ -130,9 +136,16 @@
 #define MSG_BYTES_SUFFIX  10
 #define MSG_ATTR_LABEL    11
 #define MSG_CMDLINE       12
+#define MSG_MARKED_LABEL       13
+#define MSG_DEL_CONFIRM_ONE_PRE   14
+#define MSG_DEL_CONFIRM_ONE_SUF   15
+#define MSG_DEL_CONFIRM_MARK_PRE  16
+#define MSG_DEL_CONFIRM_MARK_SUF  17
+#define MSG_DEL_ERR_ISDIR      18
+#define MSG_DEL_ERR_FAILED     19
 
 const char *g_msgJA[] = {
-  "PC98Guest ファイラ - ディレクトリビューア（マイルストーン1・開発中）",
+  "PC98Guest ファイラ - ディレクトリビューア（マイルストーン2・開発中）",
   "パス=",
   "　（※上限",
   "件を超えたため一覧を打ち切りました ※）",
@@ -144,11 +157,18 @@ const char *g_msgJA[] = {
   "空き:",
   "バイト",
   "属性:",
-  "矢印キー:移動　Q/ESC:終了"
+  "矢印:移動　SPACE/TAB:マーク　HOME:全マーク切替　Enter:移動　D:削除　Q/ESC:終了",
+  "マーク:",
+  "このファイルを削除しますか: ",
+  " (Y/N)",
+  "マークした ",
+  " 件を削除します (Y/N)",
+  "ディレクトリは削除できません（何かキーを押してください）",
+  "削除に失敗しました（読み取り専用など）（何かキーを押してください）"
 };
 
 const char *g_msgEN[] = {
-  "PC98Guest Filer - directory viewer (milestone 1, work in progress)",
+  "PC98Guest Filer - directory viewer (milestone 2, work in progress)",
   "Path=",
   "   (** over ",
   " entries, list truncated **)",
@@ -160,7 +180,14 @@ const char *g_msgEN[] = {
   "Free:",
   " bytes",
   "Attr:",
-  "Arrows: move   Q/ESC: quit"
+  "Arrows: move  SPACE/TAB: mark  HOME: toggle all  Enter: open  D: delete  Q/ESC: quit",
+  "Marked:",
+  "Delete this file: ",
+  " (Y/N)",
+  "Delete the ",
+  " marked file(s)? (Y/N)",
+  "Cannot delete a directory (press any key)",
+  "Delete failed (read-only?) - press any key"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -196,6 +223,8 @@ unsigned int g_time[MAX_ENTRIES];
 unsigned int g_date[MAX_ENTRIES];
 unsigned int g_sizeLo[MAX_ENTRIES];
 unsigned int g_sizeHi[MAX_ENTRIES];
+unsigned char g_marked[MAX_ENTRIES]; /* 1 = marked; directories are never
+                                         marked (see mark_cursor()) */
 
 int g_count;        /* number of entries actually stored (<= MAX_ENTRIES) */
 int g_truncated;     /* 1 if the directory had more than MAX_ENTRIES files */
@@ -236,6 +265,20 @@ int dos_findfirst(char *path, unsigned int attr)
 int dos_findnext(void)
 {
   asm("mov ah, 0x4f\n"
+      "int 0x21\n"
+      "sbb ax, ax");
+}
+
+/* delete a file (INT 21h AH=41h, DS:DX = ASCIZ path). Returns 0 on
+   success, nonzero on failure (e.g. read-only, in use). Only ever called
+   with a path built from a non-directory entry (see do_delete()); DOS
+   itself would also refuse to unlink a directory this way, but we do not
+   rely on that - the directory case is filtered out before this is ever
+   called. */
+int dos_delete(char *path)
+{
+  asm("mov dx, [bp+4]\n"
+      "mov ah, 0x41\n"
       "int 0x21\n"
       "sbb ax, ax");
 }
@@ -841,6 +884,255 @@ void read_path(void)
   if (cwdbuf[0] != 0) strcat(g_path, "\\");
 }
 
+/* ---- marking ----------------------------------------------------------- */
+
+/* directories are never markable - measured against the original: of 32
+   entries only the 18 non-directory files could be marked, the 14
+   directories could not. */
+int is_dir_entry(int idx)
+{
+  return (g_attr[idx] & ATTR_DIR) ? 1 : 0;
+}
+
+int count_marked(void)
+{
+  int i;
+  int n;
+
+  n = 0;
+  for (i = 0; i < g_count; i++) {
+    if (g_marked[i]) n++;
+  }
+  return n;
+}
+
+void clear_marks(void)
+{
+  int i;
+
+  for (i = 0; i < MAX_ENTRIES; i++) g_marked[i] = 0;
+}
+
+/* SPACE/TAB: sets the mark on the entry under the cursor (does not
+   toggle it back off - only HOME toggles). No-op on a directory and
+   no-op when the list is empty. */
+void mark_cursor(void)
+{
+  if (g_count == 0) return;
+  if (is_dir_entry(g_cursor)) return;
+  g_marked[g_cursor] = 1;
+}
+
+/* HOME: if any entry is marked, clears every mark; otherwise marks every
+   markable (non-directory) entry. */
+void toggle_all_marks(void)
+{
+  int i;
+
+  if (count_marked() > 0) {
+    clear_marks();
+  } else {
+    for (i = 0; i < g_count; i++) {
+      if (!is_dir_entry(i)) g_marked[i] = 1;
+    }
+  }
+}
+
+/* ---- directory navigation ----------------------------------------------- */
+
+/* builds g_path + name into out[]; 'cap' is out[]'s declared size and is
+   enforced the same way sappend() enforces it elsewhere - truncates
+   rather than overflowing, never splits a multi-byte character. */
+void build_full_path(char *out, int cap, char *name)
+{
+  int p;
+
+  p = 0;
+  sappend(out, &p, g_path, cap);
+  sappend(out, &p, name, cap);
+}
+
+/* Enter on a directory entry: "." (stay), ".." (go up one level, "." and
+   ".." are listed like the original and not hidden), or a subdirectory
+   name (go into it). g_path always ends with '\\'; both branches keep
+   that invariant. All appends are bounds-checked against sizeof(g_path)
+   via sappend(), the same discipline as everywhere else that builds a
+   fixed-size string in this file. */
+void enter_selected(void)
+{
+  char *name;
+  int len;
+  int p;
+
+  if (g_count == 0) return;
+  if (!is_dir_entry(g_cursor)) return;
+
+  name = &g_name[g_cursor * NAME_LEN];
+
+  if (strcmp(name, ".") == 0) {
+    return;
+  }
+
+  if (strcmp(name, "..") == 0) {
+    len = strlen(g_path);
+    if (len > 0 && g_path[len - 1] == '\\') len--;
+    while (len > 0 && g_path[len - 1] != '\\') len--;
+    if (len < 3) len = 3; /* keep the drive root "X:\\" intact */
+    g_path[len] = 0;
+  } else {
+    p = strlen(g_path);
+    sappend(g_path, &p, name, sizeof(g_path));
+    sappend(g_path, &p, "\\", sizeof(g_path));
+  }
+
+  read_dir();
+  g_cursor = 0;
+  clear_marks();
+  draw_screen();
+}
+
+/* ---- delete -------------------------------------------------------------- */
+
+/* draws the base screen, then overlays a small modal dialog box (2 lines:
+   the prompt, and optionally an error line under it) and flushes once.
+   This is the "no dedicated bottom status line; errors appear inside the
+   dialog, prompt stays up" behaviour measured from the original - see the
+   milestone doc. errmsg may be 0 for "no error line". */
+#define DIALOG_WIDTH  60
+#define DIALOG_ROW    10
+#define DIALOG_COL    8
+
+void draw_dialog(char *msg, char *errmsg)
+{
+  char cell[DIALOG_WIDTH + 1];
+  int i;
+  int row;
+
+  draw_screen_frame();
+
+  row = DIALOG_ROW;
+  buf_goto(row, DIALOG_COL);
+  buf_puts(BOXCH_TL);
+  for (i = 0; i < DIALOG_WIDTH / 2; i++) buf_puts(BOXCH_H);
+  buf_puts(BOXCH_TR);
+  row++;
+
+  for (i = 0; i < DIALOG_WIDTH; i++) cell[i] = ' ';
+  cell[DIALOG_WIDTH] = 0;
+  put_str_cells(cell, 0, msg, DIALOG_WIDTH);
+  buf_goto(row, DIALOG_COL);
+  buf_puts(BOXCH_V);
+  buf_puts(cell);
+  buf_puts(BOXCH_V);
+  row++;
+
+  if (errmsg != 0) {
+    for (i = 0; i < DIALOG_WIDTH; i++) cell[i] = ' ';
+    cell[DIALOG_WIDTH] = 0;
+    put_str_cells(cell, 0, errmsg, DIALOG_WIDTH);
+    buf_goto(row, DIALOG_COL);
+    buf_puts(BOXCH_V);
+    buf_puts(cell);
+    buf_puts(BOXCH_V);
+    row++;
+  }
+
+  buf_goto(row, DIALOG_COL);
+  buf_puts(BOXCH_BL);
+  for (i = 0; i < DIALOG_WIDTH / 2; i++) buf_puts(BOXCH_H);
+  buf_puts(BOXCH_BR);
+
+  buf_flush();
+}
+
+/* D/d: deletes the marked files, or (when nothing is marked) the single
+   file under the cursor. The target rule is one rule, not two cases that
+   can disagree: "marked set if non-empty, else the cursor entry" - see
+   the milestone doc.
+   Directories are never in the marked set (mark_cursor() refuses them),
+   so the only way a directory can be "the target" is the no-mark,
+   cursor-on-a-directory case; that is caught up front and refused with
+   an explicit error dialog rather than silently skipped or silently
+   deleting something else. No "delete completed" message is shown on
+   success, matching the original; the list is simply shorter afterward. */
+void do_delete(void)
+{
+  int i;
+  int idx;
+  int key;
+  int ok;
+  int anyFail;
+  int p;
+  char path[96];
+  char msg[128];
+
+  if (count_marked() == 0) {
+    if (g_count == 0) return;
+    idx = g_cursor;
+
+    if (is_dir_entry(idx)) {
+      draw_dialog(MSG(MSG_DEL_ERR_ISDIR), 0);
+      dos_getch();
+      draw_screen();
+      return;
+    }
+
+    p = 0;
+    sappend(msg, &p, MSG(MSG_DEL_CONFIRM_ONE_PRE), sizeof(msg));
+    sappend(msg, &p, &g_name[idx * NAME_LEN], sizeof(msg));
+    sappend(msg, &p, MSG(MSG_DEL_CONFIRM_ONE_SUF), sizeof(msg));
+    draw_dialog(msg, 0);
+    key = dos_getch();
+    if (key != 'y' && key != 'Y') {
+      draw_screen();
+      return;
+    }
+
+    build_full_path(path, sizeof(path), &g_name[idx * NAME_LEN]);
+    ok = dos_delete(path);
+    if (ok != 0) {
+      draw_dialog(MSG(MSG_DEL_ERR_FAILED), 0);
+      dos_getch();
+    }
+
+    read_dir();
+    if (g_cursor >= g_count) g_cursor = (g_count > 0) ? g_count - 1 : 0;
+    draw_screen();
+    return;
+  }
+
+  /* marked set: guaranteed to contain no directories (mark_cursor()
+     never marks one), so no per-entry directory check is needed here. */
+  p = 0;
+  sappend(msg, &p, MSG(MSG_DEL_CONFIRM_MARK_PRE), sizeof(msg));
+  sappend_uint(msg, &p, (unsigned int)count_marked(), sizeof(msg));
+  sappend(msg, &p, MSG(MSG_DEL_CONFIRM_MARK_SUF), sizeof(msg));
+  draw_dialog(msg, 0);
+  key = dos_getch();
+  if (key != 'y' && key != 'Y') {
+    draw_screen();
+    return;
+  }
+
+  anyFail = 0;
+  for (i = 0; i < g_count; i++) {
+    if (g_marked[i]) {
+      build_full_path(path, sizeof(path), &g_name[i * NAME_LEN]);
+      ok = dos_delete(path);
+      if (ok != 0) anyFail = 1;
+    }
+  }
+  if (anyFail) {
+    draw_dialog(MSG(MSG_DEL_ERR_FAILED), 0);
+    dos_getch();
+  }
+
+  read_dir();
+  clear_marks();
+  if (g_cursor >= g_count) g_cursor = (g_count > 0) ? g_count - 1 : 0;
+  draw_screen();
+}
+
 /* ---- screen drawing ------------------------------------------------------ */
 
 void build_entry_text(int idx, char *buf)
@@ -857,6 +1149,12 @@ void build_entry_text(int idx, char *buf)
   for (i = 0; i < 39; i++) buf[i] = ' ';
   buf[39] = 0;
   /* no '.' by default; only shown when there is an actual extension */
+
+  /* mark indicator: '*' at column 0, plain text (no color/reverse - the
+     real product's mark is a plain character too, confirmed by pixel
+     measurement). Directories are never marked, so this can never fire
+     for a directory row. */
+  if (g_marked[idx]) buf[0] = '*';
 
   rawname = &g_name[idx * NAME_LEN];
   dot = -1;
@@ -966,6 +1264,9 @@ void draw_path_line(void)
     sappend_uint(row, &p, (unsigned int)MAX_ENTRIES, sizeof(row));
     sappend(row, &p, MSG(MSG_TRUNC_SUFFIX), sizeof(row));
   }
+  sappend(row, &p, "  ", sizeof(row));
+  sappend(row, &p, MSG(MSG_MARKED_LABEL), sizeof(row));
+  sappend_uint(row, &p, (unsigned int)count_marked(), sizeof(row));
 
   box_row(ROW_PATH, BOXCH_V, BOXCH_V, row);
 }
@@ -1018,7 +1319,7 @@ void draw_info_line(int visibleCount)
   box_row(ROW_INFO, BOXCH_V, BOXCH_V, row);
 }
 
-void draw_screen(void)
+void draw_screen_frame(void)
 {
   int leftCount;
   int rightCount;
@@ -1077,7 +1378,11 @@ void draw_screen(void)
 
   buf_goto(ROW_CMD, 0);
   buf_puts(MSG(MSG_CMDLINE));
+}
 
+void draw_screen(void)
+{
+  draw_screen_frame();
   buf_flush();
 }
 
@@ -1164,6 +1469,20 @@ int main(int argc, char *argv[])
     } else if (key == KEY_RIGHT) {
       move_cursor(DIR_RIGHT);
       draw_screen();
+    } else if (key == KEY_SPACE) {
+      mark_cursor();
+      move_cursor(DIR_DOWN);
+      draw_screen();
+    } else if (key == KEY_TAB) {
+      mark_cursor();
+      draw_screen();
+    } else if (key == KEY_HOME) {
+      toggle_all_marks();
+      draw_screen();
+    } else if (key == KEY_ENTER) {
+      enter_selected();
+    } else if (key == 'd' || key == 'D') {
+      do_delete();
     } else if (key == 'q' || key == 'Q' || key == KEY_ESC) {
       running = 0;
     }
