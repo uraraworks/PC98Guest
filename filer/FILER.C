@@ -15,9 +15,18 @@
  * uses plain DOS INT 21h services (AH=1Ah/4Eh/4Fh/47h/19h/36h), which
  * are documented, generic DOS APIs and not derived from any particular
  * program's source code.
+ *
+ * Output is written directly to DOS via INT 21h AH=40h (handle 1),
+ * not through stdio: a full-screen redraw is assembled into an in
+ * memory buffer and flushed with a single write. stdio's line
+ * buffering never flushes here because the screen has no newlines,
+ * so printf()/puts()/putchar() must not be used for screen output.
+ *
+ * Screen text is bilingual (Japanese / English); see the message
+ * table below. Select with the /J (Japanese, default) or /E (English)
+ * command line switch.
  */
 
-#include <stdio.h>
 #include <string.h>
 
 /* ---- constants ------------------------------------------------------ */
@@ -47,7 +56,89 @@
 #define COL_LEFT      0
 #define COL_RIGHT     40
 
-/* ---- global state ----------------------------------------------------- */
+#define SCRBUF_SIZE   8192
+
+/* ---- language / message table ----------------------------------------
+ * All on-screen text is collected here and looked up by index; no
+ * literal UI text is written directly at the call site. See
+ * docs/i18n-design.md for the design rationale.
+ * ------------------------------------------------------------------- */
+
+#define LANG_JA 0
+#define LANG_EN 1
+
+#define MSG_TITLE         0
+#define MSG_PATH_PREFIX   1
+#define MSG_TRUNC_PREFIX  2
+#define MSG_TRUNC_SUFFIX  3
+#define MSG_INFO_PREFIX   4
+#define MSG_INFO_EMPTY    5
+#define MSG_DISK_UNAVAIL  6
+#define MSG_DISK_TOTAL    7
+#define MSG_DISK_USED     8
+#define MSG_DISK_FREE     9
+#define MSG_BYTES_SUFFIX  10
+#define MSG_ATTR_LABEL    11
+#define MSG_CMDLINE       12
+
+const char *g_msgJA[] = {
+  "PC98Guest ファイラ - ディレクトリビューア（マイルストーン1・開発中）",
+  "パス=",
+  "　（※上限",
+  "件を超えたため一覧を打ち切りました ※）",
+  "情報:",
+  "（空）",
+  "ディスク:（取得できません）",
+  "合計:",
+  "使用:",
+  "空き:",
+  "バイト",
+  "属性:",
+  "矢印キー:移動　Q/ESC:終了"
+};
+
+const char *g_msgEN[] = {
+  "PC98Guest Filer - directory viewer (milestone 1, work in progress)",
+  "Path=",
+  "   (** over ",
+  " entries, list truncated **)",
+  "Info:",
+  "(empty)",
+  "Disk: (unavailable)",
+  "Total:",
+  "Used:",
+  "Free:",
+  " bytes",
+  "Attr:",
+  "Arrows: move   Q/ESC: quit"
+};
+
+const char **g_msgTables[2] = { g_msgJA, g_msgEN };
+
+int g_lang = LANG_JA;
+
+#define MSG(id) (g_msgTables[g_lang][id])
+
+/* checks that both language tables have the same number of entries and
+   that no entry is an empty string; returns 1 if OK, 0 if broken */
+int msg_selftest(void)
+{
+  int nJA;
+  int nEN;
+  int i;
+
+  nJA = sizeof(g_msgJA) / sizeof(g_msgJA[0]);
+  nEN = sizeof(g_msgEN) / sizeof(g_msgEN[0]);
+  if (nJA != nEN) return 0;
+
+  for (i = 0; i < nJA; i++) {
+    if (g_msgJA[i] == 0 || g_msgJA[i][0] == 0) return 0;
+    if (g_msgEN[i] == 0 || g_msgEN[i][0] == 0) return 0;
+  }
+  return 1;
+}
+
+/* ---- global state ------------------------------------------------------ */
 
 char g_name[MAX_ENTRIES * NAME_LEN];
 unsigned char g_attr[MAX_ENTRIES];
@@ -63,6 +154,9 @@ int g_cursor;         /* index into the visible list (0 .. visibleCount-1) */
 char g_path[80];      /* current directory, always ends with '\' */
 char g_search[88];    /* g_path + "*.*" */
 unsigned char g_dta[43];
+
+char g_scrbuf[SCRBUF_SIZE]; /* one full-screen frame, flushed in one write */
+unsigned int g_scrlen;
 
 /* ---- low level DOS calls (inline asm; see doc/smlrc.md "asm()") ------- */
 
@@ -128,6 +222,18 @@ unsigned int dos_diskfree(unsigned int drive, unsigned int *availClus,
       "mov si, [bp+10]\n"
       "mov [si], dx\n"
       "pop ax");
+}
+
+/* write len bytes starting at buf to stdout (handle 1) via INT 21h AH=40h.
+   Used instead of stdio so screen writes are explicit, single-shot DOS
+   calls rather than a line-buffered stream that never sees a newline. */
+void dos_write(char *buf, unsigned int len)
+{
+  asm("mov dx, [bp+4]\n"
+      "mov cx, [bp+6]\n"
+      "mov bx, 1\n"
+      "mov ah, 0x40\n"
+      "int 0x21");
 }
 
 /* ---- 32-bit arithmetic helpers (SmallerC 16-bit mode has no long) ---- */
@@ -281,13 +387,43 @@ void put_str_n(char *buf, int col, char *s, int maxlen)
   }
 }
 
+/* display width in screen cells: SJIS lead bytes count as 2, everything
+   else (ASCII / trail bytes are skipped along with their lead byte) as 1.
+   All column alignment must go through this, not strlen(), so Japanese
+   full-width text lines up the same way ASCII text does. */
+int text_width(char *s)
+{
+  int w;
+  int i;
+  unsigned char c;
+
+  w = 0;
+  i = 0;
+  while (s[i] != 0) {
+    c = (unsigned char)s[i];
+    if ((c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC)) {
+      if (s[i + 1] != 0) {
+        w += 2;
+        i += 2;
+      } else {
+        w += 1; /* truncated lead byte at end of string; count as 1 */
+        i += 1;
+      }
+    } else {
+      w += 1;
+      i += 1;
+    }
+  }
+  return w;
+}
+
 void right_justify(char *buf, int col, int width, char *s)
 {
   int len;
   int pad;
   int i;
 
-  len = strlen(s);
+  len = text_width(s);
   if (len >= width) {
     put_str_n(buf, col, s + (len - width), width);
   } else {
@@ -297,9 +433,82 @@ void right_justify(char *buf, int col, int width, char *s)
   }
 }
 
-void goto_rc(int row, int col)
+/* ---- screen frame buffer (replaces stdio for all screen output) ------- */
+
+void buf_reset(void)
 {
-  printf("\x1b[%d;%dH", row + 1, col + 1);
+  g_scrlen = 0;
+}
+
+void buf_putc(char c)
+{
+  g_scrbuf[g_scrlen] = c;
+  g_scrlen++;
+}
+
+void buf_puts(char *s)
+{
+  int i;
+
+  i = 0;
+  while (s[i] != 0) {
+    buf_putc(s[i]);
+    i++;
+  }
+}
+
+void buf_putuint(unsigned int v)
+{
+  char tmp[6];
+  int n;
+
+  n = 0;
+  if (v == 0) {
+    buf_putc('0');
+    return;
+  }
+  while (v > 0) {
+    tmp[n] = (char)('0' + (v % 10));
+    v = v / 10;
+    n++;
+  }
+  while (n > 0) {
+    n--;
+    buf_putc(tmp[n]);
+  }
+}
+
+void buf_goto(int row, int col)
+{
+  buf_puts("\x1b[");
+  buf_putuint((unsigned int)(row + 1));
+  buf_putc(';');
+  buf_putuint((unsigned int)(col + 1));
+  buf_putc('H');
+}
+
+void buf_color(int code)
+{
+  buf_puts("\x1b[");
+  buf_putuint((unsigned int)code);
+  buf_putc('m');
+}
+
+void buf_clear(void)
+{
+  buf_puts("\x1b[2J");
+}
+
+void buf_flush(void)
+{
+  dos_write(g_scrbuf, g_scrlen);
+}
+
+/* immediate one-off write, used only for the pre/post-frame terminal mode
+   escapes in main() (not part of a screen frame) */
+void write_str(char *s)
+{
+  dos_write(s, (unsigned int)strlen(s));
 }
 
 /* ---- directory scanning ------------------------------------------------ */
@@ -427,9 +636,9 @@ void draw_disk_line(void)
   drive = dos_getdrive();
   secPerClus = dos_diskfree(drive + 1, &availClus, &bytesPerSec, &totalClus);
 
-  goto_rc(ROW_DISK, 0);
+  buf_goto(ROW_DISK, 0);
   if (secPerClus == 0xFFFF) {
-    printf("Disk: (unavailable)                                                    ");
+    buf_puts(MSG(MSG_DISK_UNAVAIL));
     return;
   }
 
@@ -442,8 +651,17 @@ void draw_disk_line(void)
   format_u32(usedHi, usedLo, usedBuf);
   format_u32(freeHi, freeLo, freeBuf);
 
-  printf("Total:%s bytes  Used:%s bytes  Free:%s bytes            ",
-         totalBuf, usedBuf, freeBuf);
+  buf_puts(MSG(MSG_DISK_TOTAL));
+  buf_puts(totalBuf);
+  buf_puts(MSG(MSG_BYTES_SUFFIX));
+  buf_puts("  ");
+  buf_puts(MSG(MSG_DISK_USED));
+  buf_puts(usedBuf);
+  buf_puts(MSG(MSG_BYTES_SUFFIX));
+  buf_puts("  ");
+  buf_puts(MSG(MSG_DISK_FREE));
+  buf_puts(freeBuf);
+  buf_puts(MSG(MSG_BYTES_SUFFIX));
 }
 
 void draw_info_line(int visibleCount)
@@ -454,9 +672,10 @@ void draw_info_line(int visibleCount)
   char datebuf[9];
   char timebuf[6];
 
-  goto_rc(ROW_INFO, 0);
+  buf_goto(ROW_INFO, 0);
   if (visibleCount == 0) {
-    printf("Info: (empty)                                                          ");
+    buf_puts(MSG(MSG_INFO_PREFIX));
+    buf_puts(MSG(MSG_INFO_EMPTY));
     return;
   }
 
@@ -471,8 +690,18 @@ void draw_info_line(int visibleCount)
   format_date(g_date[g_cursor], datebuf);
   format_time(g_time[g_cursor], timebuf);
 
-  printf("Info:%s  %s bytes  %s %s  Attr:%s          ",
-         &g_name[g_cursor * NAME_LEN], sizebuf, datebuf, timebuf, attrbuf);
+  buf_puts(MSG(MSG_INFO_PREFIX));
+  buf_puts(&g_name[g_cursor * NAME_LEN]);
+  buf_puts("  ");
+  buf_puts(sizebuf);
+  buf_puts(MSG(MSG_BYTES_SUFFIX));
+  buf_puts("  ");
+  buf_puts(datebuf);
+  buf_puts(" ");
+  buf_puts(timebuf);
+  buf_puts("  ");
+  buf_puts(MSG(MSG_ATTR_LABEL));
+  buf_puts(attrbuf);
 }
 
 void draw_screen(void)
@@ -491,24 +720,30 @@ void draw_screen(void)
   leftCount = (visibleCount > LEFT_ROWS) ? LEFT_ROWS : visibleCount;
   rightCount = visibleCount - leftCount;
 
-  printf("\x1b[2J");
+  buf_reset();
+  buf_clear();
 
-  goto_rc(ROW_TITLE, 0);
-  printf("PC98Guest FILER - directory viewer (milestone 1, work in progress)");
+  buf_goto(ROW_TITLE, 0);
+  buf_puts(MSG(MSG_TITLE));
 
   draw_disk_line();
 
-  goto_rc(ROW_SEP1, 0);
-  for (i = 0; i < 79; i++) putchar('-');
+  buf_goto(ROW_SEP1, 0);
+  for (i = 0; i < 79; i++) buf_putc('-');
 
-  goto_rc(ROW_PATH, 0);
-  printf("Path=%s", g_path);
-  if (g_truncated) printf("   (** over %d entries, list truncated **)", MAX_ENTRIES);
+  buf_goto(ROW_PATH, 0);
+  buf_puts(MSG(MSG_PATH_PREFIX));
+  buf_puts(g_path);
+  if (g_truncated) {
+    buf_puts(MSG(MSG_TRUNC_PREFIX));
+    buf_putuint((unsigned int)MAX_ENTRIES);
+    buf_puts(MSG(MSG_TRUNC_SUFFIX));
+  }
 
   draw_info_line(visibleCount);
 
-  goto_rc(ROW_SEP2, 0);
-  for (i = 0; i < 79; i++) putchar('-');
+  buf_goto(ROW_SEP2, 0);
+  for (i = 0; i < 79; i++) buf_putc('-');
 
   for (row = 0; row < LEFT_ROWS; row++) {
     leftIdx = row;
@@ -516,21 +751,23 @@ void draw_screen(void)
 
     if (leftIdx < leftCount) {
       build_entry_text(leftIdx, entrybuf);
-      printf(leftIdx == g_cursor ? "\x1b[33m" : "\x1b[37m");
-      goto_rc(ROW_LIST_TOP + row, COL_LEFT);
-      printf("%s", entrybuf);
+      buf_color(leftIdx == g_cursor ? 33 : 37);
+      buf_goto(ROW_LIST_TOP + row, COL_LEFT);
+      buf_puts(entrybuf);
     }
     if (rightIdx < visibleCount) {
       build_entry_text(rightIdx, entrybuf);
-      printf(rightIdx == g_cursor ? "\x1b[33m" : "\x1b[37m");
-      goto_rc(ROW_LIST_TOP + row, COL_RIGHT);
-      printf("%s", entrybuf);
+      buf_color(rightIdx == g_cursor ? 33 : 37);
+      buf_goto(ROW_LIST_TOP + row, COL_RIGHT);
+      buf_puts(entrybuf);
     }
   }
-  printf("\x1b[37m");
+  buf_color(37);
 
-  goto_rc(ROW_CMD, 0);
-  printf("Arrows: move   Q/ESC: quit");
+  buf_goto(ROW_CMD, 0);
+  buf_puts(MSG(MSG_CMDLINE));
+
+  buf_flush();
 }
 
 /* ---- input / cursor movement -------------------------------------------- */
@@ -563,16 +800,39 @@ void move_cursor(int key2)
   }
 }
 
+/* ---- command line switches ----------------------------------------------- */
+
+void parse_args(int argc, char *argv[])
+{
+  int i;
+
+  g_lang = LANG_JA; /* default, per docs/i18n-design.md */
+  for (i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "/E") == 0 || strcmp(argv[i], "/e") == 0) {
+      g_lang = LANG_EN;
+    } else if (strcmp(argv[i], "/J") == 0 || strcmp(argv[i], "/j") == 0) {
+      g_lang = LANG_JA;
+    }
+  }
+}
+
 /* ---- main ---------------------------------------------------------------- */
 
-int main(void)
+int main(int argc, char *argv[])
 {
   int key;
   int key2;
   int running;
 
-  printf("\x1b[>1h"); /* release the bottom function-key line */
-  printf("\x1b[>5h"); /* hide the text cursor */
+  if (!msg_selftest()) {
+    write_str("FILER: message table error (JA/EN mismatch)\r\n");
+    return 1;
+  }
+
+  parse_args(argc, argv);
+
+  write_str("\x1b[>1h"); /* release the bottom function-key line */
+  write_str("\x1b[>5h"); /* hide the text cursor */
 
   read_path();
   read_dir();
@@ -591,9 +851,9 @@ int main(void)
     }
   }
 
-  printf("\x1b[2J");
-  printf("\x1b[>5l"); /* show the text cursor again */
-  printf("\x1b[>1l"); /* restore the function-key line */
+  write_str("\x1b[2J");
+  write_str("\x1b[>5l"); /* show the text cursor again */
+  write_str("\x1b[>1l"); /* restore the function-key line */
 
   return 0;
 }
