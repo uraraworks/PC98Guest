@@ -90,6 +90,10 @@
 #define ROW_LIST_TOP  6
 #define ROW_CMD       24
 
+#define CMDLINE_WIDTH 79  /* the console can scroll if col 80 (0-based
+                              79) on the bottom row is written; see
+                              draw_screen_frame()'s cmdline truncation */
+
 #define COL_LEFT      0
 #define COL_RIGHT     40
 
@@ -164,7 +168,7 @@ const char *g_msgJA[] = {
   "マークした ",
   " 件を削除します (Y/N)",
   "ディレクトリは削除できません（何かキーを押してください）",
-  "削除に失敗しました（読み取り専用など）（何かキーを押してください）"
+  "削除に失敗しました（読み取り専用？）キーを押してください"
 };
 
 const char *g_msgEN[] = {
@@ -180,7 +184,7 @@ const char *g_msgEN[] = {
   "Free:",
   " bytes",
   "Attr:",
-  "Arrows: move  SPACE/TAB: mark  HOME: toggle all  Enter: open  D: delete  Q/ESC: quit",
+  "Arrows:move SPACE/TAB:mark HOME:toggle all Enter:open D:delete Q/ESC:quit",
   "Marked:",
   "Delete this file: ",
   " (Y/N)",
@@ -1377,7 +1381,19 @@ void draw_screen_frame(void)
   buf_color(37);
 
   buf_goto(ROW_CMD, 0);
-  buf_puts(MSG(MSG_CMDLINE));
+  {
+    char cmdline[CMDLINE_WIDTH + 1];
+    int ci;
+
+    /* zero-fill first so put_str_cells (which never writes past the
+       cells it truncates to and never appends a NUL itself) leaves a
+       valid, NUL-terminated string no matter how much of MSG_CMDLINE
+       fit. Truncation never splits a multi-byte character - see
+       put_str_cells(). */
+    for (ci = 0; ci <= CMDLINE_WIDTH; ci++) cmdline[ci] = 0;
+    put_str_cells(cmdline, 0, MSG(MSG_CMDLINE), CMDLINE_WIDTH);
+    buf_puts(cmdline);
+  }
 }
 
 void draw_screen(void)
