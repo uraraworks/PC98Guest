@@ -50,6 +50,12 @@ let releaseReadme = null;
 let releaseLicense = null;
 let releaseGpl2 = null;
 let releaseOut = null;
+// --file NAME.EXT=パス : 収録するファイルを1件ずつ指定する(繰り返し可)。
+// --release と併用する。指定した順にクラスタを割り当てるので、
+// 連続配置が要るファイル(つくしの辞書)は最後に置くこと。
+// --label NAME : ブートセクタのOEM名(8文字)。既定は TSUKUSHI。
+const releaseFiles = [];
+let releaseLabel = null;
 for (let i = 0; i < process.argv.length; i++) {
   const arg = process.argv[i];
   if (arg === '--fragment') {
@@ -72,16 +78,39 @@ for (let i = 0; i < process.argv.length; i++) {
     releaseGpl2 = process.argv[i + 1];
   } else if (arg === '--out') {
     releaseOut = process.argv[i + 1];
+  } else if (arg === '--label') {
+    releaseLabel = process.argv[i + 1];
+  } else if (arg === '--file') {
+    const spec = process.argv[i + 1];
+    const eq = spec ? spec.indexOf('=') : -1;
+    if (eq <= 0) {
+      console.error(`--file は NAME.EXT=パス の形で指定してください: ${spec}`);
+      process.exit(1);
+    }
+    const dosName = spec.slice(0, eq);
+    const path = spec.slice(eq + 1);
+    const dot = dosName.indexOf('.');
+    const base = (dot < 0 ? dosName : dosName.slice(0, dot)).toUpperCase();
+    const ext = (dot < 0 ? '' : dosName.slice(dot + 1)).toUpperCase();
+    if (base.length === 0 || base.length > 8 || ext.length > 3) {
+      console.error(`--file の名前が 8.3 に収まりません: ${dosName}`);
+      process.exit(1);
+    }
+    releaseFiles.push({ name: base.padEnd(8, ' '), ext: ext.padEnd(3, ' '), path });
   }
 }
 
 if (releaseMode) {
   const missing = [];
-  if (!releaseCom) missing.push('--com');
-  if (!releaseDic) missing.push('--dic');
-  if (!releaseReadme) missing.push('--readme');
-  if (!releaseLicense) missing.push('--license');
-  if (!releaseGpl2) missing.push('--gpl2');
+  // --file が1件でもあるときは、収録するファイルはそちらで完全に決まる
+  // (つくし専用だった --com/--dic/... は指定しなくてよい)。
+  if (releaseFiles.length === 0) {
+    if (!releaseCom) missing.push('--com');
+    if (!releaseDic) missing.push('--dic');
+    if (!releaseReadme) missing.push('--readme');
+    if (!releaseLicense) missing.push('--license');
+    if (!releaseGpl2) missing.push('--gpl2');
+  }
   if (!releaseOut) missing.push('--out');
   if (missing.length > 0) {
     console.error(`--release には ${missing.join(', ')} の指定が必要です`);
@@ -95,7 +124,8 @@ const image = Buffer.alloc(TOTAL_SECTORS * BYTES_PER_SECTOR, 0);
 image[0] = 0xeb; // jmp short +0x3c
 image[1] = 0x3c;
 image[2] = 0x90; // nop
-image.write(releaseMode ? 'TSUKUSHI' : 'ESCT1   ', 3, 8, 'ascii');
+image.write(releaseMode ? (releaseLabel || 'TSUKUSHI').toUpperCase().padEnd(8, ' ').slice(0, 8)
+                        : 'ESCT1   ', 3, 8, 'ascii');
 image.writeUInt16LE(BYTES_PER_SECTOR, 11);
 image[13] = SECTORS_PER_CLUSTER;
 image.writeUInt16LE(RESERVED_SECTORS, 14);
@@ -128,7 +158,7 @@ setFatEntry(1, 0xfff);
 // --- ファイル配置 ---
 // 測定用プログラム一式。FreeDOS(98) 側での確認にも使うので つくし本体と辞書も入れる。
 // --release モードでは配布用の5ファイルだけを収録する(probesは入れない)。
-const files = releaseMode ? [
+const files = (releaseMode && releaseFiles.length > 0) ? releaseFiles : releaseMode ? [
   { name: 'TSUKUSHI', ext: 'COM', path: releaseCom },
   { name: 'TSUKUSHI', ext: 'DIC', path: releaseDic },
   { name: 'READ    ', ext: 'ME ', path: releaseReadme },
