@@ -1,6 +1,6 @@
-# Sumire (すみれ), a directory viewer for PC-98 / FreeDOS(98)
+# Sumire (すみれ), a file manager for PC-98 / FreeDOS(98)
 
-**Sumire（すみれ）**は PC-98 / FreeDOS(98) 向けのディレクトリビューア（ファイラ）です。
+**Sumire（すみれ）**は PC-98 / FreeDOS(98) 向けのファイラです。
 以前は仮名として「FILER」を名乗っていましたが、正式名称を Sumire/すみれ に改名しました
 （ソースは `SUMIRE.C`、実行ファイルは `SUMIRE.EXE` です）。**開発中**で、現時点では
 ディレクトリの一覧表示・カーソル移動・ファイルのマーク・ディレクトリの移動・

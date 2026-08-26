@@ -471,7 +471,12 @@ int msg_selftest(void)
  * （"<< " + タイトル + " >>" をダッシュで埋めた枠の中央に置く処理）は
  * 変更していない。check.py のセル幅検査も、g_msgJA/g_msgEN の一部としてで
  * はなく、この文字列単独に対して行うよう追従させてある。 */
-char *g_title = "Sumire - Directory viewer";
+/* Directory viewerだと実態より狭い。すみれはCopy/Move/Delete/Rename/mKdir/eXec/Viewを持つファイラであって、閲覧専用ではない。
+ * 原物FDは自分を「File & Directory tool」と説明している（FDはその頭文字）が、
+ * そこには寄せない。原物の自己紹介の文言であり、権利方針で写さないと決めているため。
+ * File managerは英語圏で標準的な呼び方で、海外利用者にも伝わる。
+ */
+char *g_title = "Sumire - File manager";
 
 /* ---- 最下段：PC-98のファンクションキー割り当て（言語非依存） --
  * 第6マイルストーンで、第4マイルストーンの「キー:説明」コマンド行を、
