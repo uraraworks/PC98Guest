@@ -590,6 +590,9 @@ void ansi_goto(int row, int col)
 #define MSG_LOAD_TOO_LARGE 7 /* 起動時の読み込み：容量超過 */
 #define MSG_LOAD_TOO_MANY_LINES 8 /* 起動時の読み込み：行数超過 */
 #define MSG_LIMIT_NOTICE  9  /* 編集中に容量／行数上限へ達したときのステータス行通知 */
+#define MSG_SAVEAS_ERR_EMPTY   10 /* F3：保存名が空のときのエラー（同じダイアログへ戻って打ち直させる） */
+#define MSG_SAVEAS_ERR_INVALID 11 /* F3：保存名がDOSの8.3形式に収まらない、または禁止文字を含むときのエラー */
+#define MSG_SAVEAS_ERR_FAILED  12 /* F3：save_file()失敗時のエラー（原因は断定しない――書込禁止とは限らないため） */
 
 const char *g_msgJA[] = {
   "無題",
@@ -598,10 +601,13 @@ const char *g_msgJA[] = {
   "行番号: ",
   "保存名: ",
   "保存されていない変更があります。破棄して終了しますか (Y/N)",
-  "保存に失敗しました（書込禁止？）何かキーを押してください",
+  "保存に失敗しました（何かキーを押してください）",
   "ファイルが大きすぎます（何かキーを押してください）",
   "行数が多すぎます（何かキーを押してください）",
-  "上限のため入力を無視しました"
+  "上限のため入力を無視しました",
+  "名前が空です",
+  "名前が不正です",
+  "保存に失敗しました"
 };
 
 const char *g_msgEN[] = {
@@ -611,10 +617,13 @@ const char *g_msgEN[] = {
   "Line No: ",
   "Save as: ",
   "Unsaved changes. Discard and quit? (Y/N)",
-  "Save failed (read-only?) - press any key",
+  "Save failed (press any key)",
   "File is too large (press any key)",
   "Too many lines (press any key)",
-  "Ignored: limit reached"
+  "Ignored: limit reached",
+  "Name is empty",
+  "Invalid name",
+  "Save failed"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -1648,20 +1657,128 @@ void goto_line_dialog(void)
   ensure_visible();
 }
 
+/* 名前を構成する1要素（basename[.ext]）がDOSの8.3形式に収まるかを
+   調べる。sはNUL終端されていなくてよい（呼び出し元がバックスラッシュ
+   区切りの断片を渡すため）。基本名1～8文字・拡張子0～3文字・ドット
+   は最大1つ。不正なら0、妥当なら1を返す。 */
+int is_valid_dos_element(char *s, int len)
+{
+  int i;
+  int dotpos;
+  int baselen;
+  int extlen;
+
+  if (len <= 0) return 0;
+
+  dotpos = -1;
+  for (i = 0; i < len; i++) {
+    if (s[i] == '.') {
+      if (dotpos >= 0) return 0; /* 拡張子は最大1つ */
+      dotpos = i;
+    }
+  }
+  if (dotpos < 0) {
+    baselen = len;
+    extlen = 0;
+  } else {
+    baselen = dotpos;
+    extlen = len - dotpos - 1;
+  }
+  if (baselen < 1 || baselen > 8) return 0;
+  if (extlen > 3) return 0;
+  return 1;
+}
+
+/* DOSのファイル名として使えない文字（* ? " < > | と制御文字）かどうか。
+   実機で踏んだ事故（LINES.TXTSAVED.TXTのような連結）はここでは
+   弾けない（.と英数字しか使っていないため）――弾くのは
+   is_valid_dos_element()のドット数・長さチェックの役目。この関数は
+   別種の不正（記号や制御文字の混入）を担当する。 */
+int is_forbidden_char(unsigned char c)
+{
+  if (c < 0x20) return 1;
+  if (c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') return 1;
+  return 0;
+}
+
+/* nameがDOSのパスとして妥当かを検査する。ドライブ名（例：B:）と
+   バックスラッシュ区切りのパスを受け付け、'\'で区切られた各要素に
+   is_valid_dos_element()を適用する。空文字列は呼び出し元
+   （save_as_command()）が別のメッセージで先に弾くので、ここでは
+   「空＝不正」として扱ってよい。 */
+int is_valid_dos_path(char *name)
+{
+  int i;
+  int start;
+  unsigned char c;
+
+  if (name[0] == 0) return 0;
+
+  i = 0;
+  /* ドライブ名（英字1文字＋コロン）は先頭にだけ許す */
+  if (((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z')) && name[1] == ':') {
+    i = 2;
+  }
+  /* ドライブの直後の1つの'\'はルートを表す区切りであり、名前の要素
+     ではないので、要素の開始位置をその次からにする */
+  if (name[i] == '\\') i++;
+
+  start = i;
+  for (;; i++) {
+    c = (unsigned char)name[i];
+    if (c == '\\' || c == 0) {
+      if (!is_valid_dos_element(name + start, i - start)) return 0;
+      if (c == 0) break;
+      start = i + 1;
+      continue;
+    }
+    if (c == ':') return 0; /* ドライブ以外でのコロンは不可 */
+    if (is_forbidden_char(c)) return 0;
+  }
+  return 1;
+}
+
+/* F3：名前を変えて保存する。すみれのdo_rename()/do_mkdir()と同じ
+   「確定するたびに検査し、失敗したら入力済みの文字列を残したまま
+   同じダイアログへエラー行付きで戻る」形にしている（設計書の
+   do_rename()参照）。以前はinput_dialog()を1回呼ぶだけで、save_file()
+   失敗を「保存に失敗しました（書込禁止？）」という別の
+   press-any-keyダイアログで報告していた。だが実機では、F3の
+   初期値（現在のファイル名）を消さずに打つと名前が連結され
+   （例："LINES.TXT"+"SAVED.TXT"="LINES.TXTSAVED.TXT"）、8.3形式を
+   超えた名前でDOSへの書き込みに失敗した。このとき出た
+   「書込禁止？」は原因の誤帰属であり（実際は名前が不正なだけ）、
+   しかもダイアログが閉じて入力内容も失われるため打ち直せなかった。
+   そこで、DOSへ渡す前にここで名前を検査し（is_valid_dos_path()）、
+   save_file()を呼ぶのはそれを通った後だけにする。失敗の種類ごとに
+   別のメッセージを出し、原因を断定する文言（「書込禁止？」等）は
+   使わない。 */
 void save_as_command(void)
 {
   char buf[FILENAME_MAX + 1];
+  char *err;
   int ok;
   int r;
 
   strcpy(buf, g_filename);
-  ok = input_dialog(MSG(MSG_SAVEAS_PROMPT), buf, FILENAME_MAX, 0);
-  if (!ok) return;
-  if (buf[0] == 0) return;
-  r = save_file(buf);
-  if (r != 0) {
-    show_notice_dialog(MSG(MSG_SAVE_FAIL));
-    return;
+  err = 0;
+  for (;;) {
+    ok = input_dialog(MSG(MSG_SAVEAS_PROMPT), buf, FILENAME_MAX, err);
+    if (!ok) return;
+    if (buf[0] == 0) {
+      err = MSG(MSG_SAVEAS_ERR_EMPTY);
+      continue;
+    }
+    if (!is_valid_dos_path(buf)) {
+      err = MSG(MSG_SAVEAS_ERR_INVALID);
+      continue;
+    }
+    r = save_file(buf);
+    if (r != 0) {
+      err = MSG(MSG_SAVEAS_ERR_FAILED);
+      continue;
+    }
+    break;
   }
   strcpy(g_filename, buf);
   g_modified = 0;

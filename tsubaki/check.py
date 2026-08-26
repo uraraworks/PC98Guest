@@ -98,6 +98,9 @@ MSG_LIMITS = {
     "MSG_LOAD_TOO_LARGE":      ("dialog",   7),
     "MSG_LOAD_TOO_MANY_LINES": ("dialog",   8),
     "MSG_LIMIT_NOTICE":        ("notice",   9),
+    "MSG_SAVEAS_ERR_EMPTY":    ("dialog",   10),
+    "MSG_SAVEAS_ERR_INVALID":  ("dialog",   11),
+    "MSG_SAVEAS_ERR_FAILED":   ("dialog",   12),
 }
 
 # Generous fixed budget for the status line's "[...]" mode indicator (see
