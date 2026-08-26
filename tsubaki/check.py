@@ -14,9 +14,10 @@ Checks (all must pass, otherwise this exits non-zero):
      does not appear anywhere in the file.
   3. g_msgJA and g_msgEN have the same number of entries.
   4. Neither message table contains an empty string.
-  5. g_title (the status line's leftmost product-name field, fixed
-     English text kept out of g_msgJA/g_msgEN - see its comment in
-     TSUBAKI.C, right above g_fkeyCol[]) fits STATUS_TITLE_WIDTH cells.
+  5. g_title (the status line's trailing " - Tsubaki" product-name
+     field, fixed English text kept out of g_msgJA/g_msgEN - see its
+     comment in TSUBAKI.C, right above g_fkeyCol[]) fits
+     STATUS_SUFFIX_TITLE_WIDTH cells.
   6. Every message in g_msgJA/g_msgEN is checked against the screen-cell
      limit that applies to how TSUBAKI.C actually uses it, in both
      languages. Screen-cell width follows the same rule as TSUBAKI.C's own
@@ -26,9 +27,11 @@ Checks (all must pass, otherwise this exits non-zero):
        - "untitled": placed alone into the status line's shared file-name/
                      notice field (draw_status_line()) when no file is
                      loaded and no notice is pending, must fit within
-                     STATUS_SHARED_WIDTH-1 cells (1 cell reserved for the
-                     '*' modified-marker that draw_status_line() may
-                     append right after it).
+                     STATUS_SHARED_WIDTH-STATUS_SUFFIX_WIDTH-1 cells (1
+                     cell reserved for the '*' modified-marker, and
+                     STATUS_SUFFIX_WIDTH cells reserved for the trailing
+                     " - Tsubaki" that draw_status_line() always appends
+                     after the name/marker).
        - "mode"    : placed alone inside the status line's "[...]" mode
                      indicator (draw_status_line()), must fit within a
                      small fixed budget (MODE_WIDTH below) - generous
@@ -41,8 +44,8 @@ Checks (all must pass, otherwise this exits non-zero):
                      name occupies when no notice is pending - see
                      STATUS_SHARED_WIDTH's comment in TSUBAKI.C), must fit
                      within STATUS_SHARED_WIDTH cells.
-     STATUS_SHARED_WIDTH and DIALOG_WIDTH are both read out of TSUBAKI.C's
-     #define lines, never hard-coded here.
+     STATUS_SHARED_WIDTH, STATUS_SUFFIX_WIDTH and DIALOG_WIDTH are all read
+     out of TSUBAKI.C's #define lines, never hard-coded here.
   7. The bottom row (g_fkeyLabel[]/g_fkeyCol[]/g_fkeyHiPos[] - ten
      fixed-position function-key fields, the same convention as
      guest/sumire/SUMIRE.C's F-key row):
@@ -59,11 +62,10 @@ Checks (all must pass, otherwise this exits non-zero):
          field.
        - g_fkeyHiPos[i] is either -1 (only valid when g_fkeyLabel[i] is
          empty) or a valid index into g_fkeyLabel[i].
-  8. The status line (row 0) field widths - STATUS_TITLE_WIDTH,
-     STATUS_SEP_WIDTH, STATUS_SHARED_WIDTH and STATUS_RIGHT_WIDTH, all read
-     out of TSUBAKI.C's #define lines, never hard-coded here - sum to
-     exactly VRAM_COLS (80), so the reverse-video status band covers the
-     row with no gap and no overrun.
+  8. The status line (row 0) field widths - STATUS_SHARED_WIDTH and
+     STATUS_RIGHT_WIDTH, both read out of TSUBAKI.C's #define lines, never
+     hard-coded here - sum to exactly VRAM_COLS (80), so the reverse-video
+     status band covers the row with no gap and no overrun.
   9. BODY_TOP + BODY_ROWS does not reach ROW_FKEY, so the scrollable body
      area never overlaps the bottom function-key row.
  10. Every "notice" message (g_msgJA/g_msgEN, both languages) fits within
@@ -192,8 +194,8 @@ def main():
 
     # ---- extract the screen-cell width limits and both message tables -
     dialog_width = extract_define_int(text, "DIALOG_WIDTH")
-    status_title_width = extract_define_int(text, "STATUS_TITLE_WIDTH")
-    status_sep_width = extract_define_int(text, "STATUS_SEP_WIDTH")
+    status_suffix_title_width = extract_define_int(text, "STATUS_SUFFIX_TITLE_WIDTH")
+    status_suffix_width = extract_define_int(text, "STATUS_SUFFIX_WIDTH")
     status_shared_width = extract_define_int(text, "STATUS_SHARED_WIDTH")
     status_right_width = extract_define_int(text, "STATUS_RIGHT_WIDTH")
     ja = extract_array(text, "g_msgJA")
@@ -214,27 +216,29 @@ def main():
             fail("g_msgEN[%d] is an empty string" % i)
     print("PASS: 4) no empty strings in g_msgJA or g_msgEN")
 
-    # ---- check 5: g_title fits the status line's title-field budget ---
+    # ---- check 5: g_title fits the status line's suffix title budget ---
     if title == "":
         fail("g_title is an empty string")
     title_w = cell_width(title.encode("cp932"))
-    if title_w > status_title_width:
-        fail("g_title is %d cells wide, exceeds STATUS_TITLE_WIDTH (%d cells) - %r" %
-             (title_w, status_title_width, title))
-    print("PASS: 5) g_title (%r) fits STATUS_TITLE_WIDTH (limit=%d cells, actual=%d cells)" %
-          (title, status_title_width, title_w))
+    if title_w > status_suffix_title_width:
+        fail("g_title is %d cells wide, exceeds STATUS_SUFFIX_TITLE_WIDTH (%d cells) - %r" %
+             (title_w, status_suffix_title_width, title))
+    print("PASS: 5) g_title (%r) fits STATUS_SUFFIX_TITLE_WIDTH (limit=%d cells, actual=%d cells)" %
+          (title, status_suffix_title_width, title_w))
 
     # ---- check 6: every message fits the cell limit its use site implies --
     limits = {
         # STATUS_SHARED_WIDTH minus 1 cell reserved for the '*' modified
-        # marker draw_status_line() may append right after the name.
-        "untitled": status_shared_width - 1,
+        # marker and STATUS_SUFFIX_WIDTH cells reserved for the trailing
+        # " - Tsubaki" that draw_status_line() always appends after the
+        # name/marker.
+        "untitled": status_shared_width - status_suffix_width - 1,
         "mode": MODE_WIDTH,
         "dialog": dialog_width,
         "notice": status_shared_width,
     }
     limit_names = {
-        "untitled": "STATUS_SHARED_WIDTH-1 (status-line shared file-name/notice field, minus the '*' marker)",
+        "untitled": "STATUS_SHARED_WIDTH-STATUS_SUFFIX_WIDTH-1 (status-line shared file-name/notice field, minus the trailing \" - Tsubaki\" and the '*' marker)",
         "mode": "MODE_WIDTH (status-line mode indicator budget)",
         "dialog": "DIALOG_WIDTH",
         "notice": "STATUS_SHARED_WIDTH (status-line shared file-name/notice field)",
@@ -323,17 +327,14 @@ def main():
         print(line)
 
     # ---- check 8: status-line field widths sum to exactly VRAM_COLS ---
-    status_total = (status_title_width + status_sep_width + status_shared_width +
-                    status_right_width)
+    status_total = status_shared_width + status_right_width
     if status_total != screen_cols:
-        fail("status line field widths sum to %d cells (title=%d + sep=%d + "
-             "shared=%d + right=%d), expected exactly VRAM_COLS (%d)" %
-             (status_total, status_title_width, status_sep_width,
-              status_shared_width, status_right_width, screen_cols))
+        fail("status line field widths sum to %d cells (shared=%d + "
+             "right=%d), expected exactly VRAM_COLS (%d)" %
+             (status_total, status_shared_width, status_right_width, screen_cols))
     print("PASS: 8) status line field widths sum to exactly VRAM_COLS "
-          "(title=%d + sep=%d + shared=%d + right=%d = %d)" %
-          (status_title_width, status_sep_width, status_shared_width,
-           status_right_width, screen_cols))
+          "(shared=%d + right=%d = %d)" %
+          (status_shared_width, status_right_width, screen_cols))
 
     # ---- check 9: body area does not overlap the function-key row -----
     body_top = extract_define_int(text, "BODY_TOP")

@@ -55,28 +55,31 @@
 
 /* ステータス行（行0）の内訳。左から並べた幅の合計がちょうど
    VRAM_COLS(80)になるようにする（check.pyで検査）：
-     STATUS_TITLE_WIDTH(7)   … プログラム名「Tsubaki」
-   + STATUS_SEP_WIDTH(1)     … 区切りの空白1セル
-   + STATUS_SHARED_WIDTH(40) … ファイル名欄と通知欄を共有する1つの
-                                 フィールド。通知が空ならファイル名＋
-                                 変更マーク'*'を、通知があれば通知
-                                 g_noticeを描く（実機実測：旧12セルの
-                                 専用ファイル名欄では8.3形式いっぱいの
-                                 名前を編集した瞬間に先頭が欠けた。
-                                 通知は次のキー入力で消える一時表示
-                                 なので、その間ファイル名が隠れても
-                                 差し支えない）。ファイル名が収まらない
-                                 ときは先頭を'<'に置き換えて末尾を残す。
-                                 全角文字の途中では区切らない。既存の
-                                 最長通知メッセージ（全角14文字=28
-                                 セル）は40セルに余裕で収まる
-   + STATUS_RIGHT_WIDTH(32)  … 行:桁／モード／タブ幅／変更マーク（従来と同じ）
+     STATUS_SHARED_WIDTH(48) … ファイル名欄と通知欄を共有する1つの
+                                 フィールド。通知が空なら「ファイル名
+                                 （＋変更マーク'*'）＋ STATUS_SUFFIX_
+                                 WIDTH(10)セルの" - Tsubaki"」を、通知
+                                 があれば通知g_noticeを描く（利用者の
+                                 提案：プログラム名は固定なので、変わる
+                                 ファイル名を先に出し" - Tsubaki"で
+                                 締める並びにした）。" - Tsubaki"は必ず
+                                 全体を表示するため、ファイル名に使える
+                                 幅はSTATUS_SHARED_WIDTHから
+                                 STATUS_SUFFIX_WIDTH(10)ぶん差し引いた
+                                 残りになる。ファイル名が収まらないとき
+                                 は先頭を'<'に置き換えて末尾を残す
+                                 （省略するのはファイル名部分だけで、
+                                 " - Tsubaki"は削らない）。全角文字の
+                                 途中では区切らない。既存の最長通知
+                                 メッセージ（全角14文字=28セル）は
+                                 48セルに余裕で収まる
+   + STATUS_RIGHT_WIDTH(32)  … 行:桁／モード／タブ幅（従来と同じ）
    = 80 */
-#define STATUS_TITLE_WIDTH  7
-#define STATUS_SEP_WIDTH    1
-#define STATUS_SHARED_WIDTH 40
+#define STATUS_SUFFIX_TITLE_WIDTH 7   /* " - Tsubaki"のうちプログラム名「Tsubaki」部分の幅 */
+#define STATUS_SUFFIX_WIDTH       10  /* " - " (3) + STATUS_SUFFIX_TITLE_WIDTH (7) = 10 */
+#define STATUS_SHARED_WIDTH 48
 #define STATUS_RIGHT_WIDTH  32
-#define STATUS_SHARED_COL (STATUS_TITLE_WIDTH + STATUS_SEP_WIDTH)
+#define STATUS_SHARED_COL 0
 
 #define DIALOG_WIDTH 60
 #define DIALOG_ROW   10
@@ -637,10 +640,10 @@ int msg_selftest(void)
   return 1;
 }
 
-/* タイトル（製品名。ステータス行左側）：g_msgJA/g_msgENの外に置く
-   言語非依存の固定文字列。すみれのg_titleと同じ扱い。ステータス行に
-   ファイル名を統合しSTATUS_TITLE_WIDTH(7)しか使えなくなったため、
-   版表記は付けず"Tsubaki"の7文字ちょうどにした。 */
+/* タイトル（製品名。ステータス行の"ファイル名 - Tsubaki"の末尾）：
+   g_msgJA/g_msgENの外に置く言語非依存の固定文字列。すみれのg_titleと
+   同じ扱い。STATUS_SUFFIX_TITLE_WIDTH(7)しか使えないため、版表記は
+   付けず"Tsubaki"の7文字ちょうどにした。 */
 char *g_title = "Tsubaki";
 
 /* ---- 最下段：ファンクションキー割り当て（言語非依存） --------------
@@ -1340,12 +1343,15 @@ void sappend_tail_cells(char *dst, int *lenp, char *name, int availCells, int ca
 
 /* ステータス行（行0）を描画する。行1のファイル名専用行は廃止し、
    ファイル名と変更マークをこの行に統合した（利用者の指摘：
-   「ファイル名だけなら1行目に入りそう」）。フィールド幅の内訳は
+   「ファイル名だけなら1行目に入りそう」）。さらに左端固定の
+   "Tsubaki"欄は廃止し、プログラム名はファイル名の後ろへ" - Tsubaki"
+   として移した（利用者の提案：変わるのはファイル名のほうなので、
+   固定のプログラム名を先頭に置く理由がない）。フィールド幅の内訳は
    STATUS_*_WIDTHの定義部コメント参照。 */
 void draw_status_line(void)
 {
-  char left[STATUS_TITLE_WIDTH + 1];
-  char fileBuf[FILENAME_MAX + 4]; /* '<'(1) + ファイル名 + '*'(1) + NUL の余裕 */
+  /* '<'(1) + ファイル名 + '*'(1) + " - Tsubaki"(STATUS_SUFFIX_WIDTH) + NUL の余裕 */
+  char fileBuf[FILENAME_MAX + STATUS_SUFFIX_WIDTH + 4];
   char right[STATUS_RIGHT_WIDTH + 1];
   char rightRaw[40];
   char *name;
@@ -1354,28 +1360,25 @@ void draw_status_line(void)
   int lineNo;
   int colNo;
 
-  /* 左：プログラム名 */
-  p = 0;
-  sappend(left, &p, g_title, sizeof(left));
-  vram_puts_cells(ROW_STATUS, 0, left, ATTR_STATUS, STATUS_TITLE_WIDTH);
-
-  /* 区切りの空白1セル */
-  vram_ank(ROW_STATUS, STATUS_TITLE_WIDTH, ' ', ATTR_STATUS);
-
   /* ファイル名欄と通知欄は同じフィールド（STATUS_SHARED_WIDTH）を
-     共有する。通知g_noticeが出ている間はそちらを優先して描き、
-     空ならファイル名＋変更マークを描く（マークは対象が分かるよう
-     ファイル名の直後に置く）。通知は一時的で次のキー入力で消える
-     ため、その間ファイル名が隠れても差し支えない。 */
+     共有する。通知g_noticeが出ている間はそちらを優先して描き、これ
+     までどおり同じ欄を占める（通知は一時的で次のキー入力で消える
+     ため、その間ファイル名や" - Tsubaki"が隠れても差し支えない）。
+     空なら「ファイル名（＋変更マーク'*'、ファイル名の直後）
+     + " - Tsubaki"」を描く。" - Tsubaki"は必ず全体を表示するので、
+     ファイル名に使える幅はSTATUS_SHARED_WIDTHからSTATUS_SUFFIX_WIDTH
+     ぶん差し引いた残りになる（省略が要るのはファイル名部分だけ）。 */
   if (g_notice[0] != 0) {
     vram_puts_cells(ROW_STATUS, STATUS_SHARED_COL, g_notice, ATTR_STATUS, STATUS_SHARED_WIDTH);
   } else {
     name = (g_filename[0] == 0) ? MSG(MSG_UNTITLED) : g_filename;
-    fileAvail = STATUS_SHARED_WIDTH - (g_modified ? 1 : 0);
+    fileAvail = STATUS_SHARED_WIDTH - STATUS_SUFFIX_WIDTH - (g_modified ? 1 : 0);
     p = 0;
     fileBuf[0] = 0;
     sappend_tail_cells(fileBuf, &p, name, fileAvail, sizeof(fileBuf));
     if (g_modified) sappend(fileBuf, &p, "*", sizeof(fileBuf));
+    sappend(fileBuf, &p, " - ", sizeof(fileBuf));
+    sappend(fileBuf, &p, g_title, sizeof(fileBuf));
     vram_puts_cells(ROW_STATUS, STATUS_SHARED_COL, fileBuf, ATTR_STATUS, STATUS_SHARED_WIDTH);
   }
 
