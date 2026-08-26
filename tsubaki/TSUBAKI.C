@@ -1289,8 +1289,6 @@ int save_file(char *path)
 
 /* ---- 画面描画 --------------------------------------------------------- */
 
-void draw_screen(void); /* draw_dialog()/draw_input_box()から前方参照する */
-
 /* nameの表示幅がavailCellsセルを超える場合、末尾を残して先頭を省略し、
    省略した印として先頭に'<'を1つ置く（全角文字の途中では区切らない）。
    dstの*lenpバイト目に追記し、続けてsappend()できるよう更新する（規約は
@@ -1494,14 +1492,26 @@ void draw_screen(void)
 
 /* ---- ダイアログ（すみれのdraw_dialog()/draw_input_box()/input_dialog()
    を土台に、つばきはカーソルを常時表示するため表示/非表示の切替を
-   省いた版） ------------------------------------------------------------ */
+   省いた版）
+
+   以前はここでdraw_screen()を呼んで画面全体を描き直してから、その上に
+   ダイアログを重ねていた。draw_fkey_row()の行24と同じ理由（同関数の
+   コメント参照）で、これはダイアログの枠の下に隠れる本文セルへ「本文
+   →枠」の2回書きを発生させ、文字入力中に実測でちらついた（利用者の
+   報告どおり。行10-13のダイアログ帯で107フレーム中dip 8回・最小輝度
+   684、静止時は92フレーム中0回・2125で一定）。呼び出し元（main()の
+   モーダルループ）は各キー処理の最後に必ずdraw_screen()を1回だけ
+   呼ぶため、ダイアログの下の背景はすでに直前のフレームで正しく
+   描かれている。よってここでは背景を描き直さず、ダイアログの枠と
+   内容だけを1セル1回書きで描く。閉じるとき（ESC・確定・エラー含む
+   どの経路でも）の背景の復元は、呼び出し元に戻った後のその1回の
+   draw_screen()に一本化されている（経路ごとには書かない）。
+   ------------------------------------------------------------------- */
 
 void draw_dialog(char *msg, char *errmsg)
 {
   int i;
   int row;
-
-  draw_screen();
 
   row = DIALOG_ROW;
   vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BORDER);
@@ -1514,12 +1524,16 @@ void draw_dialog(char *msg, char *errmsg)
   vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
   row++;
 
-  if (errmsg != 0) {
-    vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
-    vram_puts_cells(row, DIALOG_COL + 1, errmsg, ATTR_VALUE, DIALOG_WIDTH);
-    vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
-    row++;
-  }
+  /* エラー行は常に確保する（高さを固定するため。errmsgの有無で枠の
+     高さが変わると、さっきまで枠だったセルを本文へ戻す処理が別途
+     必要になり、そこがまた二重書きや消し残しの温床になる――すみれで
+     経路ごとに消す対策をして再発させた前例と同じ形）。エラーが無い
+     ときはDIALOG_WIDTH幅の空白で埋め、前回エラー行だった文字を
+     残さない。 */
+  vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
+  vram_puts_cells(row, DIALOG_COL + 1, errmsg != 0 ? errmsg : "", ATTR_VALUE, DIALOG_WIDTH);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
+  row++;
 
   vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BORDER);
   for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
@@ -1532,6 +1546,11 @@ void show_notice_dialog(char *msg)
   key_read();
 }
 
+/* draw_dialog()と同じ理由でdraw_screen()を呼ばず、枠と内容だけを1セル
+   1回書きで描く（上のコメント参照）。エラー行を常に確保するのも同じ
+   理由：input_dialog()のモーダルループはerrmsgをキー入力のたびに
+   有り／無しへ行き来させる（BSや通常文字の入力でerrmsg=0に戻す）ため、
+   ここで高さを固定しないと同じループの中で枠の高さが変わってしまう。 */
 void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
 {
   char line[DIALOG_WIDTH * 2 + FILENAME_MAX + 4];
@@ -1541,8 +1560,6 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   int fieldCol;
   int p;
   int promptCells;
-
-  draw_screen();
 
   row = DIALOG_ROW;
   vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BORDER);
@@ -1562,12 +1579,10 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   fieldRow = row;
   row++;
 
-  if (errmsg != 0) {
-    vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
-    vram_puts_cells(row, DIALOG_COL + 1, errmsg, ATTR_VALUE, DIALOG_WIDTH);
-    vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
-    row++;
-  }
+  vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
+  vram_puts_cells(row, DIALOG_COL + 1, errmsg != 0 ? errmsg : "", ATTR_VALUE, DIALOG_WIDTH);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
+  row++;
 
   vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BORDER);
   for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
@@ -1862,7 +1877,7 @@ int main(int argc, char *argv[])
       write_str("\x1b[>1h");
       write_str("\x1b[>5l");
       vram_shadow_init();
-      vram_clear_all();
+      draw_screen(); /* draw_dialog()はもう背景を描かないので、通知の下地をここで1回だけ用意する */
       show_notice_dialog(r == LOAD_TOO_LARGE ? MSG(MSG_LOAD_TOO_LARGE) : MSG(MSG_LOAD_TOO_MANY_LINES));
     }
   }
@@ -1871,7 +1886,6 @@ int main(int argc, char *argv[])
   write_str("\x1b[>5l"); /* テキストカーソルを表示する（編集中は常時表示） */
 
   vram_shadow_init();
-  vram_clear_all();
 
   ensure_visible();
   draw_screen();
