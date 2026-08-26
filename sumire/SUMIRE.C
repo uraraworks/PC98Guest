@@ -73,9 +73,17 @@
  * for commands this program does not implement (Logdsk/eXec/Sort/Find/
  * Tree/...) are left blank rather than named. Every command remains
  * reachable by its plain letter key exactly as before - the function
- * keys are an additional entry point. Reading a function key means
- * telling its 0x1B first byte apart from a bare ESC keypress; see
- * dos_kbhit() and main()'s KEY_ESC handling.
+ * keys are an additional entry point.
+ * Milestone 9 centers the title text inside "<< >>" on row 0 (see
+ * draw_title_row() below) and migrates key input from DOS INT 21h
+ * AH=08h to BIOS INT 18h AH=00h (see dos_getch()/dos_kbhit() below and
+ * docs/dos-key-measure-01.md): DOS's console driver ate ^S as XOFF and
+ * never delivered ROLL UP/ROLL DOWN/HELP at all (all measured), and none
+ * of that goes through the DOS console any more since screen output
+ * already moved to direct VRAM writes at milestone 5. INT 18h reports a
+ * function key by its own scan code directly, so the old "0x1B then
+ * check dos_kbhit() for a queued second byte" trick milestone 6 needed
+ * is gone along with it - see the KEY_* / dos_getch() comments below.
  */
 
 #include <string.h>
@@ -104,12 +112,23 @@
 #define DIR_LEFT  3
 #define DIR_RIGHT 4
 
-/* ---- key codes returned by DOS INT 21h AH=08h (console input, no echo)
- * Measured on real DOS/PC-98 with a probe program: unlike the IBM PC
- * convention of a 0x00 prefix byte followed by an extended scan code,
- * PC-98 DOS returns arrow keys as single control codes. The old
- * "if (key == 0) key2 = dos_getch();" two-byte read never saw its
- * prefix byte and so the arrow keys did nothing.
+/* ---- key codes, as returned by dos_getch() below ---------------------
+ * Milestone 9 moved dos_getch()/dos_kbhit() from DOS INT 21h AH=08h/0Bh
+ * to BIOS INT 18h AH=00h/01h (see those functions further down), but
+ * these values are kept exactly as they were under DOS so none of the
+ * comparisons against them elsewhere in this file had to change.
+ * INT 18h AH=00h returns AH=scan code, AL=character code, with AL=0 for
+ * any key that has no character - all measured with a probe program; see
+ * docs/key-measure-01.md, docs/key-measure-02.md, docs/tsukushi-keys.md,
+ * docs/dos-key-measure-01.md. dos_getch() itself does the AL/scan-code
+ * translation (only it ever sees the raw scan code), returning:
+ *   - AL unchanged, when AL is nonzero - this already matches every one
+ *     of the plain values below (BS/TAB/ENTER/SPACE/ESC/^E/^X), since
+ *     INT 18h's AL for those keys is numerically the same byte DOS's
+ *     AH=08h used to return for them (also measured).
+ *   - one of KEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT/KEY_HOME/KEY_F1..KEY_F10
+ *     below, translated from the scan code, when AL is 0 (no character).
+ *   - 0 for any other no-character key (unassigned in this program).
  * ------------------------------------------------------------------- */
 #define KEY_UP     0x0b
 #define KEY_DOWN   0x0a
@@ -123,30 +142,33 @@
 /* WordStar-style alternates, up/down only. ^S (0x13, "left" in the
  * WordStar scheme) must NOT be bound here: real DOS's console driver
  * treats ^S as XOFF and freezes screen output until ^Q is pressed
- * (confirmed on real hardware). A BIOS/VRAM-direct program can use ^S
- * safely; this program goes through the DOS console API (AH=08h/40h),
- * so ^S is not usable. ^D is left unbound too: unlike ^E/^X it has not
- * been confirmed not to collide with anything. */
+ * (confirmed on real hardware, through the DOS console this program no
+ * longer uses for input as of milestone 9 - ^S was never re-measured
+ * against INT 18h directly, so it stays unbound rather than assigned on
+ * a guess). ^D is left unbound too: unlike ^E/^X it has not been
+ * confirmed not to collide with anything. */
 #define KEY_CTRL_E 0x05   /* alternate for up */
 #define KEY_CTRL_X 0x18   /* alternate for down */
 
-/* second byte of a PC-98 function-key code (see KEY_ESC above and
- * dos_kbhit() below): DOS INT 21h AH=08h returns a function key as two
- * bytes, 0x1B (ESC) followed by one of these - measured on real hardware
- * with a probe program; see docs/filer-measure-05.md. An ESC keypress by
- * itself is only ever the single byte 0x1B (also measured), so the two
- * cases are told apart by checking dos_kbhit() right after reading
- * 0x1B, never by looking at the second byte's value alone. */
-#define FKEY_CODE_F1  'S'
-#define FKEY_CODE_F2  'T'
-#define FKEY_CODE_F3  'U'
-#define FKEY_CODE_F4  'V'
-#define FKEY_CODE_F5  'W'
-#define FKEY_CODE_F6  'E'
-#define FKEY_CODE_F7  'J'
-#define FKEY_CODE_F8  'P'
-#define FKEY_CODE_F9  'Q'
-#define FKEY_CODE_F10 'Z'
+/* pseudo codes for the function keys, returned by dos_getch() when the
+ * INT 18h scan code is F1-F10 (0x62-0x6B measured; see
+ * docs/key-measure-01.md/-02.md). Chosen above 0xFF (out of range for
+ * any real AL byte or the control-code constants above) so they can
+ * never collide with a character keypress. Unlike the old DOS-console
+ * scheme (a queued 0x1B + letter pair, see the removed FKEY_CODE_*
+ * constants this replaces), INT 18h reports a function key as a single
+ * distinct scan code, so main()'s dispatch no longer needs to peek at
+ * dos_kbhit() after an ESC to tell the two apart. */
+#define KEY_F1  0x100
+#define KEY_F2  0x101
+#define KEY_F3  0x102
+#define KEY_F4  0x103
+#define KEY_F5  0x104
+#define KEY_F6  0x105
+#define KEY_F7  0x106
+#define KEY_F8  0x107
+#define KEY_F9  0x108
+#define KEY_F10 0x109
 
 #define ATTR_RDONLY   0x01
 #define ATTR_HIDDEN   0x02
@@ -229,15 +251,18 @@
 
 /* ---- header row 0 (title) right-hand clock field -------------------------
  * "YY-MM-DD HH:MM:SS", 17 cells, shown at the right end of the title row.
- * TITLE_DATETIME_GAP is the blank cell between the title's trailing
- * dash-fill and the clock field; TITLE_DECOR_WIDTH is the "--" + " " +
- * " " decoration around the title text (see draw_title_row()). check.py
- * derives MSG_TITLE's cell-width limit from these plus BOX_WIDTH instead
- * of hardcoding it, so changing any of them changes the enforced limit
- * too. */
+ * TITLE_DATETIME_GAP is the blank cell between the title's dash-fill and
+ * the clock field. TITLE_DECOR_WIDTH is the fixed-width "<<" + " " +
+ * " " + ">>" wrapped directly around the title text (measured on the
+ * original - see draw_title_row(); the original's own title is centered
+ * inside this bracket pair, with dash-fill runs padding both sides out
+ * to the row's fixed width, one more blank cell separating each dash
+ * run from the bracket pair). check.py derives MSG_TITLE's cell-width
+ * limit from these plus BOX_WIDTH instead of hardcoding it, so changing
+ * any of them changes the enforced limit too. */
 #define DATETIME_WIDTH      17
 #define TITLE_DATETIME_GAP  1
-#define TITLE_DECOR_WIDTH   4
+#define TITLE_DECOR_WIDTH   6
 /* trailing " " + one BOXCH_H cell placed after the clock field and
    before the top-right corner (measured: real hardware leaves a 1-cell
    gap plus a border cell between the clock and the corner, not the
@@ -557,27 +582,75 @@ int g_viewTotalLines;               /* total display-line count, computed
                                        once by view_count_lines() when the
                                        viewer is opened */
 
-/* ---- low level DOS calls (inline asm; see doc/smlrc.md "asm()") ------- */
+/* ---- low level DOS/BIOS calls (inline asm; see doc/smlrc.md "asm()") -- */
 
-int dos_getch(void)
+/* INT 18h AH=00h (BIOS keyboard input, waits for a key): returns
+   AH=scan code, AL=character code (measured; see docs/key-measure-01.md
+   and docs/key-measure-02.md). *scan receives the scan code; the
+   function's own return value is AL, zero-extended - the pointer-out-
+   param style matches this file's other multi-value DOS calls, e.g.
+   dos_getftime() above. Only dos_getch() below calls this. */
+int bios_getch_raw(int *scan)
 {
-  asm("mov ah, 8\n"
-      "int 0x21\n"
+  asm("mov ah, 0\n"
+      "int 0x18\n"
+      "mov bl, ah\n"
+      "mov bh, 0\n"
+      "mov si, [bp+4]\n"
+      "mov [si], bx\n"
       "mov ah, 0");
 }
 
-/* AH=0Bh (DOS console input status): returns AL=0xFF if a character is
-   already waiting in the keyboard buffer, AL=0x00 if not (measured on
-   real hardware; see docs/filer-measure-05.md). Used right after reading
-   a 0x1B (KEY_ESC) from dos_getch() to tell a bare ESC keypress (which
-   never has a second byte queued) apart from the first byte of a
-   function-key code (whose second byte is measured to already be
-   sitting in the buffer at that point - never call this after any other
-   keyboard read or delay, or the second byte may already be gone). */
+/* Milestone 9: migrated from DOS INT 21h AH=08h to BIOS INT 18h AH=00h
+   (see docs/dos-key-measure-01.md for why - DOS's console driver ate ^S
+   as XOFF and never delivered ROLL UP/ROLL DOWN/HELP at all). Kept under
+   its old name and 0-argument, "return the character" shape so none of
+   the ~30 existing call sites in this file need to change. A key with a
+   character (AL != 0) is returned as-is - see the KEY_* comment above
+   for why that already matches every plain code this program compares
+   against. A key with no character (AL == 0) is translated from its
+   scan code into one of the KEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT/KEY_HOME/
+   KEY_F1..KEY_F10 pseudo-codes above, or 0 if this program does not
+   assign that key (e.g. ROLL UP/ROLL DOWN/HELP/INS/DEL - not measured
+   with real scan-code values against this program's own build, see
+   README's TODO). */
+int dos_getch(void)
+{
+  int c;
+  int scan;
+
+  c = bios_getch_raw(&scan);
+  if (c != 0) return c;
+
+  if (scan == 0x3a) return KEY_UP;
+  if (scan == 0x3d) return KEY_DOWN;
+  if (scan == 0x3b) return KEY_LEFT;
+  if (scan == 0x3c) return KEY_RIGHT;
+  if (scan == 0x3e) return KEY_HOME;
+  if (scan == 0x62) return KEY_F1;
+  if (scan == 0x63) return KEY_F2;
+  if (scan == 0x64) return KEY_F3;
+  if (scan == 0x65) return KEY_F4;
+  if (scan == 0x66) return KEY_F5;
+  if (scan == 0x67) return KEY_F6;
+  if (scan == 0x68) return KEY_F7;
+  if (scan == 0x69) return KEY_F8;
+  if (scan == 0x6a) return KEY_F9;
+  if (scan == 0x6b) return KEY_F10;
+  return 0;
+}
+
+/* INT 18h AH=01h (BIOS keyboard sense): does not consume the pending
+   key. BH is the only reliable availability flag (1 = a key is waiting,
+   0 = not) - AX and the flags register are not reliable for this
+   (measured; see docs/key-measure-02.md, the "AH=01h" section). Replaces
+   DOS INT 21h AH=0Bh; same 0/nonzero contract as before so call sites
+   are unchanged. */
 int dos_kbhit(void)
 {
-  asm("mov ah, 0x0b\n"
-      "int 0x21\n"
+  asm("mov ah, 1\n"
+      "int 0x18\n"
+      "mov al, bh\n"
       "mov ah, 0");
 }
 
@@ -1599,20 +1672,23 @@ void box_dash_row(int row, unsigned char lb, unsigned char rb)
    observed here landing on such a cell.)
    The fix: decide each cell's final content exactly once, in a single pass
    over the row, so a cell is written at most once per frame (zero times
-   once the mirror already holds that value). The junction char is placed
-   only while iterating the dash-fill run itself - i.e. only in columns not
-   already occupied by the title text, the "--"/space decoration, the gap
-   before the clock, or the clock digits. If DISK_SEP_COL1/2 land inside
-   one of those occupied regions instead (a long title in the other
-   language, say), the junction is simply not drawn there - that column
-   keeps whatever the occupying content drew, once, matching this file's
-   "occupied columns don't get a junction" rule. */
+   once the mirror already holds that value). Milestone 9 keeps this same
+   single-pass discipline while centering the title: the junction char is
+   placed only while iterating one of the two dash-fill runs (left or
+   right of the "<< title >>" block) - i.e. only in columns not already
+   occupied by the bracket pair, the title text, or the gap before the
+   clock/the clock digits. If DISK_SEP_COL1/2 land inside one of those
+   occupied regions instead (a long title in the other language, say),
+   the junction is simply not drawn there - that column keeps whatever
+   the occupying content drew, once, matching this file's "occupied
+   columns don't get a junction" rule. */
 void draw_title_row(void)
 {
   char *title;
   int titleCells;
-  int used;
-  int fillCells;
+  int totalFill;
+  int leftFill;
+  int rightFill;
   int i;
   int col;
   char datetime[DATETIME_WIDTH + 1];
@@ -1622,29 +1698,45 @@ void draw_title_row(void)
 
   title = MSG(MSG_TITLE);
   titleCells = text_width(title);
-  /* "--" + " " + title + " " on the left, then dash-fill, then a gap and
-     the clock field on the right - see the DATETIME_WIDTH/
-     TITLE_DATETIME_GAP/TITLE_DECOR_WIDTH comment above. fillCells fills
-     every cell between the two (not just half of it - the trailing dash
-     run reaches all the way to where the gap+clock field begins), so the
-     row always ends exactly at the right border regardless of title
-     length. */
-  used = TITLE_DECOR_WIDTH + titleCells;
-  fillCells = BOX_WIDTH - used - TITLE_DATETIME_GAP - DATETIME_WIDTH - TITLE_TAIL_WIDTH;
-  if (fillCells < 0) fillCells = 0; /* defensive: title too wide to fit */
+  /* dash-fill, then a blank cell, then "<< title >>" (measured on the
+     original: the title is centered inside a bracket pair, not left-
+     aligned - see TITLE_DECOR_WIDTH's comment above), then another blank
+     cell, then dash-fill again, then the gap and the clock field on the
+     right. totalFill is split as evenly as possible between the left and
+     right dash runs (any odd cell goes to the right) so the block reads
+     as centered; either way the row always ends exactly at the right
+     border regardless of title length, same as before. */
+  totalFill = BOX_WIDTH - TITLE_DECOR_WIDTH - titleCells - 2
+              - TITLE_DATETIME_GAP - DATETIME_WIDTH - TITLE_TAIL_WIDTH;
+  if (totalFill < 0) totalFill = 0; /* defensive: title too wide to fit */
+  leftFill = totalFill / 2;
+  rightFill = totalFill - leftFill;
 
   col = 1;
-  vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BORDER); col++;
-  vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BORDER); col++;
+  for (i = 0; i < leftFill; i++) {
+    /* one of the two places this row ever places the disk-separator
+       junction char - see the function comment above for why doing it
+       here, inline with the fill loops, instead of as a separate
+       unconditional pass afterward, is what stops this cell from
+       flickering. */
+    if (col == DISK_SEP_COL1 || col == DISK_SEP_COL2) {
+      vram_ank(ROW_TITLE, col, BOXCH_TJ, ATTR_BORDER);
+    } else {
+      vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BORDER);
+    }
+    col++;
+  }
+  vram_ank(ROW_TITLE, col, ' ', ATTR_TITLE); col++;
+  vram_ank(ROW_TITLE, col, '<', ATTR_TITLE); col++;
+  vram_ank(ROW_TITLE, col, '<', ATTR_TITLE); col++;
   vram_ank(ROW_TITLE, col, ' ', ATTR_TITLE); col++;
   vram_puts_cells(ROW_TITLE, col, title, ATTR_TITLE, titleCells);
   col += titleCells;
   vram_ank(ROW_TITLE, col, ' ', ATTR_TITLE); col++;
-  for (i = 0; i < fillCells; i++) {
-    /* the only place this row ever places the disk-separator junction
-       char - see the function comment above for why doing it here,
-       inline with the fill loop, instead of as a separate unconditional
-       pass afterward, is what stops this cell from flickering. */
+  vram_ank(ROW_TITLE, col, '>', ATTR_TITLE); col++;
+  vram_ank(ROW_TITLE, col, '>', ATTR_TITLE); col++;
+  vram_ank(ROW_TITLE, col, ' ', ATTR_TITLE); col++;
+  for (i = 0; i < rightFill; i++) {
     if (col == DISK_SEP_COL1 || col == DISK_SEP_COL2) {
       vram_ank(ROW_TITLE, col, BOXCH_TJ, ATTR_BORDER);
     } else {
@@ -3639,16 +3731,17 @@ int main(int argc, char *argv[])
 
   running = 1;
   while (running) {
-    /* dos_getch() (AH=08h) blocks until a key is pressed, which would
-       freeze the row-0 clock while idle. Poll dos_kbhit() (AH=0Bh)
-       instead and redraw the title row (the only thing that changes
-       while idle) between polls; vram_set_cell()'s change-only writes
-       mean a redraw that finds nothing changed touches no hardware at
-       all. IDLE_POLL_SPIN is a plain busy-wait between AH=0Bh calls -
-       real-mode DOS has no blocking "wait for key or N ticks" primitive
-       this program already used elsewhere, and a fixed spin count is
-       enough to keep this from calling INT 21h flat out while still
-       updating the clock well within a second; see the #define. */
+    /* dos_getch() (INT 18h AH=00h) blocks until a key is pressed, which
+       would freeze the row-0 clock while idle. Poll dos_kbhit() (INT 18h
+       AH=01h) instead and redraw the title row (the only thing that
+       changes while idle) between polls; vram_set_cell()'s change-only
+       writes mean a redraw that finds nothing changed touches no
+       hardware at all. IDLE_POLL_SPIN is a plain busy-wait between
+       AH=01h calls - real-mode DOS has no blocking "wait for key or N
+       ticks" primitive this program already used elsewhere, and a fixed
+       spin count is enough to keep this from calling INT 18h flat out
+       while still updating the clock well within a second; see the
+       #define. */
     while (!dos_kbhit()) {
       int spin;
       draw_title_row();
@@ -3693,34 +3786,28 @@ int main(int argc, char *argv[])
       do_exec();
     } else if (key == 'q' || key == 'Q') {
       running = 0;
+    } else if (key == KEY_F2) {
+      do_exec();
+    } else if (key == KEY_F3) {
+      do_copy();
+    } else if (key == KEY_F4) {
+      do_delete();
+    } else if (key == KEY_F5) {
+      do_rename();
+    } else if (key == KEY_F6) {
+      do_move();
+    } else if (key == KEY_F7) {
+      do_mkdir();
+    } else if (key == KEY_F10) {
+      running = 0;
+      /* F1/F8/F9 (and anything else): no command assigned yet - see
+         g_fkeyLabel[]'s reserved ("") entries - so ignored. F2 is
+         handled above (do_exec()). Milestone 9: INT 18h reports each
+         function key by its own scan code, so - unlike the removed
+         milestone-6 DOS-console scheme - no dos_kbhit() lookahead after
+         ESC is needed to tell F-keys apart from a bare ESC keypress. */
     } else if (key == KEY_ESC) {
-      /* 0x1B alone is ESC; 0x1B immediately followed by a queued second
-         byte is a function key - see dos_kbhit()'s comment and
-         docs/filer-measure-05.md. Must check dos_kbhit() before any
-         other keyboard read. */
-      if (dos_kbhit()) {
-        key = dos_getch();
-        if (key == FKEY_CODE_F2) {
-          do_exec();
-        } else if (key == FKEY_CODE_F3) {
-          do_copy();
-        } else if (key == FKEY_CODE_F4) {
-          do_delete();
-        } else if (key == FKEY_CODE_F5) {
-          do_rename();
-        } else if (key == FKEY_CODE_F6) {
-          do_move();
-        } else if (key == FKEY_CODE_F7) {
-          do_mkdir();
-        } else if (key == FKEY_CODE_F10) {
-          running = 0;
-        }
-        /* F1/F8/F9 (and anything else): no command assigned yet - see
-           g_fkeyLabel[]'s reserved ("") entries - so ignored. F2 is
-           handled above (do_exec()). */
-      } else {
-        running = 0; /* bare ESC: quit, same as Q */
-      }
+      running = 0; /* bare ESC: quit, same as Q */
     }
   }
 
