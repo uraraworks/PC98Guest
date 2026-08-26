@@ -101,6 +101,23 @@ MSG_LIMITS = {
     "MSG_SAVEAS_ERR_EMPTY":    ("dialog",   10),
     "MSG_SAVEAS_ERR_INVALID":  ("dialog",   11),
     "MSG_SAVEAS_ERR_FAILED":   ("dialog",   12),
+    # v1 (search/replace) additions. MSG_SEARCH_PROMPT/MSG_REPLACE_PROMPT are
+    # classified "dialog" because input_dialog()'s draw_input_box() puts them
+    # into the same DIALOG_WIDTH box as MSG_GOTO_PROMPT/MSG_SAVEAS_PROMPT.
+    # MSG_REPLACE_COUNT_PREFIX/SUFFIX/MSG_REPLACE_LIMIT_SUFFIX are classified
+    # "notice" because replace_all_command() assembles them into g_notice,
+    # the same shared status-line field the "notice" kind already checks -
+    # each fragment is checked individually against STATUS_SHARED_WIDTH,
+    # which is generous enough for prefix + a several-digit count + suffix
+    # together to still fit (see TSUBAKI.C's replace_all_command() comment).
+    "MSG_SEARCH_PROMPT":        ("dialog",   13),
+    "MSG_REPLACE_PROMPT":       ("dialog",   14),
+    "MSG_SEARCH_NOT_FOUND":     ("dialog",   15),
+    "MSG_REPLACE_CONFIRM":      ("dialog",   16),
+    "MSG_REPLACE_LIMIT_STOP":   ("dialog",   17),
+    "MSG_REPLACE_COUNT_PREFIX": ("notice",   18),
+    "MSG_REPLACE_COUNT_SUFFIX": ("notice",   19),
+    "MSG_REPLACE_LIMIT_SUFFIX": ("notice",   20),
 }
 
 # Generous fixed budget for the status line's "[...]" mode indicator (see

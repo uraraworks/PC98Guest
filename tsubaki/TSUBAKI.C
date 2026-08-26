@@ -13,17 +13,24 @@
  * （未保存確認つき）、カーソル移動（文字単位。全角の2セル目には
  * 止まらない）、文字入力（ANKとSJIS2バイト）・改行・BS・DEL・行削除、
  * 挿入／上書きの切替、横スクロール、日英切替（/J /E）。
- * 入れないもの（v1以降）：検索・置換、Undo、ブロック編集／クリップ
- * ボード、ウィンドウ分割、引数なし起動時のファイル選択、BAK、XMS/EMS
- * 退避、オートインデント、CFG。
+ *
+ * v1 で検索（^F）・次を検索（^N・^L）・逐次置換（^R）・一括置換（^P）を
+ * 追加した。設計根拠は docs/editor-measure-04.md（原物JEDの実測）と
+ * docs/tsubaki-spec-01.md 9章。検索は文字単位で行い、SJISの2バイト文字の
+ * 途中には一致させない（line_find()参照）。検索語・置換語の入力は
+ * 既存のinput_dialog()をそのまま使うため、v1でも半角のみ（全角の検索語は
+ * まだ打てない。FEP経由で入るかどうかは未確認）。
+ * まだ入れないもの：Undo、ブロック編集／クリップボード、ウィンドウ
+ * 分割、引数なし起動時のファイル選択、BAK、XMS/EMS退避、オート
+ * インデント、CFG。
  *
  * DOS/BIOS呼び出し・VRAM直書き層・ダイアログ機構・メッセージテーブル
  * 機構は、同じプロジェクトの guest/sumire/SUMIRE.C（ファイラ）から
  * 土台部分（下記参照）をコピーして流用している（同一プロジェクト・
  * 同一MITライセンスのため）。ファイラ固有の関数（ディレクトリ走査・
  * コピー／移動・実行など）はコピーしていない。エディタ本体（バッファ・
- * 行表・カーソル・描画・キー処理・ファイル入出力）はすべて新規に
- * 書き下ろした。
+ * 行表・カーソル・描画・キー処理・ファイル入出力・検索・置換）はすべて
+ * 新規に書き下ろした。
  *
  * 画面出力は一切 stdio を経由しない。printf()/puts()/putchar() を
  * 画面表示に使ってはならない。文字コード入出力もSUMIRE.C同様に
@@ -42,6 +49,9 @@
 #define IOBUF_SIZE  4096   /* ファイル読み書き用の共有バッファ */
 #define FILENAME_MAX 60    /* g_filename[] に入れられる最大文字数（NULを含まない） */
 #define TAB_WIDTH   8      /* タブストップ幅。未実測の暫定既定値（設計書8章のTODO参照） */
+#define SEARCH_MAX  32     /* g_searchTerm[] に入れられる最大文字数。入力欄は既存の
+                               input_dialog()を使うため半角のみ（v1設計方針参照） */
+#define REPLACE_MAX 32     /* g_replaceTerm[] に入れられる最大文字数。同上 */
 
 /* ---- 画面レイアウト（25行80桁・全セルを覆う） -------------------- */
 #define VRAM_ROWS   25
@@ -135,8 +145,13 @@
 #define KEY_CTRL_B   0x02  /* 文末 */
 #define KEY_CTRL_D   0x04  /* カーソル位置の1文字削除（DEL相当） */
 #define KEY_CTRL_E   0x05  /* 行末 */
+#define KEY_CTRL_F   0x06  /* 検索（v1） */
 #define KEY_CTRL_G   0x07  /* 指定行番号へ */
+#define KEY_CTRL_L   0x0c  /* 次を検索（v1。原物JEDと同じ割り当てを踏襲。^Nと同じ動作） */
+#define KEY_CTRL_N   0x0e  /* 次を検索（v1） */
+#define KEY_CTRL_P   0x10  /* 一括置換（v1） */
 #define KEY_CTRL_Q   0x11  /* 終了 */
+#define KEY_CTRL_R   0x12  /* 逐次置換（v1） */
 #define KEY_CTRL_T   0x14  /* 文頭 */
 #define KEY_CTRL_V   0x16  /* 挿入／上書き切替 */
 #define KEY_CTRL_Y   0x19  /* カーソル行削除 */
@@ -593,6 +608,14 @@ void ansi_goto(int row, int col)
 #define MSG_SAVEAS_ERR_EMPTY   10 /* F3：保存名が空のときのエラー（同じダイアログへ戻って打ち直させる） */
 #define MSG_SAVEAS_ERR_INVALID 11 /* F3：保存名がDOSの8.3形式に収まらない、または禁止文字を含むときのエラー */
 #define MSG_SAVEAS_ERR_FAILED  12 /* F3：save_file()失敗時のエラー（原因は断定しない――書込禁止とは限らないため） */
+#define MSG_SEARCH_PROMPT       13 /* ^F・^R・^P：検索語入力ダイアログのプロンプト */
+#define MSG_REPLACE_PROMPT      14 /* ^R・^P：置換語入力ダイアログのプロンプト */
+#define MSG_SEARCH_NOT_FOUND    15 /* ^F/^N・^L/^R：検索語が（それ以上）見つからないときのダイアログ */
+#define MSG_REPLACE_CONFIRM     16 /* ^R：一致ごとの置換確認ダイアログ（Y/N/ESC） */
+#define MSG_REPLACE_LIMIT_STOP  17 /* ^R：置換で容量上限に達し、途中で打ち切ったときのダイアログ */
+#define MSG_REPLACE_COUNT_PREFIX 18 /* ^P：ステータス行の通知に置換件数を組み立てる前半部分 */
+#define MSG_REPLACE_COUNT_SUFFIX 19 /* ^P：件数の後に続ける後半部分（上限に達しなかった場合） */
+#define MSG_REPLACE_LIMIT_SUFFIX 20 /* ^P：件数の後に続ける後半部分（容量上限で途中打ち切りの場合） */
 
 const char *g_msgJA[] = {
   "無題",
@@ -607,7 +630,15 @@ const char *g_msgJA[] = {
   "上限のため入力を無視しました",
   "名前が空です",
   "名前が不正です",
-  "保存に失敗しました"
+  "保存に失敗しました",
+  "検索: ",
+  "置換後: ",
+  "見つかりませんでした（何かキーを押してください）",
+  "置換しますか？ Y=置換 N=次へ ESC=中止",
+  "上限のため置換を中止しました（何かキーを押してください）",
+  "置換しました: ",
+  "件",
+  "件（上限のため中断）"
 };
 
 const char *g_msgEN[] = {
@@ -623,7 +654,15 @@ const char *g_msgEN[] = {
   "Ignored: limit reached",
   "Name is empty",
   "Invalid name",
-  "Save failed"
+  "Save failed",
+  "Find: ",
+  "Replace with: ",
+  "Not found (press any key)",
+  "Replace? Y=replace N=skip ESC=cancel",
+  "Replace stopped: limit reached (press any key)",
+  "Replaced: ",
+  " times",
+  " times (stopped: limit)"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -749,6 +788,9 @@ int g_modified;
 
 char g_filename[FILENAME_MAX + 1];
 char g_notice[48]; /* ステータス行の一時通知（毎キー入力で既定はクリア） */
+
+char g_searchTerm[SEARCH_MAX + 1];   /* ^F/^N・^L/^R/^Pで共有し、次回以降も保持する（v1設計方針） */
+char g_replaceTerm[REPLACE_MAX + 1]; /* ^R/^Pで共有し、同様に保持する（次回の手間を省く自作判断） */
 
 char g_iobuf[IOBUF_SIZE];
 
@@ -1198,6 +1240,311 @@ void sappend_copy(char *dst, int cap, char *s)
 
   lp = 0;
   sappend(dst, &lp, s, cap);
+}
+
+/* ---- 検索・置換（v1） -----------------------------------------------
+ * 実測根拠は docs/editor-measure-04.md（原物JEDの実測）。設計方針は
+ * docs/tsubaki-spec-01.md 9章。原物の文言はいっさい流用せず、
+ * メッセージはすべて自作の言い回しにしてある。
+ *
+ * 検索・置換語の入力は既存のinput_dialog()をそのまま使う。
+ * input_dialog()は0x20-0x7Eの半角文字しか受け付けないため、v1の
+ * 検索・置換語は半角のみになる（全角の検索語はまだ打てない。FEP
+ * 経由で入力できるかどうかはこの版では確認していない）。
+ * 検索語・置換語はどちらも半角のみなので、以降のコードは1文字=1
+ * バイトという前提で長さを扱ってよい（strlen()がそのままバイト数=
+ * 文字数になる）。 --------------------------------------------------- */
+
+/* 検索の中核。haystack（1行ぶん。line_len()で渡された長さがハイストの
+   長さで、'\n'を含まない）の中から、startByte以降で最初に一致する
+   位置をバイトオフセットで返す（無ければ-1）。英大小は区別する
+   （素朴なmemcmp()なのでそのまま区別される）。
+   一致候補の開始位置は必ず文字境界（char_len_at()と同じ規則）である
+   ことを確かめてから比較する。これにより、SJISの2バイト文字の2バイト目
+   （例：帰=8B 41 の41、ア=83 41 の41）を単独の'A'として拾うことは
+   ない――境界でない位置は決してiに現れないので、そこでの比較自体が
+   起こらない（docs/editor-measure-04.md 結果3で実測した原物の挙動と
+   同じにするための実装）。
+   グローバル状態（g_text等）に依存しない純粋な関数にしてあるので、
+   ホスト側の単体検証（tools/search_core_test.c、このファイルから
+   is_lead_byte()とline_find()だけを切り出して直接呼ぶ）でもそのまま
+   使える。 */
+int line_find(char *hay, int hayLen, int startByte, char *term, int termLen)
+{
+  int i;
+  int chLen;
+  unsigned char c;
+
+  if (termLen <= 0) return -1;
+
+  i = startByte;
+  while (i + termLen <= hayLen) {
+    if (memcmp(hay + i, term, (unsigned)termLen) == 0) return i;
+    c = (unsigned char)hay[i];
+    chLen = (is_lead_byte(c) && i + 1 < hayLen) ? 2 : 1;
+    i += chLen;
+  }
+  return -1;
+}
+
+/* fromLine行のfromByteバイト目（含む）以降で、term（NUL終端）に最初に
+   一致する位置を文書全体から探す。行をまたいでも折り返さない
+   （fromLineより前の行、およびg_lineCountを超えた先は探さない。
+   設計方針9章「折り返しは行わない」）。見つかればoutLine/outByteへ
+   一致文字列の先頭を書いて1を返し、無ければ0を返す。 */
+int search_forward(int fromLine, int fromByte, char *term, int *outLine, int *outByte)
+{
+  int lineIdx;
+  int start;
+  int termLen;
+  int pos;
+
+  termLen = (int)strlen(term);
+  if (termLen == 0) return 0;
+
+  for (lineIdx = fromLine; lineIdx < g_lineCount; lineIdx++) {
+    start = (lineIdx == fromLine) ? fromByte : 0;
+    if (start < 0) start = 0;
+    pos = line_find(g_text + g_lineStart[lineIdx], line_len(lineIdx), start, term, termLen);
+    if (pos >= 0) {
+      *outLine = lineIdx;
+      *outByte = pos;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* カーソルを一致位置へ移動し、画面のスクロール位置も追従させる。 */
+void jump_to_match(int lineIdx, int byteOff)
+{
+  g_curLine = lineIdx;
+  g_curByte = byteOff;
+  g_goalCol = col_at_byte(g_curLine, g_curByte);
+  ensure_visible();
+}
+
+/* lineIdx行のbyteOffバイト目にある、長さmatchLenバイトの一致箇所を
+   rep[0..repLen)へ置き換える。置換後の全体サイズがTEXT_MAXを超える
+   場合は何もせず0を返す（設計書2章「容量オーバーは黙って切り捨て
+   ない」の方針どおり、削除より前に判定するので、失敗しても元の
+   文字列は消えずに残る）。置換語は半角のみで改行を含み得ないので、
+   buffer_insert()の行数上限チェック（newlineCount=0）に引っかかる
+   ことはない。 */
+int replace_at(int lineIdx, int byteOff, int matchLen, char *rep, int repLen)
+{
+  int abspos;
+  int newTextLen;
+
+  newTextLen = g_textLen - matchLen + repLen;
+  if (newTextLen > TEXT_MAX) return 0;
+  abspos = (int)g_lineStart[lineIdx] + byteOff;
+  buffer_delete(abspos, matchLen);
+  buffer_insert(abspos, rep, repLen, 0);
+  return 1;
+}
+
+/* ^F：検索語を入力し、現在のカーソル位置から最初の一致へ移動する。
+   検索語は次回以降も保持する（g_searchTermはダイアログの初期値に
+   そのまま使われる）。 */
+void search_command(void)
+{
+  int ok;
+  int foundLine;
+  int foundByte;
+
+  ok = input_dialog(MSG(MSG_SEARCH_PROMPT), g_searchTerm, SEARCH_MAX, 0);
+  if (!ok) return;                  /* ESC：検索語を変えずに戻る */
+  if (g_searchTerm[0] == 0) return; /* 空の検索語では何もしない */
+
+  if (search_forward(g_curLine, g_curByte, g_searchTerm, &foundLine, &foundByte)) {
+    jump_to_match(foundLine, foundByte);
+  } else {
+    show_notice_dialog(MSG(MSG_SEARCH_NOT_FOUND));
+  }
+}
+
+/* ^N・^L：直前に入力した検索語で再検索する。まだ検索語が無ければ
+   何もしない。現在のカーソル位置がちょうど直前の一致の先頭にいる
+   ことが多いので、同じ場所へ再度止まらないよう、一致した検索語の
+   長さぶんだけ先へ進めてから探す（検索語は半角のみなのでバイト長=
+   文字数）。この「1件分スキップしてから探す」規則は自作の判断で、
+   原物の^Lが重複しうる一致に対してどう振る舞うかは
+   docs/editor-measure-04.md では未実測（今回は複数一致の重なりを
+   実測していない）。 */
+void search_next_command(void)
+{
+  int termLen;
+  int fromByte;
+  int lineLen;
+  int foundLine;
+  int foundByte;
+
+  if (g_searchTerm[0] == 0) return;
+
+  termLen = (int)strlen(g_searchTerm);
+  fromByte = g_curByte + termLen;
+  lineLen = line_len(g_curLine);
+  if (fromByte > lineLen) fromByte = lineLen;
+
+  if (search_forward(g_curLine, fromByte, g_searchTerm, &foundLine, &foundByte)) {
+    jump_to_match(foundLine, foundByte);
+  } else {
+    show_notice_dialog(MSG(MSG_SEARCH_NOT_FOUND));
+  }
+}
+
+/* ^R：逐次置換。検索語→置換語の順に入力させたあと、現在のカーソル
+   位置から一致するたびに確認ダイアログを出す。Yで置換してそのまま
+   次の一致へ、Nで飛ばして次の一致へ進む。原物（docs/editor-measure-04.md
+   結果4）はY/Nの2択しか提示しないが、この自作実装ではESCで置換
+   ループそのものを中止できる経路を追加した（Y/Nしか無いと押し
+   間違えたときに抜け出せず不便なため。すでに置換した分はそのまま
+   残る＝Undoが無いv1では取り消せない）。 */
+void replace_command(void)
+{
+  int ok;
+  int termLen;
+  int replaceLen;
+  int foundLine;
+  int foundByte;
+  int fromLine;
+  int fromByte;
+  int key;
+  int lineLen;
+
+  ok = input_dialog(MSG(MSG_SEARCH_PROMPT), g_searchTerm, SEARCH_MAX, 0);
+  if (!ok) return;
+  if (g_searchTerm[0] == 0) return;
+
+  ok = input_dialog(MSG(MSG_REPLACE_PROMPT), g_replaceTerm, REPLACE_MAX, 0);
+  if (!ok) return; /* 置換語をESCすると何も変更せずに戻る（検索はまだ実行していない） */
+
+  termLen = (int)strlen(g_searchTerm);
+  replaceLen = (int)strlen(g_replaceTerm);
+  fromLine = g_curLine;
+  fromByte = g_curByte;
+
+  for (;;) {
+    if (!search_forward(fromLine, fromByte, g_searchTerm, &foundLine, &foundByte)) {
+      draw_screen();
+      show_notice_dialog(MSG(MSG_SEARCH_NOT_FOUND));
+      return;
+    }
+    jump_to_match(foundLine, foundByte);
+    draw_screen(); /* draw_dialog()は背景を描き直さないので、確認ダイアログの前に必ず1回描く */
+
+    for (;;) {
+      draw_dialog(MSG(MSG_REPLACE_CONFIRM), 0);
+      key = key_read();
+      if (key == 'y' || key == 'Y' || key == 'n' || key == 'N' || key == KEY_ESC) break;
+    }
+    if (key == KEY_ESC) return; /* 中止：ここまでの置換はそのまま残す */
+
+    if (key == 'y' || key == 'Y') {
+      if (!replace_at(foundLine, foundByte, termLen, g_replaceTerm, replaceLen)) {
+        draw_screen();
+        show_notice_dialog(MSG(MSG_REPLACE_LIMIT_STOP));
+        return;
+      }
+      fromLine = foundLine;
+      fromByte = foundByte + replaceLen;
+    } else {
+      fromLine = foundLine;
+      fromByte = foundByte + termLen;
+    }
+    lineLen = line_len(fromLine);
+    if (fromByte > lineLen) fromByte = lineLen;
+  }
+}
+
+/* ^P：一括置換。確認なしで最後まで置換し、置換件数をステータス行の
+   通知欄（g_notice）へ出す。開始位置は文書の先頭（0行0バイト目）に
+   した――「一括」＝文書全体を置換するという自作側の判断で、原物の
+   ^QAの挙動はdocs/editor-measure-04.mdでは未実測のため独自に決めた
+   （^Fや^R が現在のカーソル位置から探すのとは対照的に、^Pだけは
+   常に先頭から全件を対象にする）。
+   置換のたびに容量（TEXT_MAX）を確かめ、超える手前で打ち切る。
+   黙って切り捨てず、それまでの件数と「上限のため中断」の旨を
+   同じ通知欄へまとめて出す。 */
+void replace_all_command(void)
+{
+  int ok;
+  int termLen;
+  int replaceLen;
+  int foundLine;
+  int foundByte;
+  int fromLine;
+  int fromByte;
+  int lineLen;
+  int count;
+  int hitLimit;
+  int savedLine;
+  int savedByte;
+  int p;
+
+  ok = input_dialog(MSG(MSG_SEARCH_PROMPT), g_searchTerm, SEARCH_MAX, 0);
+  if (!ok) return;
+  if (g_searchTerm[0] == 0) return;
+
+  ok = input_dialog(MSG(MSG_REPLACE_PROMPT), g_replaceTerm, REPLACE_MAX, 0);
+  if (!ok) return;
+
+  termLen = (int)strlen(g_searchTerm);
+  replaceLen = (int)strlen(g_replaceTerm);
+
+  savedLine = g_curLine;
+  savedByte = g_curByte;
+
+  fromLine = 0;
+  fromByte = 0;
+  count = 0;
+  hitLimit = 0;
+
+  for (;;) {
+    if (!search_forward(fromLine, fromByte, g_searchTerm, &foundLine, &foundByte)) break;
+    if (!replace_at(foundLine, foundByte, termLen, g_replaceTerm, replaceLen)) {
+      hitLimit = 1;
+      break;
+    }
+    count++;
+    fromLine = foundLine;
+    fromByte = foundByte + replaceLen;
+    lineLen = line_len(fromLine);
+    if (fromByte > lineLen) fromByte = lineLen;
+  }
+
+  if (count > 0) {
+    jump_to_match(fromLine, fromByte);
+  } else {
+    g_curLine = savedLine;
+    g_curByte = savedByte;
+    ensure_visible();
+  }
+
+  p = 0;
+  g_notice[0] = 0;
+  sappend(g_notice, &p, MSG(MSG_REPLACE_COUNT_PREFIX), sizeof(g_notice));
+  sappend_uint(g_notice, &p, (unsigned int)count, sizeof(g_notice));
+  sappend(g_notice, &p, hitLimit ? MSG(MSG_REPLACE_LIMIT_SUFFIX) : MSG(MSG_REPLACE_COUNT_SUFFIX), sizeof(g_notice));
+}
+
+/* main()の分岐チェーンに^F/^N・^L/^R/^Pの5個をそのまま「else if」で
+   追加すると、既存の約25個と合わせて1本のelse-ifチェーンが30個近くに
+   達し、SmallerCが「Undeclared identifier 'key'」という一見無関係な
+   エラーでコンパイルに失敗する（実測：else-ifを29個までに抑えれば
+   通り、30個で壊れた。else-ifチェーンはネストして再帰的にパースされる
+   実装らしく、再帰が深くなりすぎるのが原因と見られる）。この関数へ
+   まとめ、main()側の分岐は1個ぶんの増加に抑えることで回避している。
+   戻り値は「処理した(1)／対象のキーではなかった(0)」。 */
+int handle_search_replace_key(int key)
+{
+  if (key == KEY_CTRL_F) { search_command(); return 1; }
+  if (key == KEY_CTRL_N) { search_next_command(); return 1; }
+  if (key == KEY_CTRL_L) { search_next_command(); return 1; } /* 原物と同じ割り当て（^Nと同じ動作） */
+  if (key == KEY_CTRL_R) { replace_command(); return 1; }
+  if (key == KEY_CTRL_P) { replace_all_command(); return 1; }
+  return 0;
 }
 
 /* ---- ファイル読み込み・保存 ------------------------------------------
@@ -1859,6 +2206,8 @@ int main(int argc, char *argv[])
   g_modified = 0;
   g_filename[0] = 0;
   g_notice[0] = 0;
+  g_searchTerm[0] = 0;
+  g_replaceTerm[0] = 0;
 
   if (g_argFile != 0) {
     strncpy(g_filename, g_argFile, FILENAME_MAX);
@@ -1911,6 +2260,7 @@ int main(int argc, char *argv[])
     else if (key == KEY_CTRL_T) { cursor_doc_home(); }
     else if (key == KEY_CTRL_B) { cursor_doc_end(); }
     else if (key == KEY_CTRL_G) { goto_line_dialog(); }
+    else if (handle_search_replace_key(key)) { /* ^F/^N・^L/^R/^P（下のコメント参照） */ }
     else if (key == KEY_CTRL_Y) { delete_current_line(); }
     else if (key == KEY_CTRL_V) { g_insertMode = !g_insertMode; }
     else if (key == KEY_BS) { delete_before_cursor(); }
