@@ -23,10 +23,11 @@ Checks (all must pass, otherwise this exits non-zero):
      text_width(): a lead byte in 0x81-0x9F or 0xE0-0xFC (and the byte
      after it) counts as 2 cells, anything else counts as 1. Each message
      index is classified (see MSG_LIMITS below) into one of:
-       - "untitled": placed alone into the status line's file-name field
-                     (draw_status_line()) when no file is loaded, must fit
-                     within STATUS_FILE_WIDTH-1 cells (1 cell reserved for
-                     the '*' modified-marker that draw_status_line() may
+       - "untitled": placed alone into the status line's shared file-name/
+                     notice field (draw_status_line()) when no file is
+                     loaded and no notice is pending, must fit within
+                     STATUS_SHARED_WIDTH-1 cells (1 cell reserved for the
+                     '*' modified-marker that draw_status_line() may
                      append right after it).
        - "mode"    : placed alone inside the status line's "[...]" mode
                      indicator (draw_status_line()), must fit within a
@@ -35,12 +36,13 @@ Checks (all must pass, otherwise this exits non-zero):
                      spare, but this is still checked rather than assumed.
        - "dialog"  : placed alone into a draw_dialog() or draw_input_box()
                      box, must fit within DIALOG_WIDTH cells.
-       - "notice"  : placed into the status line's notice area
-                     (draw_status_line(), between the file-name field and
-                     the right-hand line:col/mode field), must fit within
-                     STATUS_MID_WIDTH cells.
-     STATUS_FILE_WIDTH, STATUS_MID_WIDTH and DIALOG_WIDTH are all read out
-     of TSUBAKI.C's #define lines, never hard-coded here.
+       - "notice"  : placed into the status line's shared file-name/notice
+                     field (draw_status_line(), the same field the file
+                     name occupies when no notice is pending - see
+                     STATUS_SHARED_WIDTH's comment in TSUBAKI.C), must fit
+                     within STATUS_SHARED_WIDTH cells.
+     STATUS_SHARED_WIDTH and DIALOG_WIDTH are both read out of TSUBAKI.C's
+     #define lines, never hard-coded here.
   7. The bottom row (g_fkeyLabel[]/g_fkeyCol[]/g_fkeyHiPos[] - ten
      fixed-position function-key fields, the same convention as
      guest/sumire/SUMIRE.C's F-key row):
@@ -58,12 +60,18 @@ Checks (all must pass, otherwise this exits non-zero):
        - g_fkeyHiPos[i] is either -1 (only valid when g_fkeyLabel[i] is
          empty) or a valid index into g_fkeyLabel[i].
   8. The status line (row 0) field widths - STATUS_TITLE_WIDTH,
-     STATUS_SEP_WIDTH, STATUS_FILE_WIDTH, STATUS_MID_WIDTH and
-     STATUS_RIGHT_WIDTH, all read out of TSUBAKI.C's #define lines, never
-     hard-coded here - sum to exactly VRAM_COLS (80), so the reverse-video
-     status band covers the row with no gap and no overrun.
+     STATUS_SEP_WIDTH, STATUS_SHARED_WIDTH and STATUS_RIGHT_WIDTH, all read
+     out of TSUBAKI.C's #define lines, never hard-coded here - sum to
+     exactly VRAM_COLS (80), so the reverse-video status band covers the
+     row with no gap and no overrun.
   9. BODY_TOP + BODY_ROWS does not reach ROW_FKEY, so the scrollable body
      area never overlaps the bottom function-key row.
+ 10. Every "notice" message (g_msgJA/g_msgEN, both languages) fits within
+     STATUS_SHARED_WIDTH cells on its own - this is the same limit check 6
+     already applies via MSG_LIMITS, restated here as its own explicit,
+     named check so a future change to MSG_LIMITS or to draw_status_line()
+     that quietly widens what the notice area needs cannot slip through
+     unnoticed the way a shared/generic check might.
 
 Usage:
   python3 check.py [path-to-TSUBAKI.C]
@@ -186,8 +194,7 @@ def main():
     dialog_width = extract_define_int(text, "DIALOG_WIDTH")
     status_title_width = extract_define_int(text, "STATUS_TITLE_WIDTH")
     status_sep_width = extract_define_int(text, "STATUS_SEP_WIDTH")
-    status_file_width = extract_define_int(text, "STATUS_FILE_WIDTH")
-    status_mid_width = extract_define_int(text, "STATUS_MID_WIDTH")
+    status_shared_width = extract_define_int(text, "STATUS_SHARED_WIDTH")
     status_right_width = extract_define_int(text, "STATUS_RIGHT_WIDTH")
     ja = extract_array(text, "g_msgJA")
     en = extract_array(text, "g_msgEN")
@@ -219,18 +226,18 @@ def main():
 
     # ---- check 6: every message fits the cell limit its use site implies --
     limits = {
-        # STATUS_FILE_WIDTH minus 1 cell reserved for the '*' modified
+        # STATUS_SHARED_WIDTH minus 1 cell reserved for the '*' modified
         # marker draw_status_line() may append right after the name.
-        "untitled": status_file_width - 1,
+        "untitled": status_shared_width - 1,
         "mode": MODE_WIDTH,
         "dialog": dialog_width,
-        "notice": status_mid_width,
+        "notice": status_shared_width,
     }
     limit_names = {
-        "untitled": "STATUS_FILE_WIDTH-1 (status-line file-name field, minus the '*' marker)",
+        "untitled": "STATUS_SHARED_WIDTH-1 (status-line shared file-name/notice field, minus the '*' marker)",
         "mode": "MODE_WIDTH (status-line mode indicator budget)",
         "dialog": "DIALOG_WIDTH",
-        "notice": "STATUS_MID_WIDTH (status-line notice area)",
+        "notice": "STATUS_SHARED_WIDTH (status-line shared file-name/notice field)",
     }
     n = len(ja)
     known_indices = set(idx for (_kind, idx) in MSG_LIMITS.values())
@@ -316,17 +323,17 @@ def main():
         print(line)
 
     # ---- check 8: status-line field widths sum to exactly VRAM_COLS ---
-    status_total = (status_title_width + status_sep_width + status_file_width +
-                    status_mid_width + status_right_width)
+    status_total = (status_title_width + status_sep_width + status_shared_width +
+                    status_right_width)
     if status_total != screen_cols:
         fail("status line field widths sum to %d cells (title=%d + sep=%d + "
-             "file=%d + mid=%d + right=%d), expected exactly VRAM_COLS (%d)" %
-             (status_total, status_title_width, status_sep_width, status_file_width,
-              status_mid_width, status_right_width, screen_cols))
+             "shared=%d + right=%d), expected exactly VRAM_COLS (%d)" %
+             (status_total, status_title_width, status_sep_width,
+              status_shared_width, status_right_width, screen_cols))
     print("PASS: 8) status line field widths sum to exactly VRAM_COLS "
-          "(title=%d + sep=%d + file=%d + mid=%d + right=%d = %d)" %
-          (status_title_width, status_sep_width, status_file_width,
-           status_mid_width, status_right_width, screen_cols))
+          "(title=%d + sep=%d + shared=%d + right=%d = %d)" %
+          (status_title_width, status_sep_width, status_shared_width,
+           status_right_width, screen_cols))
 
     # ---- check 9: body area does not overlap the function-key row -----
     body_top = extract_define_int(text, "BODY_TOP")
@@ -337,6 +344,26 @@ def main():
              (body_top, body_rows, body_top + body_rows, row_fkey))
     print("PASS: 9) BODY_TOP (%d) + BODY_ROWS (%d) = %d does not reach "
           "ROW_FKEY (%d)" % (body_top, body_rows, body_top + body_rows, row_fkey))
+
+    # ---- check 10: every notice message fits the shared status-line field --
+    notice_report = []
+    for name, (kind, idx) in sorted(MSG_LIMITS.items(), key=lambda kv: kv[1][1]):
+        if kind != "notice":
+            continue
+        for label, table in (("g_msgJA", ja), ("g_msgEN", en)):
+            s = table[idx]
+            w = cell_width(s.encode("cp932"))
+            if w > status_shared_width:
+                fail("%s[%s] (index %d) is %d cells wide, exceeds "
+                     "STATUS_SHARED_WIDTH (%d cells) - the shared file-name/"
+                     "notice field cannot show it in full: %r" %
+                     (label, name, idx, w, status_shared_width, s))
+            notice_report.append("  %s[%s] JA/EN width<=%d: %d cells" %
+                                  (label, name, status_shared_width, w))
+    print("PASS: 10) every notice message fits STATUS_SHARED_WIDTH (%d "
+          "cells) in both languages" % status_shared_width)
+    for line in notice_report:
+        print(line)
 
     print("ALL CHECKS PASSED")
     return 0

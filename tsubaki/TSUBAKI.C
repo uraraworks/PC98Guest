@@ -55,22 +55,28 @@
 
 /* ステータス行（行0）の内訳。左から並べた幅の合計がちょうど
    VRAM_COLS(80)になるようにする（check.pyで検査）：
-     STATUS_TITLE_WIDTH(7)  … プログラム名「Tsubaki」
-   + STATUS_SEP_WIDTH(1)    … 区切りの空白1セル
-   + STATUS_FILE_WIDTH(12)  … ファイル名＋変更マーク'*'（収まらない
-                                ときは先頭を'<'に置き換えて末尾を残す。
-                                全角文字の途中では区切らない）
-   + STATUS_MID_WIDTH(28)   … 通知欄g_notice（最長メッセージが全角14
-                                文字=28セルなのでちょうど収まる幅にした）
-   + STATUS_RIGHT_WIDTH(32) … 行:桁／モード／タブ幅／変更マーク（従来と同じ）
+     STATUS_TITLE_WIDTH(7)   … プログラム名「Tsubaki」
+   + STATUS_SEP_WIDTH(1)     … 区切りの空白1セル
+   + STATUS_SHARED_WIDTH(40) … ファイル名欄と通知欄を共有する1つの
+                                 フィールド。通知が空ならファイル名＋
+                                 変更マーク'*'を、通知があれば通知
+                                 g_noticeを描く（実機実測：旧12セルの
+                                 専用ファイル名欄では8.3形式いっぱいの
+                                 名前を編集した瞬間に先頭が欠けた。
+                                 通知は次のキー入力で消える一時表示
+                                 なので、その間ファイル名が隠れても
+                                 差し支えない）。ファイル名が収まらない
+                                 ときは先頭を'<'に置き換えて末尾を残す。
+                                 全角文字の途中では区切らない。既存の
+                                 最長通知メッセージ（全角14文字=28
+                                 セル）は40セルに余裕で収まる
+   + STATUS_RIGHT_WIDTH(32)  … 行:桁／モード／タブ幅／変更マーク（従来と同じ）
    = 80 */
-#define STATUS_TITLE_WIDTH 7
-#define STATUS_SEP_WIDTH   1
-#define STATUS_FILE_WIDTH  12
-#define STATUS_MID_WIDTH   28
-#define STATUS_RIGHT_WIDTH 32
-#define STATUS_FILE_COL (STATUS_TITLE_WIDTH + STATUS_SEP_WIDTH)
-#define STATUS_MID_COL  (STATUS_FILE_COL + STATUS_FILE_WIDTH)
+#define STATUS_TITLE_WIDTH  7
+#define STATUS_SEP_WIDTH    1
+#define STATUS_SHARED_WIDTH 40
+#define STATUS_RIGHT_WIDTH  32
+#define STATUS_SHARED_COL (STATUS_TITLE_WIDTH + STATUS_SEP_WIDTH)
 
 #define DIALOG_WIDTH 60
 #define DIALOG_ROW   10
@@ -1356,18 +1362,22 @@ void draw_status_line(void)
   /* 区切りの空白1セル */
   vram_ank(ROW_STATUS, STATUS_TITLE_WIDTH, ' ', ATTR_STATUS);
 
-  /* ファイル名＋変更マーク。マークは対象が分かるようファイル名の
-     直後に置く（右端に置いていた旧レイアウトから変更）。 */
-  name = (g_filename[0] == 0) ? MSG(MSG_UNTITLED) : g_filename;
-  fileAvail = STATUS_FILE_WIDTH - (g_modified ? 1 : 0);
-  p = 0;
-  fileBuf[0] = 0;
-  sappend_tail_cells(fileBuf, &p, name, fileAvail, sizeof(fileBuf));
-  if (g_modified) sappend(fileBuf, &p, "*", sizeof(fileBuf));
-  vram_puts_cells(ROW_STATUS, STATUS_FILE_COL, fileBuf, ATTR_STATUS, STATUS_FILE_WIDTH);
-
-  /* 中央：通知 */
-  vram_puts_cells(ROW_STATUS, STATUS_MID_COL, g_notice, ATTR_STATUS, STATUS_MID_WIDTH);
+  /* ファイル名欄と通知欄は同じフィールド（STATUS_SHARED_WIDTH）を
+     共有する。通知g_noticeが出ている間はそちらを優先して描き、
+     空ならファイル名＋変更マークを描く（マークは対象が分かるよう
+     ファイル名の直後に置く）。通知は一時的で次のキー入力で消える
+     ため、その間ファイル名が隠れても差し支えない。 */
+  if (g_notice[0] != 0) {
+    vram_puts_cells(ROW_STATUS, STATUS_SHARED_COL, g_notice, ATTR_STATUS, STATUS_SHARED_WIDTH);
+  } else {
+    name = (g_filename[0] == 0) ? MSG(MSG_UNTITLED) : g_filename;
+    fileAvail = STATUS_SHARED_WIDTH - (g_modified ? 1 : 0);
+    p = 0;
+    fileBuf[0] = 0;
+    sappend_tail_cells(fileBuf, &p, name, fileAvail, sizeof(fileBuf));
+    if (g_modified) sappend(fileBuf, &p, "*", sizeof(fileBuf));
+    vram_puts_cells(ROW_STATUS, STATUS_SHARED_COL, fileBuf, ATTR_STATUS, STATUS_SHARED_WIDTH);
+  }
 
   /* 右：行:桁 [挿入/上書き] TAB=幅（変更なし） */
   lineNo = g_curLine + 1;
