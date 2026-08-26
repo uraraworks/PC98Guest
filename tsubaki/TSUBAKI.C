@@ -696,6 +696,11 @@ char g_notice[48]; /* ステータス行の一時通知（毎キー入力で既定はクリア） */
 
 char g_iobuf[IOBUF_SIZE];
 
+int g_lineOverflow; /* rebuild_lines()が最後に数えた行数がMAX_LINESを
+                        超えていたら1。g_lineCount自体はMAX_LINESで
+                        丸めてしまうため、超過の有無はこのフラグでしか
+                        分からない（load_file()参照）。 */
+
 /* ---- 行表・バッファ操作 -------------------------------------------- */
 
 int is_lead_byte(unsigned char c)
@@ -708,7 +713,11 @@ int is_lead_byte(unsigned char c)
    「24KBの走査は正しさを優先して許容する」）。ファイルが'\n'で終わって
    いれば末尾に空行が1つ増える（split()と同じ挙動）。保存時にN行を
    N-1個の'\n'で連結し直すことで、この空行が元の「末尾に改行がある」
-   状態を正確に復元する（save_file()参照）。 */
+   状態を正確に復元する（save_file()参照）。
+   実際の行数がMAX_LINESを超える場合、g_lineStart[]へこれ以上書き込む
+   余地が無いのでMAX_LINESで打ち切るが、そのことをg_lineOverflowへ
+   記録する。呼び出し元（load_file()）はこれを見て「黙って切り捨てず、
+   読み込みを中止する」（設計書2章）を実行する。 */
 void rebuild_lines(void)
 {
   int i;
@@ -716,15 +725,21 @@ void rebuild_lines(void)
 
   g_lineStart[0] = 0;
   count = 1;
+  g_lineOverflow = 0;
   for (i = 0; i < g_textLen; i++) {
     if (g_text[i] == '\n') {
       if (count < MAX_LINES) {
         g_lineStart[count] = (unsigned int)(i + 1);
+      } else {
+        g_lineOverflow = 1;
       }
       count++;
     }
   }
-  if (count > MAX_LINES) count = MAX_LINES; /* 呼び出し元が事前に容量チェックする前提だが防御的に丸める */
+  if (count > MAX_LINES) {
+    g_lineOverflow = 1;
+    count = MAX_LINES;
+  }
   g_lineCount = count;
 }
 
@@ -983,25 +998,35 @@ void insert_char_at_cursor(unsigned char b1, unsigned char b2, int nb)
   char tmp[2];
   int len;
   int oldLen;
+  int newTextLen;
 
   abspos = (int)g_lineStart[g_curLine] + g_curByte;
   tmp[0] = (char)b1;
   if (nb == 2) tmp[1] = (char)b2;
 
+  oldLen = 0;
   if (!g_insertMode) {
-    /* 上書きモード：上書き先の文字をまず削除してから新しい文字を
-       挿入する。同じ幅どうしなら見た目は単純な置き換えになり、
-       半角を全角で上書きする場合は削除1バイト＋挿入2バイトで
-       ちょうど1バイトぶん伸びる（設計書6章：「不足分を挿入して
-       桁を崩さない」）。 */
     len = line_len(g_curLine);
-    if (g_curByte < len) {
-      oldLen = char_len_at(g_curLine, g_curByte);
-      buffer_delete(abspos, oldLen);
-    }
+    if (g_curByte < len) oldLen = char_len_at(g_curLine, g_curByte);
   }
 
+  /* 上書きモードで置き換える既存文字がある場合、先に「削除してから
+     挿入」の結果サイズが容量に収まるかを確かめてから、初めて
+     buffer_delete()する。削除を先にしてから挿入が失敗すると、元の
+     文字だけが消えて戻せなくなるため（レビュー指摘：上限到達時に
+     文字が消える不具合）。newlineCountは常に0（この関数は改行を
+     挿入しない）なので、この容量チェックさえ通ればbuffer_insert()は
+     行数上限で失敗することもない。 */
+  newTextLen = g_textLen - oldLen + nb;
+  if (newTextLen > TEXT_MAX) {
+    sappend_copy(g_notice, sizeof(g_notice), MSG(MSG_LIMIT_NOTICE));
+    return;
+  }
+
+  if (oldLen > 0) buffer_delete(abspos, oldLen);
+
   if (!buffer_insert(abspos, tmp, nb, 0)) {
+    /* 上のチェックにより通常ここには来ない。防御的に通知だけ出す。 */
     sappend_copy(g_notice, sizeof(g_notice), MSG(MSG_LIMIT_NOTICE));
     return;
   }
@@ -1167,7 +1192,7 @@ int load_file(char *path)
   }
   dos_close((unsigned int)h);
   rebuild_lines();
-  if (g_lineCount > MAX_LINES) return LOAD_TOO_MANY_LINES;
+  if (g_lineOverflow) return LOAD_TOO_MANY_LINES;
   return LOAD_OK;
 }
 
@@ -1652,6 +1677,11 @@ int main(int argc, char *argv[])
     else if (key == KEY_CTRL_Q) { if (confirm_quit()) running = 0; }
     else if (key == KEY_ESC) { /* 何もしない（誤操作で終了しないため） */ }
     else if (key >= 0x20 && key <= 0x7e) {
+      insert_char_at_cursor((unsigned char)key, 0, 1);
+    } else if (key >= 0xa1 && key <= 0xdf) {
+      /* 半角カナ（1バイト）。is_lead_byte()の範囲（0x81-0x9F/0xE0-0xFC）
+         とは重ならないので、SJIS先頭バイトと衝突する心配はない
+         （レビュー指摘：半角カナが入力できない不具合の修正）。 */
       insert_char_at_cursor((unsigned char)key, 0, 1);
     } else if ((key >= 0x81 && key <= 0x9f) || (key >= 0xe0 && key <= 0xfc)) {
       int key2;
