@@ -140,6 +140,15 @@ MSG_LIMITS = {
     # kind already checks.
     "MSG_UNDO_NONE":            ("notice",   21),
     "MSG_UNDO_FAILED":          ("notice",   22),
+    # File picker (no-argument startup). All three are drawn inside the
+    # picker window, whose inner width is PICK_INNER_WIDTH cells: the guide
+    # goes into the bottom frame row, the "no files" text into the first
+    # list row, and the truncation notice is appended after the path in the
+    # top frame row (the path itself is a runtime value, so only the
+    # message's own width is checked here).
+    "MSG_PICK_GUIDE":           ("pick",     23),
+    "MSG_PICK_EMPTY":           ("pick",     24),
+    "MSG_PICK_TRUNCATED":       ("pick",     25),
 }
 
 # Generous fixed budget for the status line's "[...]" mode indicator (see
@@ -347,6 +356,7 @@ def main():
     status_suffix_width = extract_define_int(text, "STATUS_SUFFIX_WIDTH")
     status_shared_width = extract_define_int(text, "STATUS_SHARED_WIDTH")
     status_right_width = extract_define_int(text, "STATUS_RIGHT_WIDTH")
+    pick_inner_width = extract_define_int(text, "PICK_INNER_WIDTH")
     ja = extract_array(text, "g_msgJA")
     en = extract_array(text, "g_msgEN")
     title = extract_char_var(text, "g_title")
@@ -385,12 +395,14 @@ def main():
         "mode": MODE_WIDTH,
         "dialog": dialog_width,
         "notice": status_shared_width,
+        "pick": pick_inner_width,
     }
     limit_names = {
         "untitled": "STATUS_SHARED_WIDTH-STATUS_SUFFIX_WIDTH-1 (status-line shared file-name/notice field, minus the trailing \" - Tsubaki\" and the '*' marker)",
         "mode": "MODE_WIDTH (status-line mode indicator budget)",
         "dialog": "DIALOG_WIDTH",
         "notice": "STATUS_SHARED_WIDTH (status-line shared file-name/notice field)",
+        "pick": "PICK_INNER_WIDTH (inside of the file-picker window frame)",
     }
     n = len(ja)
     known_indices = set(idx for (_kind, idx) in MSG_LIMITS.values())
@@ -420,8 +432,9 @@ def main():
 
     print("PASS: 6) every message fits the cell limit implied by its use "
           "site, in both languages")
-    print("     (untitled=%d mode=%d dialog=%d notice=%d cells)" %
-          (limits["untitled"], limits["mode"], limits["dialog"], limits["notice"]))
+    print("     (untitled=%d mode=%d dialog=%d notice=%d pick=%d cells)" %
+          (limits["untitled"], limits["mode"], limits["dialog"], limits["notice"],
+           limits["pick"]))
     for line in report:
         print(line)
 

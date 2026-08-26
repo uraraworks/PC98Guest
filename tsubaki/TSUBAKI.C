@@ -215,6 +215,60 @@ void dos_setdta(unsigned char *dta)
       "int 0x21");
 }
 
+/* ---- ディレクトリ読み取り（引数なし起動のファイル選択で使う）--------------
+ * すみれの同名ラッパをそのまま流用。どれも文書化された汎用DOS APIで、
+ * 特定のプログラムのソースに由来するものではない。 */
+
+int dos_findfirst(char *path, unsigned int attr)
+{
+  asm("mov dx, [bp+4]\n"
+      "mov cx, [bp+6]\n"
+      "mov ah, 0x4e\n"
+      "int 0x21\n"
+      "sbb ax, ax");
+}
+
+int dos_findnext(void)
+{
+  asm("mov ah, 0x4f\n"
+      "int 0x21\n"
+      "sbb ax, ax");
+}
+
+unsigned int dos_getdrive(void)
+{
+  asm("mov ah, 0x19\n"
+      "int 0x21\n"
+      "mov ah, 0");
+}
+
+int dos_getcwd(unsigned int drive, char *buf)
+{
+  asm("mov dl, [bp+4]\n"
+      "mov si, [bp+6]\n"
+      "mov ah, 0x47\n"
+      "int 0x21\n"
+      "sbb ax, ax");
+}
+
+/* (*hiP:*loP) /= 10 を行い、余り（0～9）を返す。SmallerCの16ビット
+   モードにはlong型が無いので、ファイルサイズ（32ビット）を10進へ
+   直すのにこれが要る。すみれと同じもの。 */
+unsigned int divmod10(unsigned int *hiP, unsigned int *loP)
+{
+  asm("mov bx, [bp+4]\n"
+      "mov ax, [bx]\n"
+      "xor dx, dx\n"
+      "mov cx, 10\n"
+      "div cx\n"
+      "mov [bx], ax\n"
+      "mov bx, [bp+6]\n"
+      "mov ax, [bx]\n"
+      "div cx\n"
+      "mov [bx], ax\n"
+      "mov ax, dx");
+}
+
 /* ---- ファイルI/O（INT 21h AH=3Dh/3Ch/3Fh/40h/3Eh）。すみれのCopy/Move用
  * ラッパをそのまま流用。"jnc LABEL / mov ax,-1 / LABEL:" の形を使うのは
  * 成功時の戻り値が単純な0ではなく、ハンドルやバイト数だから。各ラベル名は
@@ -629,6 +683,11 @@ void ansi_goto(int row, int col)
 #define MSG_REPLACE_LIMIT_SUFFIX 20 /* ^P：件数の後に続ける後半部分（容量上限で途中打ち切りの場合） */
 #define MSG_UNDO_NONE     21 /* ^U/^Z：戻せる記録が無いときのステータス行通知 */
 #define MSG_UNDO_FAILED   22 /* ^U/^Z：容量不足で削除の取り消し（再挿入）に失敗したときのステータス行通知 */
+/* 引数なし起動のファイル選択（下の pick_* 群）。末尾に足すこと――
+   既存の MSG_* の番号は動かさない。 */
+#define MSG_PICK_GUIDE     23 /* 下枠に出すキーガイド */
+#define MSG_PICK_EMPTY     24 /* 一覧に1件も無いとき、最初の行に出す */
+#define MSG_PICK_TRUNCATED 25 /* 上限で打ち切ったとき、上枠のパスの後ろへ足す */
 
 const char *g_msgJA[] = {
   "無題",
@@ -653,7 +712,10 @@ const char *g_msgJA[] = {
   "件",
   "件（上限のため中断）",
   "取り消せる変更がありません",
-  "容量不足のため取り消せませんでした"
+  "容量不足のため取り消せませんでした",
+  "移動:上下 開く:Enter 親へ:BS 終了:ESC",
+  "ファイルがありません",
+  " ※以降は表示できません"
 };
 
 const char *g_msgEN[] = {
@@ -679,7 +741,10 @@ const char *g_msgEN[] = {
   " times",
   " times (stopped: limit)",
   "Nothing to undo",
-  "Undo failed: not enough space"
+  "Undo failed: not enough space",
+  "Up/Dn Enter:open BS:parent ESC:quit",
+  "No files here",
+  " (list truncated)"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -2429,6 +2494,410 @@ void save_command(void)
 
 char *g_argFile = 0;
 
+/* ---- 引数なし起動のファイル選択 -----------------------------------------
+ * 引数を1つも与えずに起動したときに開く一覧。原物 JED 1.59c の同じ
+ * 入口を実測した結果（docs/editor-measure-05.md）に合わせてある：
+ *
+ *   ・幅40セルのウィンドウを桁20から。上枠の中に「パス＋パターン」、
+ *     一覧は17行、下枠の中にキーガイド
+ *   ・1カラム。ディレクトリは名前の末尾に '\' が付き、サイズ欄が <DIR>
+ *   ・親は ".." として先頭に出る（ルートでは出ない）
+ *   ・並べ替えはしない。DOS が返す順（＝ディレクトリエントリの並び）
+ *     そのまま。原物もディレクトリを先出ししていない（実測）
+ *   ・↑↓は1行で端では止まる。←→はページ単位。BS で親へ。
+ *     Enter はディレクトリなら入り、ファイルなら選んで編集を始める。
+ *     ESC はプログラムごと終了
+ *
+ * 原物と変えたところ（意図的）:
+ *   ・**マークを持たない。**原物は SPACE で複数選び、選んだぶんを複数
+ *     ウィンドウへ読み込む。つばきは1ファイル1画面なので、マークは
+ *     「Enter はカーソル位置を開く」を壊すだけになる
+ *   ・ROLL UP/ROLL DOWN も←→と同じページ送りに割り当てた（本文の
+ *     ページ送りと同じキーで動くほうが迷わないため）。原物では未確認
+ *   ・原物の [L]（ドライブ／パス／パターンの入力）は入れていない。
+ *     ドライブをまたぐ必要があるときは、いまのところ引数で渡すこと
+ *
+ * 画面の文言はこのプログラムのために書き下ろしたもので、原物の表示を
+ * 写したものではない（docs/reimpl-policy.md）。 */
+
+#define PICK_MAX          200  /* 一覧に取り込むエントリ数の上限。超えた分は
+                                  黙って捨てず、上枠に打ち切りを表示する */
+#define PICK_NAME_LEN     13   /* "NAME.EXT" + NUL（DOSが返す形式） */
+#define PICK_ROWS         17   /* 一覧の行数（原物の実測値と同じ） */
+#define PICK_COL          20   /* ウィンドウの左端の桁（同上） */
+#define PICK_INNER_WIDTH  38   /* 枠の内側のセル数（幅40 － 左右の枠2） */
+#define PICK_TOP_ROW      5    /* 上枠（パスを載せる） */
+#define PICK_FIRST_ROW    (PICK_TOP_ROW + 1)
+#define PICK_GUIDE_ROW    (PICK_FIRST_ROW + PICK_ROWS)
+#define PICK_PATH_MAX     80   /* g_pickPath[]（ドライブとバックスラッシュ込み） */
+
+#define PICK_ATTR_HIDDEN   0x02
+#define PICK_ATTR_SYSTEM   0x04
+#define PICK_ATTR_VOLLABEL 0x08
+#define PICK_ATTR_DIR      0x10
+#define PICK_ATTR_RDONLY   0x01
+
+unsigned char g_dta[43];
+
+char g_pickPath[PICK_PATH_MAX];   /* 末尾は必ず '\\' */
+char g_pickSearch[PICK_PATH_MAX + 8];
+char g_pickedPath[PICK_PATH_MAX + PICK_NAME_LEN]; /* 選ばれたファイルの絶対パス。
+                                                      main()がg_argFileの代わりに使う */
+char g_pickName[PICK_MAX * PICK_NAME_LEN];
+unsigned char g_pickAttr[PICK_MAX];
+unsigned int g_pickSizeLo[PICK_MAX];
+unsigned int g_pickSizeHi[PICK_MAX];
+unsigned int g_pickDate[PICK_MAX];
+unsigned int g_pickTime[PICK_MAX];
+int g_pickCount;
+int g_pickCursor;
+int g_pickTop;
+int g_pickTruncated;
+
+/* (hi:lo) を10進のASCIIへ。out[]は12バイト以上。すみれの
+   format_u32_plain()と同じ（カンマ区切りは入れない）。 */
+void pick_format_size(unsigned int hi, unsigned int lo, char *out)
+{
+  char digits[12];
+  int n;
+  int i;
+  unsigned int rem;
+
+  n = 0;
+  if (hi == 0 && lo == 0) {
+    out[0] = '0';
+    out[1] = 0;
+    return;
+  }
+  while (hi != 0 || lo != 0) {
+    rem = divmod10(&hi, &lo);
+    digits[n] = (char)('0' + rem);
+    n++;
+  }
+  for (i = 0; i < n; i++) out[i] = digits[n - 1 - i];
+  out[n] = 0;
+}
+
+/* DOSディレクトリエントリのパックされた日付／時刻を "YY-MM-DD" と
+   "HH:MM" へ。年はDOSの1980年起点。 */
+void pick_format_date(unsigned int d, char *out)
+{
+  int year;
+  int month;
+  int day;
+
+  year = (80 + ((d >> 9) & 0x7F)) % 100;
+  month = (d >> 5) & 0x0F;
+  day = d & 0x1F;
+  out[0] = (char)('0' + year / 10);
+  out[1] = (char)('0' + year % 10);
+  out[2] = '-';
+  out[3] = (char)('0' + month / 10);
+  out[4] = (char)('0' + month % 10);
+  out[5] = '-';
+  out[6] = (char)('0' + day / 10);
+  out[7] = (char)('0' + day % 10);
+  out[8] = 0;
+}
+
+void pick_format_time(unsigned int t, char *out)
+{
+  int hour;
+  int minute;
+
+  hour = (t >> 11) & 0x1F;
+  minute = (t >> 5) & 0x3F;
+  out[0] = (hour / 10 == 0) ? ' ' : (char)('0' + hour / 10);
+  out[1] = (char)('0' + hour % 10);
+  out[2] = ':';
+  out[3] = (char)('0' + minute / 10);
+  out[4] = (char)('0' + minute % 10);
+  out[5] = 0;
+}
+
+/* 現在のドライブとカレントディレクトリから g_pickPath を作る。
+   末尾は必ず '\\'。 */
+void pick_read_path(void)
+{
+  unsigned int drive;
+  char cwdbuf[68];
+  int ok;
+
+  drive = dos_getdrive();
+  ok = dos_getcwd(drive + 1, cwdbuf); /* AH=47hは1がA: */
+  if (ok != 0) cwdbuf[0] = 0;
+
+  g_pickPath[0] = (char)('A' + drive);
+  g_pickPath[1] = ':';
+  g_pickPath[2] = '\\';
+  g_pickPath[3] = 0;
+  strcat(g_pickPath, cwdbuf);
+  if (cwdbuf[0] != 0) strcat(g_pickPath, "\\");
+}
+
+/* g_pickPath の中身を読み直す。"." は捨て、".." は残す（原物も親だけ
+   出す）。ボリュームラベルは一覧に出さない。 */
+void pick_read_dir(void)
+{
+  int ok;
+  int idx;
+  unsigned char attr;
+
+  g_pickCount = 0;
+  g_pickTruncated = 0;
+
+  strcpy(g_pickSearch, g_pickPath);
+  strcat(g_pickSearch, "*.*");
+
+  dos_setdta(g_dta);
+  ok = dos_findfirst(g_pickSearch,
+                     PICK_ATTR_RDONLY | PICK_ATTR_HIDDEN | PICK_ATTR_SYSTEM | PICK_ATTR_DIR);
+  while (ok == 0) {
+    attr = g_dta[21];
+    if (!(attr & PICK_ATTR_VOLLABEL) && strcmp((char *)&g_dta[30], ".") != 0) {
+      if (g_pickCount < PICK_MAX) {
+        idx = g_pickCount;
+        strcpy(&g_pickName[idx * PICK_NAME_LEN], (char *)&g_dta[30]);
+        g_pickAttr[idx] = attr;
+        g_pickTime[idx] = (unsigned int)g_dta[22] | ((unsigned int)g_dta[23] << 8);
+        g_pickDate[idx] = (unsigned int)g_dta[24] | ((unsigned int)g_dta[25] << 8);
+        g_pickSizeLo[idx] = (unsigned int)g_dta[26] | ((unsigned int)g_dta[27] << 8);
+        g_pickSizeHi[idx] = (unsigned int)g_dta[28] | ((unsigned int)g_dta[29] << 8);
+        g_pickCount++;
+      } else {
+        g_pickTruncated = 1;
+        break;
+      }
+    }
+    ok = dos_findnext();
+  }
+
+  g_pickCursor = 0;
+  g_pickTop = 0;
+}
+
+/* 一覧1行ぶんの本文（PICK_INNER_WIDTHセル、すべてANK）を作る。
+   桁の割り付け：
+     0        空白
+     1～12    名前（ファイルは 8 + '.' + 3 の固定欄、ディレクトリは名前＋'\'）
+     13～14   空白
+     15～21   サイズ（右詰め7桁。ディレクトリは <DIR>）
+     22～23   空白
+     24～31   日付 YY-MM-DD
+     32       空白
+     33～37   時刻 HH:MM
+*/
+void pick_entry_text(int idx, char *out)
+{
+  char *name;
+  char sizeBuf[12];
+  char dateBuf[9];
+  char timeBuf[6];
+  int i;
+  int j;
+  int n;
+
+  for (i = 0; i < PICK_INNER_WIDTH; i++) out[i] = ' ';
+  out[PICK_INNER_WIDTH] = 0;
+
+  name = &g_pickName[idx * PICK_NAME_LEN];
+
+  if (g_pickAttr[idx] & PICK_ATTR_DIR) {
+    i = 0;
+    while (name[i] != 0 && i < 11) { out[1 + i] = name[i]; i++; }
+    out[1 + i] = '\\';
+  } else {
+    i = 0;
+    while (name[i] != 0 && name[i] != '.' && i < 8) { out[1 + i] = name[i]; i++; }
+    j = i;
+    while (name[j] != 0 && name[j] != '.') j++; /* 8文字を超える名前は起きないが、
+                                                    '.' の位置まで進めておく */
+    out[9] = '.';
+    if (name[j] == '.') {
+      j++;
+      i = 0;
+      while (name[j] != 0 && i < 3) { out[10 + i] = name[j]; i++; j++; }
+    }
+  }
+
+  if (g_pickAttr[idx] & PICK_ATTR_DIR) {
+    strcpy(sizeBuf, "<DIR>");
+  } else {
+    pick_format_size(g_pickSizeHi[idx], g_pickSizeLo[idx], sizeBuf);
+  }
+  n = (int)strlen(sizeBuf);
+  if (n > 7) n = 7; /* 7桁に収まらない値（10億バイト超）は欄からはみ出させない */
+  for (i = 0; i < n; i++) out[15 + (7 - n) + i] = sizeBuf[i];
+
+  pick_format_date(g_pickDate[idx], dateBuf);
+  for (i = 0; i < 8; i++) out[24 + i] = dateBuf[i];
+  pick_format_time(g_pickTime[idx], timeBuf);
+  for (i = 0; i < 5; i++) out[33 + i] = timeBuf[i];
+}
+
+/* 枠の行（上枠／下枠）に文字列を載せる。まず罫線で内側を埋めてから、
+   文字の幅ぶんだけ上書きする。vram_puts_cells() は指定幅を空白で
+   埋めてしまうので、幅には文字列自身の幅を渡す。 */
+void pick_draw_frame_row(int row, unsigned char left, unsigned char right, char *text)
+{
+  int i;
+  int w;
+
+  vram_ank(row, PICK_COL, left, ATTR_BORDER);
+  for (i = 0; i < PICK_INNER_WIDTH; i++) {
+    vram_ank(row, PICK_COL + 1 + i, BOXCH_H, ATTR_BORDER);
+  }
+  vram_ank(row, PICK_COL + 1 + PICK_INNER_WIDTH, right, ATTR_BORDER);
+
+  if (text != 0 && text[0] != 0) {
+    w = text_width(text);
+    if (w > PICK_INNER_WIDTH) w = PICK_INNER_WIDTH;
+    vram_puts_cells(row, PICK_COL + 1, text, ATTR_TITLE, w);
+  }
+}
+
+void pick_draw(void)
+{
+  int row;
+  int col;
+  int i;
+  int idx;
+  int p;
+  char line[PICK_INNER_WIDTH + 1];
+  char title[PICK_PATH_MAX + 32];
+  unsigned int attr;
+
+  /* ウィンドウの外は空白で覆う。vram_set_cell() が「変化したセルだけ
+     書く」ので、これは毎回の全画面書き込みにはならない。 */
+  for (row = 0; row < VRAM_ROWS; row++) {
+    for (col = 0; col < VRAM_COLS; col++) {
+      vram_ank(row, col, ' ', ATTR_BASE);
+    }
+  }
+
+  p = 0;
+  title[0] = 0;
+  sappend(title, &p, g_pickPath, sizeof(title));
+  if (g_pickTruncated) sappend(title, &p, MSG(MSG_PICK_TRUNCATED), sizeof(title));
+  pick_draw_frame_row(PICK_TOP_ROW, BOXCH_TL, BOXCH_TR, title);
+
+  for (i = 0; i < PICK_ROWS; i++) {
+    row = PICK_FIRST_ROW + i;
+    idx = g_pickTop + i;
+    vram_ank(row, PICK_COL, BOXCH_V, ATTR_BORDER);
+    if (idx < g_pickCount) {
+      pick_entry_text(idx, line);
+      attr = (idx == g_pickCursor) ? ATTR_FKEY_KEY : ATTR_VALUE;
+      vram_puts_cells(row, PICK_COL + 1, line, attr, PICK_INNER_WIDTH);
+    } else if (g_pickCount == 0 && i == 0) {
+      vram_puts_cells(row, PICK_COL + 1, MSG(MSG_PICK_EMPTY), ATTR_VALUE, PICK_INNER_WIDTH);
+    } else {
+      vram_puts_cells(row, PICK_COL + 1, "", ATTR_VALUE, PICK_INNER_WIDTH);
+    }
+    vram_ank(row, PICK_COL + 1 + PICK_INNER_WIDTH, BOXCH_V, ATTR_BORDER);
+  }
+
+  pick_draw_frame_row(PICK_GUIDE_ROW, BOXCH_BL, BOXCH_BR, MSG(MSG_PICK_GUIDE));
+}
+
+void pick_ensure_visible(void)
+{
+  if (g_pickCursor < g_pickTop) g_pickTop = g_pickCursor;
+  if (g_pickCursor >= g_pickTop + PICK_ROWS) g_pickTop = g_pickCursor - PICK_ROWS + 1;
+  if (g_pickTop < 0) g_pickTop = 0;
+}
+
+/* ページ送り（←→）。原物は窓をページ単位で動かすので、カーソルは
+   新しいページの先頭へ置く。行スクロール（↑↓）とは別物。 */
+void pick_page(int dir)
+{
+  int top;
+
+  if (g_pickCount == 0) return;
+  top = g_pickTop + dir * PICK_ROWS;
+  if (top > g_pickCount - PICK_ROWS) top = g_pickCount - PICK_ROWS;
+  if (top < 0) top = 0;
+  g_pickTop = top;
+  g_pickCursor = top;
+}
+
+/* g_pickPath を親ディレクトリへ。ドライブルート "X:\\" より上へは行かない。 */
+void pick_go_parent(void)
+{
+  int len;
+
+  len = (int)strlen(g_pickPath);
+  if (len > 0 && g_pickPath[len - 1] == '\\') len--;
+  while (len > 0 && g_pickPath[len - 1] != '\\') len--;
+  if (len < 3) len = 3;
+  g_pickPath[len] = 0;
+  pick_read_dir();
+}
+
+void pick_enter_dir(int idx)
+{
+  char *name;
+  int p;
+
+  name = &g_pickName[idx * PICK_NAME_LEN];
+  if (strcmp(name, "..") == 0) {
+    pick_go_parent();
+    return;
+  }
+  p = (int)strlen(g_pickPath);
+  sappend(g_pickPath, &p, name, PICK_PATH_MAX);
+  sappend(g_pickPath, &p, "\\", PICK_PATH_MAX);
+  pick_read_dir();
+}
+
+/* 選択されたら1を返し、outPath へ絶対パスを入れる。ESCで中止したら0。
+   画面はこの関数が丸ごと使う（呼び出し元は戻ってから描き直すこと）。 */
+int pick_file(char *outPath, int cap)
+{
+  int key;
+  int idx;
+  int p;
+
+  pick_read_path();
+  pick_read_dir();
+
+  for (;;) {
+    pick_ensure_visible();
+    pick_draw();
+    key = key_read();
+
+    if (key == KEY_ESC) return 0;
+
+    if (key == KEY_UP) {
+      if (g_pickCursor > 0) g_pickCursor--;
+    } else if (key == KEY_DOWN) {
+      if (g_pickCursor + 1 < g_pickCount) g_pickCursor++;
+    } else if (key == KEY_RIGHT || key == KEY_ROLLUP) {
+      pick_page(1);
+    } else if (key == KEY_LEFT || key == KEY_ROLLDOWN) {
+      pick_page(-1);
+    } else if (key == KEY_HOME) {
+      g_pickCursor = 0;
+      g_pickTop = 0;
+    } else if (key == KEY_BS) {
+      pick_go_parent();
+    } else if (key == KEY_ENTER) {
+      if (g_pickCount == 0) continue;
+      idx = g_pickCursor;
+      if (g_pickAttr[idx] & PICK_ATTR_DIR) {
+        pick_enter_dir(idx);
+      } else {
+        p = 0;
+        outPath[0] = 0;
+        sappend(outPath, &p, g_pickPath, cap);
+        sappend(outPath, &p, &g_pickName[idx * PICK_NAME_LEN], cap);
+        return 1;
+      }
+    }
+    /* それ以外のキーは無視する */
+  }
+}
+
 void parse_args(int argc, char *argv[])
 {
   int i;
@@ -2480,6 +2949,24 @@ int main(int argc, char *argv[])
   g_undoWrite = 0;
   g_undoUsed = 0;
   g_undoApplying = 0;
+
+  /* 引数を1つも与えられていないときは、空のバッファをいきなり開くの
+     ではなくファイル選択の一覧を出す（原物 JED と同じ入口。
+     docs/editor-measure-05.md）。ESCで中止されたら、何も開かずに
+     そのまま終了する――原物も同じで、新規バッファは開かない。 */
+  if (g_argFile == 0) {
+    write_str("\x1b[>1h"); /* 最下段のファンクションキー行を解放する */
+    write_str("\x1b[>5h"); /* 一覧の間はテキストカーソルを隠す */
+    vram_shadow_init();
+    if (!pick_file(g_pickedPath, sizeof(g_pickedPath))) {
+      vram_clear_all();
+      ansi_goto(0, 0);
+      write_str("\x1b[>5l");
+      write_str("\x1b[>1l");
+      return 0;
+    }
+    g_argFile = g_pickedPath;
+  }
 
   if (g_argFile != 0) {
     strncpy(g_filename, g_argFile, FILENAME_MAX);
