@@ -129,6 +129,12 @@
 #define ATTR_FKEY_LABEL 0xA5  /* 反転、色101（すみれのファンクションキー行と同じ慣習） */
 #define ATTR_FKEY_KEY   0xC5  /* 反転、色110（黄色） */
 
+/* ステータス行（行0）専用：白地に黒文字の帯（すみれのATTR_REVと同じ
+   0xE5＝色111(白)+反転ビット。実機実測：行0は白255,254,255が10240画素中
+   8897画素(87%)を占める白帯だった。行1のファイル名行は水色主体で
+   白帯ではないため、この属性は行0にだけ使う）。 */
+#define ATTR_STATUS 0xE5
+
 #define BOXCH_V  0x96  /* 垂直線（半角罫線コード。ANKでありSJISではない） */
 #define BOXCH_TL 0x9c
 #define BOXCH_TR 0x9d
@@ -641,10 +647,32 @@ char *g_fkeyLabel[] = {
 };
 int g_fkeyHiPos[] = { -1, 0, 0, -1, -1, -1, -1, -1, -1, 0 };
 
-void draw_fkey_row(void)
+/* 桁colがどのファンクションキー枠（g_fkeyCol[i]～+FKEY_FIELD_WIDTH-1）に
+   属するかを求める。属する枠が無ければ-1。枠同士が重ならないことは
+   check.pyが検査済み。 */
+int fkey_field_at(int col)
 {
   int i;
+
+  for (i = 0; i < FKEY_COUNT; i++) {
+    if (col >= g_fkeyCol[i] && col < g_fkeyCol[i] + FKEY_FIELD_WIDTH) return i;
+  }
+  return -1;
+}
+
+/* すみれのdraw_title_row()第7マイルストーンと同じ理由（関数コメント
+   参照）で、「まず行全体を空白で塗ってからラベルを上書きする」形は
+   採らない。塗りとラベル描画を2回に分けると、差分更新のシャドウ越し
+   でも1セルにつき2回書き込みが発生し、行24が1～2フレームだけ暗転して
+   見える（実測：カーソルキー4回で108フレーム中dipが6回発生し、
+   キーを押さないときは92フレーム中0回だった）。ここでは各セルを
+   1フレームに1回だけ書くため、桁ごとにどの枠に属するかを先に判定し、
+   枠内ならラベル文字、枠外ならATTR_BASEの空白を、それぞれ1回の
+   vram_ank()呼び出しで書く。 */
+void draw_fkey_row(void)
+{
   int col;
+  int i;
   int len;
   int pad;
   int c;
@@ -653,25 +681,30 @@ void draw_fkey_row(void)
   unsigned int attr;
 
   for (col = 0; col < VRAM_COLS; col++) {
-    vram_ank(ROW_FKEY, col, ' ', ATTR_BASE);
-  }
+    i = fkey_field_at(col);
+    if (i < 0) {
+      vram_ank(ROW_FKEY, col, ' ', ATTR_BASE);
+      continue;
+    }
 
-  for (i = 0; i < FKEY_COUNT; i++) {
     label = g_fkeyLabel[i];
     len = (int)strlen(label);
-    if (len == 0) continue;
+    c = col - g_fkeyCol[i];
     pad = (FKEY_FIELD_WIDTH - len) / 2;
     if (pad < 0) pad = 0;
-    for (c = 0; c < FKEY_FIELD_WIDTH; c++) {
-      if (c >= pad && c < pad + len) {
-        ch = (unsigned char)label[c - pad];
-        attr = ((c - pad) == g_fkeyHiPos[i]) ? ATTR_FKEY_KEY : ATTR_FKEY_LABEL;
-      } else {
-        ch = ' ';
-        attr = ATTR_FKEY_LABEL;
-      }
-      vram_ank(ROW_FKEY, g_fkeyCol[i] + c, ch, attr);
+
+    if (len > 0 && c >= pad && c < pad + len) {
+      ch = (unsigned char)label[c - pad];
+      attr = ((c - pad) == g_fkeyHiPos[i]) ? ATTR_FKEY_KEY : ATTR_FKEY_LABEL;
+    } else if (len > 0) {
+      ch = ' ';
+      attr = ATTR_FKEY_LABEL;
+    } else {
+      /* 空文字列のフィールド（未実装のキー）は枠の外と同じ扱い。 */
+      ch = ' ';
+      attr = ATTR_BASE;
     }
+    vram_ank(ROW_FKEY, col, ch, attr);
   }
 }
 
@@ -1246,9 +1279,9 @@ void draw_status_line(void)
 
   p = 0;
   sappend(left, &p, g_title, sizeof(left));
-  vram_puts_cells(ROW_STATUS, 0, left, ATTR_TITLE, STATUS_LEFT_WIDTH);
+  vram_puts_cells(ROW_STATUS, 0, left, ATTR_STATUS, STATUS_LEFT_WIDTH);
 
-  vram_puts_cells(ROW_STATUS, STATUS_LEFT_WIDTH, g_notice, ATTR_BASE, STATUS_MID_WIDTH);
+  vram_puts_cells(ROW_STATUS, STATUS_LEFT_WIDTH, g_notice, ATTR_STATUS, STATUS_MID_WIDTH);
 
   lineNo = g_curLine + 1;
   colNo = col_at_byte(g_curLine, g_curByte) + 1;
@@ -1263,7 +1296,7 @@ void draw_status_line(void)
   if (g_modified) sappend(rightRaw, &p, " *", sizeof(rightRaw));
 
   right_justify(right, 0, STATUS_RIGHT_WIDTH, rightRaw);
-  vram_puts_cells(ROW_STATUS, VRAM_COLS - STATUS_RIGHT_WIDTH, right, ATTR_VALUE, STATUS_RIGHT_WIDTH);
+  vram_puts_cells(ROW_STATUS, VRAM_COLS - STATUS_RIGHT_WIDTH, right, ATTR_STATUS, STATUS_RIGHT_WIDTH);
 }
 
 void draw_file_row(void)
