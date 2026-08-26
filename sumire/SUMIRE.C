@@ -1584,11 +1584,58 @@ void vram_shadow_init(void)
    収まっているが、何らかのメッセージが想定より長くなって計算された
    固定幅フィールドがVRAM_CELLSを超えてインデックスすることが
    絶対に無いようにするため）。 */
+/* ---- 覆い（オーバーレイ）------------------------------------------------
+ * ダイアログのように「画面の一部を覆って前面に出るもの」を出している
+ * 間、その矩形を宣言しておく。vram_set_cell() は、覆いの内側への
+ * 書き込みを、覆い自身が描いている間（g_ovDrawing）以外は**無視する**。
+ *
+ * ちらつきの正体は「同じセルが1フレームの中で2回書かれること」
+ * （背景 → 前面の順）で、画面は2回目が来る前の状態も表示してしまう。
+ * draw_dialog()/draw_input_box() は毎フレームまず draw_screen_frame()
+ * で背景を描き直してからダイアログを重ねていたため、入力のたびに
+ * ダイアログのセルが2回書かれていた（実測：名前の入力中、行10の
+ * 枠が150フレーム中14回、完全に消灯した）。
+ *
+ * 直し方として「背景を描き直す経路を通らないようにする」を選ばない
+ * のは、それが経路ごとの対策になり、経路が増えるたびに再発するため
+ * （つばきで同じ形の不具合が3度出た）。**覆われたセルは誰が書きに
+ * 来ても届かない**という形にする。
+ *
+ * 覆いを閉じるのは main() のキー処理の最後の1か所だけ。すべての
+ * モーダルは1回のキー処理の中で開いて閉じるので、閉じ忘れる経路が
+ * 生まれない。
+ * ------------------------------------------------------------------- */
+
+int g_ovActive;
+int g_ovDrawing;
+int g_ovTop;
+int g_ovLeft;
+int g_ovBottom;
+int g_ovRight;
+
+void overlay_show(int top, int left, int bottom, int right)
+{
+  g_ovActive = 1;
+  g_ovTop = top;
+  g_ovLeft = left;
+  g_ovBottom = bottom;
+  g_ovRight = right;
+}
+
+void overlay_hide(void)
+{
+  g_ovActive = 0;
+  g_ovDrawing = 0;
+}
+
 void vram_set_cell(int row, int col, unsigned int chWord, unsigned int attr)
 {
   unsigned int idx;
 
   if (row < 0 || row >= VRAM_ROWS || col < 0 || col >= VRAM_COLS) return;
+  if (g_ovActive && !g_ovDrawing &&
+      row >= g_ovTop && row <= g_ovBottom &&
+      col >= g_ovLeft && col <= g_ovRight) return;
   idx = (unsigned int)(row * VRAM_COLS + col);
   if (g_curChar[idx] == chWord && g_curAttr[idx] == (unsigned char)attr) return;
   vram_put_raw((unsigned int)(idx * 2), chWord, attr);
@@ -2074,7 +2121,12 @@ void draw_dialog(char *msg, char *errmsg)
   int i;
   int row;
 
+  /* 背景（一覧）はダイアログの外側だけが描き直される。内側は下の
+     overlay_show()で宣言した覆いに守られ、この呼び出しでは1セルも
+     書かれない――上の「覆い」の節を参照。 */
+  overlay_show(DIALOG_ROW, DIALOG_COL, DIALOG_ROW + 3, DIALOG_COL + 1 + DIALOG_WIDTH);
   draw_screen_frame();
+  g_ovDrawing = 1;
 
   row = DIALOG_ROW;
   vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BORDER);
@@ -2087,16 +2139,20 @@ void draw_dialog(char *msg, char *errmsg)
   vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
   row++;
 
-  if (errmsg != 0) {
-    vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
-    vram_puts_cells(row, DIALOG_COL + 1, errmsg, ATTR_VALUE, DIALOG_WIDTH);
-    vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
-    row++;
-  }
+  /* エラー行は常に確保する（errmsgが無いときは空行）。errmsgの有無で
+     枠の高さが変わると、さっきまで枠だったセルを背景へ戻す処理が別途
+     必要になり、そこがまた二重書きや消し残しの温床になる。つばきで
+     同じ理由から高さを固定したのと同じ規律。 */
+  vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
+  vram_puts_cells(row, DIALOG_COL + 1, errmsg != 0 ? errmsg : "", ATTR_VALUE, DIALOG_WIDTH);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
+  row++;
 
   vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BORDER);
   for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
   vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BORDER);
+
+  g_ovDrawing = 0;
 }
 
 /* ---- 再利用可能なテキスト入力ダイアログ（Rename / mKdir） -----------------------
@@ -2130,7 +2186,9 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   int p;
   int promptCells;
 
+  overlay_show(DIALOG_ROW, DIALOG_COL, DIALOG_ROW + 3, DIALOG_COL + 1 + DIALOG_WIDTH);
   draw_screen_frame();
+  g_ovDrawing = 1;
 
   row = DIALOG_ROW;
   vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BORDER);
@@ -2150,16 +2208,19 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   fieldRow = row;
   row++;
 
-  if (errmsg != 0) {
-    vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
-    vram_puts_cells(row, DIALOG_COL + 1, errmsg, ATTR_VALUE, DIALOG_WIDTH);
-    vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
-    row++;
-  }
+  /* エラー行は常に確保する（draw_dialog()と同じ理由。入力のたびに
+     errmsgが有り／無しへ行き来するので、ここで高さを固定しないと
+     同じループの中で枠の高さが変わってしまう）。 */
+  vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
+  vram_puts_cells(row, DIALOG_COL + 1, errmsg != 0 ? errmsg : "", ATTR_VALUE, DIALOG_WIDTH);
+  vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_V, ATTR_BORDER);
+  row++;
 
   vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BORDER);
   for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
   vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BORDER);
+
+  g_ovDrawing = 0;
 
   /* BOXCH_Vは今や1セルのANK枠文字になったので、フィールドの
      テキストは枠の桁の1セル後ろから始まる（枠が2セルの全角
@@ -4064,6 +4125,14 @@ int main(int argc, char *argv[])
     } else if (key == KEY_ESC) {
       running = 0; /* 単独のESC：Qと同じく終了 */
     }
+
+    /* 覆い（ダイアログ）を閉じるのはここ1か所だけ。モーダルは必ず
+       この1回のキー処理の中で開いて閉じるので、経路ごとに閉じ忘れる
+       ことが無い。閉じてから描き直すので、ダイアログの下の背景は
+       この draw_screen() 1回で戻る（各コマンドが自前で呼ぶ
+       draw_screen() は覆いのある間はダイアログの内側に届かない）。 */
+    overlay_hide();
+    draw_screen();
   }
 
   /* DOSがまた使える状態に画面を戻す：このプログラムの他の

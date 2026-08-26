@@ -549,11 +549,54 @@ void vram_shadow_init(void)
   }
 }
 
+/* ---- 覆い（オーバーレイ）------------------------------------------------
+ * ダイアログや一覧のように「画面の一部を覆って前面に出るもの」を出して
+ * いる間、その矩形を宣言しておく。vram_set_cell() は、覆いの内側への
+ * 書き込みを、覆い自身が描いている間（g_ovDrawing）以外は**無視する**。
+ *
+ * これがちらつきの穴を塞ぐ。ちらつきの正体は「同じセルが1フレームの
+ * 中で2回書かれること」（背景 → 前面の順）で、画面は2回目が来る前の
+ * 状態も表示してしまう。以前は「背景を描き直す経路を通らないように
+ * する」という直し方を2度したが、3度目が出た（逐次置換の確認ループが
+ * 毎回 draw_screen() してからダイアログを重ねていた。150フレーム中
+ * dip 12回・最小0を実測）。**経路を塞ぐのではなく、覆われたセルは
+ * 誰が書きに来ても届かない、という形にする。**
+ *
+ * 覆いを閉じるのは main() のキー処理の最後の1か所（overlay_hide()）で、
+ * そこから背景の描き直しが1回だけ走る。モーダルは必ず main() の1回の
+ * キー処理の中で開いて閉じるので、経路ごとに閉じ忘れることが無い。
+ * ------------------------------------------------------------------- */
+
+int g_ovActive;   /* 覆いが出ているか */
+int g_ovDrawing;  /* 覆い自身が描いている最中か（このときだけ内側へ書ける） */
+int g_ovTop;
+int g_ovLeft;
+int g_ovBottom;
+int g_ovRight;
+
+void overlay_show(int top, int left, int bottom, int right)
+{
+  g_ovActive = 1;
+  g_ovTop = top;
+  g_ovLeft = left;
+  g_ovBottom = bottom;
+  g_ovRight = right;
+}
+
+void overlay_hide(void)
+{
+  g_ovActive = 0;
+  g_ovDrawing = 0;
+}
+
 void vram_set_cell(int row, int col, unsigned int chWord, unsigned int attr)
 {
   unsigned int idx;
 
   if (row < 0 || row >= VRAM_ROWS || col < 0 || col >= VRAM_COLS) return;
+  if (g_ovActive && !g_ovDrawing &&
+      row >= g_ovTop && row <= g_ovBottom &&
+      col >= g_ovLeft && col <= g_ovRight) return;
   idx = (unsigned int)(row * VRAM_COLS + col);
   if (g_curChar[idx] == chWord && g_curAttr[idx] == (unsigned char)attr) return;
   vram_put_raw((unsigned int)(idx * 2), chWord, attr);
@@ -2194,6 +2237,11 @@ void draw_dialog(char *msg, char *errmsg)
   int i;
   int row;
 
+  /* 覆いを宣言する。以後、閉じる（main()のoverlay_hide()）まで、
+     この矩形の中へは背景側から1セルも書かれない。 */
+  overlay_show(DIALOG_ROW, DIALOG_COL, DIALOG_ROW + 3, DIALOG_COL + 1 + DIALOG_WIDTH);
+  g_ovDrawing = 1;
+
   row = DIALOG_ROW;
   vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BORDER);
   for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
@@ -2219,6 +2267,8 @@ void draw_dialog(char *msg, char *errmsg)
   vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BORDER);
   for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
   vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BORDER);
+
+  g_ovDrawing = 0;
 }
 
 void show_notice_dialog(char *msg)
@@ -2241,6 +2291,9 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   int fieldCol;
   int p;
   int promptCells;
+
+  overlay_show(DIALOG_ROW, DIALOG_COL, DIALOG_ROW + 3, DIALOG_COL + 1 + DIALOG_WIDTH);
+  g_ovDrawing = 1;
 
   row = DIALOG_ROW;
   vram_ank(row, DIALOG_COL, BOXCH_TL, ATTR_BORDER);
@@ -2268,6 +2321,8 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   vram_ank(row, DIALOG_COL, BOXCH_BL, ATTR_BORDER);
   for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
   vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BORDER);
+
+  g_ovDrawing = 0;
 
   fieldCol = DIALOG_COL + 1 + promptCells + len;
   ansi_goto(fieldRow, fieldCol);
@@ -2756,6 +2811,26 @@ void pick_draw_frame_row(int row, unsigned char left, unsigned char right, char 
   }
 }
 
+/* ウィンドウの外側だけを空白にする。**一覧を出す前に1回だけ呼ぶ。**
+   毎フレーム全画面を空白で塗ってからウィンドウを描き直すと、
+   ウィンドウのセルが1フレームに2回書かれて派手にちらつく
+   （実測：内容が変わらないはずの上枠の行が150フレーム中36回、
+   完全に消灯した）。ちらつきの穴については vram_set_cell() の上の
+   「覆い」の節を参照。 */
+void pick_clear_outside(void)
+{
+  int row;
+  int col;
+
+  for (row = 0; row < VRAM_ROWS; row++) {
+    for (col = 0; col < VRAM_COLS; col++) {
+      if (row >= PICK_TOP_ROW && row <= PICK_GUIDE_ROW &&
+          col >= PICK_COL && col <= PICK_COL + 1 + PICK_INNER_WIDTH) continue;
+      vram_ank(row, col, ' ', ATTR_BASE);
+    }
+  }
+}
+
 void pick_draw(void)
 {
   int row;
@@ -2766,14 +2841,6 @@ void pick_draw(void)
   char line[PICK_INNER_WIDTH + 1];
   char title[PICK_PATH_MAX + 32];
   unsigned int attr;
-
-  /* ウィンドウの外は空白で覆う。vram_set_cell() が「変化したセルだけ
-     書く」ので、これは毎回の全画面書き込みにはならない。 */
-  for (row = 0; row < VRAM_ROWS; row++) {
-    for (col = 0; col < VRAM_COLS; col++) {
-      vram_ank(row, col, ' ', ATTR_BASE);
-    }
-  }
 
   p = 0;
   title[0] = 0;
@@ -2860,6 +2927,7 @@ int pick_file(char *outPath, int cap)
 
   pick_read_path();
   pick_read_dir();
+  pick_clear_outside(); /* 外側は1回だけ。以後はウィンドウの中だけを描く */
 
   for (;;) {
     pick_ensure_visible();
@@ -2996,6 +3064,7 @@ int main(int argc, char *argv[])
   vram_shadow_init();
 
   ensure_visible();
+  overlay_hide(); /* 起動時の読み込みエラー通知を出していた場合、その覆いを閉じてから描く */
   draw_screen();
 
   running = 1;
@@ -3046,6 +3115,11 @@ int main(int argc, char *argv[])
     }
     /* それ以外の未割当キー（F1/F4-F9、HELP、INSなど）は無視する */
 
+    /* 覆い（ダイアログ）を閉じるのはここ1か所だけ。モーダルは必ず
+       この1回のキー処理の中で開いて閉じるので、経路ごとに閉じ忘れる
+       ことが無い。閉じてから描き直すので、ダイアログの下の背景は
+       この draw_screen() 1回で戻る。 */
+    overlay_hide();
     draw_screen();
   }
 
