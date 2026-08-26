@@ -48,17 +48,29 @@
 #define VRAM_COLS   80
 #define VRAM_CELLS  (VRAM_ROWS * VRAM_COLS)
 
-#define ROW_STATUS  0      /* ステータス行 */
-#define ROW_FILE    1      /* ファイル名行（半角罫線の枠） */
-#define BODY_TOP    2       /* 本文の最初の行 */
-#define BODY_ROWS   22      /* 本文の行数（2～23行目） */
+#define ROW_STATUS  0      /* ステータス行（ファイル名もここへ統合し、白帯で80セル全部を覆う） */
+#define BODY_TOP    1       /* 本文の最初の行（ファイル名専用行を廃止して1行繰り上げた） */
+#define BODY_ROWS   23      /* 本文の行数（1～23行目） */
 #define ROW_FKEY    24      /* ファンクションキー行 */
 
-#define STATUS_LEFT_WIDTH  14  /* ステータス行左側（製品名+版） */
-#define STATUS_RIGHT_WIDTH 32  /* ステータス行右側（行:桁／モード／タブ幅／変更マーク） */
-#define STATUS_MID_WIDTH   (VRAM_COLS - STATUS_LEFT_WIDTH - STATUS_RIGHT_WIDTH) /* 通知欄 */
-
-#define BOX_WIDTH   78     /* ファイル名行の枠内側の幅（VRAM_COLS-2） */
+/* ステータス行（行0）の内訳。左から並べた幅の合計がちょうど
+   VRAM_COLS(80)になるようにする（check.pyで検査）：
+     STATUS_TITLE_WIDTH(7)  … プログラム名「Tsubaki」
+   + STATUS_SEP_WIDTH(1)    … 区切りの空白1セル
+   + STATUS_FILE_WIDTH(12)  … ファイル名＋変更マーク'*'（収まらない
+                                ときは先頭を'<'に置き換えて末尾を残す。
+                                全角文字の途中では区切らない）
+   + STATUS_MID_WIDTH(28)   … 通知欄g_notice（最長メッセージが全角14
+                                文字=28セルなのでちょうど収まる幅にした）
+   + STATUS_RIGHT_WIDTH(32) … 行:桁／モード／タブ幅／変更マーク（従来と同じ）
+   = 80 */
+#define STATUS_TITLE_WIDTH 7
+#define STATUS_SEP_WIDTH   1
+#define STATUS_FILE_WIDTH  12
+#define STATUS_MID_WIDTH   28
+#define STATUS_RIGHT_WIDTH 32
+#define STATUS_FILE_COL (STATUS_TITLE_WIDTH + STATUS_SEP_WIDTH)
+#define STATUS_MID_COL  (STATUS_FILE_COL + STATUS_FILE_WIDTH)
 
 #define DIALOG_WIDTH 60
 #define DIALOG_ROW   10
@@ -131,8 +143,8 @@
 
 /* ステータス行（行0）専用：白地に黒文字の帯（すみれのATTR_REVと同じ
    0xE5＝色111(白)+反転ビット。実機実測：行0は白255,254,255が10240画素中
-   8897画素(87%)を占める白帯だった。行1のファイル名行は水色主体で
-   白帯ではないため、この属性は行0にだけ使う）。 */
+   8897画素(87%)を占める白帯だった。ファイル名行はこの行に統合したため、
+   行0の80セル全部にこの属性を使う。行1以降の本文はATTR_BASEを使う）。 */
 #define ATTR_STATUS 0xE5
 
 #define BOXCH_V  0x96  /* 垂直線（半角罫線コード。ANKでありSJISではない） */
@@ -552,15 +564,6 @@ void ansi_goto(int row, int col)
   write_str(out);
 }
 
-/* ヘッダ枠の1行を描画する：左枠文字＋内容（BOX_WIDTHセルに合わせて
-   スペース埋め／切り詰め）＋右枠文字。すみれのbox_row()そのまま。 */
-void box_row(int row, unsigned char lb, unsigned char rb, char *content, unsigned int contentAttr)
-{
-  vram_ank(row, 0, lb, ATTR_BORDER);
-  vram_puts_cells(row, 1, content, contentAttr, BOX_WIDTH);
-  vram_ank(row, 1 + BOX_WIDTH, rb, ATTR_BORDER);
-}
-
 /* ---- 言語／メッセージテーブル -----------------------------------------
  * 画面表示文字列はすべてここに集約し、インデックスで引く。すみれと
  * 同じ設計（docs/i18n-design.md参照）。 */
@@ -628,9 +631,11 @@ int msg_selftest(void)
   return 1;
 }
 
-/* タイトル（製品名+版。ステータス行左側）：g_msgJA/g_msgENの外に
-   置く言語非依存の固定文字列。すみれのg_titleと同じ扱い。 */
-char *g_title = "Tsubaki v0";
+/* タイトル（製品名。ステータス行左側）：g_msgJA/g_msgENの外に置く
+   言語非依存の固定文字列。すみれのg_titleと同じ扱い。ステータス行に
+   ファイル名を統合しSTATUS_TITLE_WIDTH(7)しか使えなくなったため、
+   版表記は付けず"Tsubaki"の7文字ちょうどにした。 */
+char *g_title = "Tsubaki";
 
 /* ---- 最下段：ファンクションキー割り当て（言語非依存） --------------
  * すみれのg_fkeyLabel[]/g_fkeyCol[]/g_fkeyHiPos[]/draw_cmdline()と
@@ -1268,21 +1273,103 @@ int save_file(char *path)
 
 void draw_screen(void); /* draw_dialog()/draw_input_box()から前方参照する */
 
+/* nameの表示幅がavailCellsセルを超える場合、末尾を残して先頭を省略し、
+   省略した印として先頭に'<'を1つ置く（全角文字の途中では区切らない）。
+   dstの*lenpバイト目に追記し、続けてsappend()できるよう更新する（規約は
+   sappend()と同じ）。ファイル名は末尾のほうが情報量が多い（拡張子や
+   ディレクトリの深い側）ため、先頭でなく末尾を残す。 */
+void sappend_tail_cells(char *dst, int *lenp, char *name, int availCells, int cap)
+{
+  int totalW;
+  int boundaries[FILENAME_MAX + 1];
+  int widths[FILENAME_MAX + 1];
+  int n;
+  int i;
+  unsigned char c;
+  int k;
+  int suffix;
+  int target;
+  int start;
+
+  totalW = text_width(name);
+  if (totalW <= availCells) {
+    sappend(dst, lenp, name, cap);
+    return;
+  }
+
+  /* 先頭の'<'に1セル使うため、名前本体に使える幅は1少ない */
+  target = availCells - 1;
+  if (target < 0) target = 0;
+
+  /* 文字境界（バイトオフセット）と各文字の表示幅を先頭から列挙する */
+  n = 0;
+  i = 0;
+  while (name[i] != 0 && n < FILENAME_MAX) {
+    boundaries[n] = i;
+    c = (unsigned char)name[i];
+    if (is_lead_byte(c) && name[i + 1] != 0) {
+      widths[n] = 2;
+      i += 2;
+    } else {
+      widths[n] = 1;
+      i += 1;
+    }
+    n++;
+  }
+  boundaries[n] = i; /* 文字列末尾のバイトオフセット */
+
+  /* 末尾の文字から順に幅を積み上げ、targetを超えない最大範囲を探す。
+     見つからなければ（1文字も入らなければ）空文字列のまま。 */
+  start = boundaries[n];
+  suffix = 0;
+  for (k = n - 1; k >= 0; k--) {
+    if (suffix + widths[k] > target) break;
+    suffix += widths[k];
+    start = boundaries[k];
+  }
+
+  sappend(dst, lenp, "<", cap);
+  sappend(dst, lenp, name + start, cap);
+}
+
+/* ステータス行（行0）を描画する。行1のファイル名専用行は廃止し、
+   ファイル名と変更マークをこの行に統合した（利用者の指摘：
+   「ファイル名だけなら1行目に入りそう」）。フィールド幅の内訳は
+   STATUS_*_WIDTHの定義部コメント参照。 */
 void draw_status_line(void)
 {
-  char left[STATUS_LEFT_WIDTH + 1];
+  char left[STATUS_TITLE_WIDTH + 1];
+  char fileBuf[FILENAME_MAX + 4]; /* '<'(1) + ファイル名 + '*'(1) + NUL の余裕 */
   char right[STATUS_RIGHT_WIDTH + 1];
   char rightRaw[40];
+  char *name;
+  int fileAvail;
   int p;
   int lineNo;
   int colNo;
 
+  /* 左：プログラム名 */
   p = 0;
   sappend(left, &p, g_title, sizeof(left));
-  vram_puts_cells(ROW_STATUS, 0, left, ATTR_STATUS, STATUS_LEFT_WIDTH);
+  vram_puts_cells(ROW_STATUS, 0, left, ATTR_STATUS, STATUS_TITLE_WIDTH);
 
-  vram_puts_cells(ROW_STATUS, STATUS_LEFT_WIDTH, g_notice, ATTR_STATUS, STATUS_MID_WIDTH);
+  /* 区切りの空白1セル */
+  vram_ank(ROW_STATUS, STATUS_TITLE_WIDTH, ' ', ATTR_STATUS);
 
+  /* ファイル名＋変更マーク。マークは対象が分かるようファイル名の
+     直後に置く（右端に置いていた旧レイアウトから変更）。 */
+  name = (g_filename[0] == 0) ? MSG(MSG_UNTITLED) : g_filename;
+  fileAvail = STATUS_FILE_WIDTH - (g_modified ? 1 : 0);
+  p = 0;
+  fileBuf[0] = 0;
+  sappend_tail_cells(fileBuf, &p, name, fileAvail, sizeof(fileBuf));
+  if (g_modified) sappend(fileBuf, &p, "*", sizeof(fileBuf));
+  vram_puts_cells(ROW_STATUS, STATUS_FILE_COL, fileBuf, ATTR_STATUS, STATUS_FILE_WIDTH);
+
+  /* 中央：通知 */
+  vram_puts_cells(ROW_STATUS, STATUS_MID_COL, g_notice, ATTR_STATUS, STATUS_MID_WIDTH);
+
+  /* 右：行:桁 [挿入/上書き] TAB=幅（変更なし） */
   lineNo = g_curLine + 1;
   colNo = col_at_byte(g_curLine, g_curByte) + 1;
   p = 0;
@@ -1293,26 +1380,9 @@ void draw_status_line(void)
   sappend(rightRaw, &p, g_insertMode ? MSG(MSG_MODE_INS) : MSG(MSG_MODE_OVR), sizeof(rightRaw));
   sappend(rightRaw, &p, "]  TAB=", sizeof(rightRaw));
   sappend_uint(rightRaw, &p, (unsigned int)TAB_WIDTH, sizeof(rightRaw));
-  if (g_modified) sappend(rightRaw, &p, " *", sizeof(rightRaw));
 
   right_justify(right, 0, STATUS_RIGHT_WIDTH, rightRaw);
   vram_puts_cells(ROW_STATUS, VRAM_COLS - STATUS_RIGHT_WIDTH, right, ATTR_STATUS, STATUS_RIGHT_WIDTH);
-}
-
-void draw_file_row(void)
-{
-  char content[FILENAME_MAX + 4];
-  int p;
-
-  p = 0;
-  sappend(content, &p, "[", sizeof(content));
-  if (g_filename[0] == 0) {
-    sappend(content, &p, MSG(MSG_UNTITLED), sizeof(content));
-  } else {
-    sappend(content, &p, g_filename, sizeof(content));
-  }
-  sappend(content, &p, "]", sizeof(content));
-  box_row(ROW_FILE, BOXCH_V, BOXCH_V, content, ATTR_VALUE);
 }
 
 /* 本文の1行を、横スクロール位置g_leftColを反映して描画する。全角
@@ -1396,7 +1466,6 @@ void draw_body(void)
 void draw_screen(void)
 {
   draw_status_line();
-  draw_file_row();
   draw_body();
   draw_fkey_row();
 }

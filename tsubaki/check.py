@@ -14,18 +14,20 @@ Checks (all must pass, otherwise this exits non-zero):
      does not appear anywhere in the file.
   3. g_msgJA and g_msgEN have the same number of entries.
   4. Neither message table contains an empty string.
-  5. g_title (the status-line left-side product name + version, fixed
+  5. g_title (the status line's leftmost product-name field, fixed
      English text kept out of g_msgJA/g_msgEN - see its comment in
-     TSUBAKI.C, right above g_fkeyCol[]) fits STATUS_LEFT_WIDTH cells.
+     TSUBAKI.C, right above g_fkeyCol[]) fits STATUS_TITLE_WIDTH cells.
   6. Every message in g_msgJA/g_msgEN is checked against the screen-cell
      limit that applies to how TSUBAKI.C actually uses it, in both
      languages. Screen-cell width follows the same rule as TSUBAKI.C's own
      text_width(): a lead byte in 0x81-0x9F or 0xE0-0xFC (and the byte
      after it) counts as 2 cells, anything else counts as 1. Each message
      index is classified (see MSG_LIMITS below) into one of:
-       - "untitled": placed alone inside the file-name row's "[...]"
-                     brackets (draw_file_row()), must fit within
-                     BOX_WIDTH-2 cells (2 cells reserved for the brackets).
+       - "untitled": placed alone into the status line's file-name field
+                     (draw_status_line()) when no file is loaded, must fit
+                     within STATUS_FILE_WIDTH-1 cells (1 cell reserved for
+                     the '*' modified-marker that draw_status_line() may
+                     append right after it).
        - "mode"    : placed alone inside the status line's "[...]" mode
                      indicator (draw_status_line()), must fit within a
                      small fixed budget (MODE_WIDTH below) - generous
@@ -34,11 +36,11 @@ Checks (all must pass, otherwise this exits non-zero):
        - "dialog"  : placed alone into a draw_dialog() or draw_input_box()
                      box, must fit within DIALOG_WIDTH cells.
        - "notice"  : placed into the status line's notice area
-                     (draw_status_line(), between the left product name and
+                     (draw_status_line(), between the file-name field and
                      the right-hand line:col/mode field), must fit within
                      STATUS_MID_WIDTH cells.
-     BOX_WIDTH, STATUS_LEFT_WIDTH, STATUS_MID_WIDTH and DIALOG_WIDTH are all
-     read out of TSUBAKI.C's #define lines, never hard-coded here.
+     STATUS_FILE_WIDTH, STATUS_MID_WIDTH and DIALOG_WIDTH are all read out
+     of TSUBAKI.C's #define lines, never hard-coded here.
   7. The bottom row (g_fkeyLabel[]/g_fkeyCol[]/g_fkeyHiPos[] - ten
      fixed-position function-key fields, the same convention as
      guest/sumire/SUMIRE.C's F-key row):
@@ -55,6 +57,13 @@ Checks (all must pass, otherwise this exits non-zero):
          field.
        - g_fkeyHiPos[i] is either -1 (only valid when g_fkeyLabel[i] is
          empty) or a valid index into g_fkeyLabel[i].
+  8. The status line (row 0) field widths - STATUS_TITLE_WIDTH,
+     STATUS_SEP_WIDTH, STATUS_FILE_WIDTH, STATUS_MID_WIDTH and
+     STATUS_RIGHT_WIDTH, all read out of TSUBAKI.C's #define lines, never
+     hard-coded here - sum to exactly VRAM_COLS (80), so the reverse-video
+     status band covers the row with no gap and no overrun.
+  9. BODY_TOP + BODY_ROWS does not reach ROW_FKEY, so the scrollable body
+     area never overlaps the bottom function-key row.
 
 Usage:
   python3 check.py [path-to-TSUBAKI.C]
@@ -174,16 +183,12 @@ def main():
     print("PASS: 2) no EF BF BD (U+FFFD) bytes in the file")
 
     # ---- extract the screen-cell width limits and both message tables -
-    box_width = extract_define_int(text, "BOX_WIDTH")
     dialog_width = extract_define_int(text, "DIALOG_WIDTH")
-    status_left_width = extract_define_int(text, "STATUS_LEFT_WIDTH")
+    status_title_width = extract_define_int(text, "STATUS_TITLE_WIDTH")
+    status_sep_width = extract_define_int(text, "STATUS_SEP_WIDTH")
+    status_file_width = extract_define_int(text, "STATUS_FILE_WIDTH")
+    status_mid_width = extract_define_int(text, "STATUS_MID_WIDTH")
     status_right_width = extract_define_int(text, "STATUS_RIGHT_WIDTH")
-    # STATUS_MID_WIDTH is defined in TSUBAKI.C as an arithmetic expression
-    # (VRAM_COLS - STATUS_LEFT_WIDTH - STATUS_RIGHT_WIDTH), not a bare
-    # integer literal, so it can't be pulled with extract_define_int().
-    # Recompute it from the same three #defines instead of hard-coding it.
-    screen_cols_for_mid = extract_define_int(text, "VRAM_COLS")
-    status_mid_width = screen_cols_for_mid - status_left_width - status_right_width
     ja = extract_array(text, "g_msgJA")
     en = extract_array(text, "g_msgEN")
     title = extract_char_var(text, "g_title")
@@ -202,25 +207,27 @@ def main():
             fail("g_msgEN[%d] is an empty string" % i)
     print("PASS: 4) no empty strings in g_msgJA or g_msgEN")
 
-    # ---- check 5: g_title fits the status line's left-side budget -----
+    # ---- check 5: g_title fits the status line's title-field budget ---
     if title == "":
         fail("g_title is an empty string")
     title_w = cell_width(title.encode("cp932"))
-    if title_w > status_left_width:
-        fail("g_title is %d cells wide, exceeds STATUS_LEFT_WIDTH (%d cells) - %r" %
-             (title_w, status_left_width, title))
-    print("PASS: 5) g_title (%r) fits STATUS_LEFT_WIDTH (limit=%d cells, actual=%d cells)" %
-          (title, status_left_width, title_w))
+    if title_w > status_title_width:
+        fail("g_title is %d cells wide, exceeds STATUS_TITLE_WIDTH (%d cells) - %r" %
+             (title_w, status_title_width, title))
+    print("PASS: 5) g_title (%r) fits STATUS_TITLE_WIDTH (limit=%d cells, actual=%d cells)" %
+          (title, status_title_width, title_w))
 
     # ---- check 6: every message fits the cell limit its use site implies --
     limits = {
-        "untitled": box_width - 2,  # BOX_WIDTH minus the "[" and "]" brackets
+        # STATUS_FILE_WIDTH minus 1 cell reserved for the '*' modified
+        # marker draw_status_line() may append right after the name.
+        "untitled": status_file_width - 1,
         "mode": MODE_WIDTH,
         "dialog": dialog_width,
         "notice": status_mid_width,
     }
     limit_names = {
-        "untitled": "BOX_WIDTH-2 (file-name row brackets)",
+        "untitled": "STATUS_FILE_WIDTH-1 (status-line file-name field, minus the '*' marker)",
         "mode": "MODE_WIDTH (status-line mode indicator budget)",
         "dialog": "DIALOG_WIDTH",
         "notice": "STATUS_MID_WIDTH (status-line notice area)",
@@ -307,6 +314,29 @@ def main():
           (fkey_count, fkey_field_width, screen_cols))
     for line in report:
         print(line)
+
+    # ---- check 8: status-line field widths sum to exactly VRAM_COLS ---
+    status_total = (status_title_width + status_sep_width + status_file_width +
+                    status_mid_width + status_right_width)
+    if status_total != screen_cols:
+        fail("status line field widths sum to %d cells (title=%d + sep=%d + "
+             "file=%d + mid=%d + right=%d), expected exactly VRAM_COLS (%d)" %
+             (status_total, status_title_width, status_sep_width, status_file_width,
+              status_mid_width, status_right_width, screen_cols))
+    print("PASS: 8) status line field widths sum to exactly VRAM_COLS "
+          "(title=%d + sep=%d + file=%d + mid=%d + right=%d = %d)" %
+          (status_title_width, status_sep_width, status_file_width,
+           status_mid_width, status_right_width, screen_cols))
+
+    # ---- check 9: body area does not overlap the function-key row -----
+    body_top = extract_define_int(text, "BODY_TOP")
+    body_rows = extract_define_int(text, "BODY_ROWS")
+    row_fkey = extract_define_int(text, "ROW_FKEY")
+    if body_top + body_rows > row_fkey:
+        fail("BODY_TOP (%d) + BODY_ROWS (%d) = %d overlaps ROW_FKEY (%d)" %
+             (body_top, body_rows, body_top + body_rows, row_fkey))
+    print("PASS: 9) BODY_TOP (%d) + BODY_ROWS (%d) = %d does not reach "
+          "ROW_FKEY (%d)" % (body_top, body_rows, body_top + body_rows, row_fkey))
 
     print("ALL CHECKS PASSED")
     return 0
