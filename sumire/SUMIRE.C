@@ -40,6 +40,11 @@
  * 描き直す方式をやめて、フレーム間で実際に変化したセルだけを書くように
  * した。
  *
+ * 第12マイルストーンで追加：Logdsk（L、F1）――カレントドライブの変更。
+ * 原物と同じF1の位置に置いた。切り替え先の有効性はINT 21h AH=36hで
+ * 事前に確かめ、切り替えた後にAH=19hで実際に移ったことを確認する
+ * （do_logdsk()参照）。
+ *
  * SmallerC（C89寄りのサブセット、16ビット・スモールモデルの MZ EXE）で
  * ビルド。第5マイルストーンで、画面の*内容*描画はすべて DOS コンソールから
  * テキストVRAMへの直書き（下の vram_* 関数群、および
@@ -70,8 +75,8 @@
  * （g_fkeyLabel[]/g_fkeyCol[]/draw_cmdline() および
  * docs/filer-measure-05.md 参照）で、F3/F4/F5は本家自身のCopy/Delete/
  * Renameの位置のまま、このプログラムの他のコマンドは空いている枠に
- * 配置する。このプログラムが実装していないコマンド（Logdsk/eXec/Sort/
- * Find/Tree/…）の枠は、名前を付けず空欄のままにする。すべてのコマンドは
+ * 配置する。このプログラムが実装していないコマンド（Sort/Find/Tree/…）
+ * の枠は、名前を付けず空欄のままにする。すべてのコマンドは
  * 従来どおり普通の文字キーでも到達できる――ファンクションキーは
  * あくまで追加の入口である。
  * 第9マイルストーンで、行0のタイトル文字列を "<< >>" の中央に配置し
@@ -347,6 +352,12 @@
 #define MSG_VIEW_ERR_OPEN       41
 #define MSG_VIEW_CMDLINE        42
 
+/* 第12マイルストーン（ドライブ変更。F1 / Logdsk）のメッセージ。
+   末尾に足すこと――既存の MSG_* の番号は動かさない。 */
+#define MSG_LOGDSK_PROMPT       43
+#define MSG_LOGDSK_ERR_EMPTY    44
+#define MSG_LOGDSK_ERR_INVALID  45
+
 const char *g_msgJA[] = {
   "パス=",
   "　（※上限",
@@ -390,7 +401,10 @@ const char *g_msgJA[] = {
   "ファイル名: ",
   "行番号: ",
   "ファイルを開けません（何かキーを押してください）",
-  "ESC:一覧へ戻る"
+  "ESC:一覧へ戻る",
+  "ドライブ: ",
+  "ドライブ名を入力してください",
+  "そのドライブは使えません"
 };
 
 const char *g_msgEN[] = {
@@ -436,7 +450,10 @@ const char *g_msgEN[] = {
   "File name: ",
   "Line No: ",
   "Cannot open the file (press any key)",
-  "ESC: back to list"
+  "ESC: back to list",
+  "Drive: ",
+  "Enter a drive letter",
+  "That drive is not available"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -498,8 +515,8 @@ char *g_title = "Sumire - File manager";
  * すべて使用可能なままである（main()のキーディスパッチ参照）――
  * 変わったのは*画面上での説明のされ方*だけである。
  * g_fkeyLabel[i]が空文字列（""）であることは、そのファンクションキーが
- * このプログラムではまだ実装されていない（例：本家のLogdsk/eXec/Sort/
- * Find/Tree/…の枠）ことを意味する――その位置は（フィールド間の隙間と
+ * このプログラムではまだ実装されていない（例：本家のSort/Find/Tree/…
+ * の枠）ことを意味する――その位置は（フィールド間の隙間と
  * 同様に）空白のまま予約され、使い回されない。これにより将来の
  * マイルストーンで他を動かすことなくコマンドを追加でき、かつ
  * 実際には持っていないコマンドを持っているかのように見せることもない。
@@ -519,9 +536,9 @@ char *g_title = "Sumire - File manager";
 int g_fkeyCol[] = { 4, 11, 18, 25, 32, 42, 49, 56, 63, 70 };
 
 char *g_fkeyLabel[] = {
-  "", "eXec", "Copy", "Delete", "Rename", "Move", "mKdir", "", "", "Quit"
+  "Logdsk", "eXec", "Copy", "Delete", "Rename", "Move", "mKdir", "", "", "Quit"
 };
-int g_fkeyHiPos[] = { -1, 1, 0, 0, 0, 0, 1, -1, -1, 0 };
+int g_fkeyHiPos[] = { 0, 1, 0, 0, 0, 0, 1, -1, -1, 0 };
 
 /* ---- 組み込みビューア（第8マイルストーン、ROLL UP/ROLL DOWNは第11マイルストーンで追加）
  * ディレクトリでないエントリで拡張子がCOM/EXEでないものにEnterを
@@ -924,6 +941,17 @@ unsigned int dos_getdrive(void)
   asm("mov ah, 0x19\n"
       "int 0x21\n"
       "mov ah, 0");
+}
+
+/* INT 21h AH=0Eh（デフォルトドライブの設定）：DL=0がA:。ALには
+   システムの論理ドライブ数が返るが、**存在しないドライブを指定
+   しても失敗を報告しない**ので、有効性の確認は呼び出し側が
+   先にAH=36h（dos_diskfree()）で行う――do_logdsk()参照。 */
+void dos_setdrive(unsigned int drive)
+{
+  asm("mov dl, [bp+4]\n"
+      "mov ah, 0x0e\n"
+      "int 0x21");
 }
 
 int dos_getcwd(unsigned int drive, char *buf)
@@ -2375,6 +2403,84 @@ void do_mkdir(void)
   }
 
   read_dir();
+  draw_screen();
+}
+
+/* ---- ドライブ変更（F1 / Logdsk） ---------------------------------------- */
+
+/* L/l、F1：カレントドライブを変更する。原物の最下段でも1番目
+   （F1）の位置にあるコマンドで、位置はそこに合わせてある
+   （docs/filer-measure-05.md）。入力は1文字のドライブ名で、
+   "A" でも "A:" でも受ける（大文字小文字は問わない）。
+
+   **有効性の確認は AH=0Eh の戻り値では行わない。**AH=0Eh は
+   存在しないドライブを指定されても何も報告しないので、先に
+   AH=36h（dos_diskfree()）を投げて 0xFFFF が返らないことを
+   確認し、それが通ってから初めて実際に切り替える。切り替えた
+   後にも AH=19h（dos_getdrive()）で本当に移ったかを確かめる
+   ――要求した側の正しさは、末端がそうなっている証明にならない。
+
+   エラーは他のダイアログと同じく、専用行ではなくダイアログの
+   中にインラインで出し、入力中の文字列を残したまま入力を
+   継続させる（原物に対する実測。docs/filer-measure-04.md）。
+
+   成功したらパス・一覧・カーソル・マークをすべて新しいドライブ
+   のものへ入れ替える。マークは前のドライブのファイルを指して
+   いるので必ず捨てる。 */
+#define LOGDSK_MAXLEN 2   /* "A" または "A:" */
+
+void do_logdsk(void)
+{
+  char buf[LOGDSK_MAXLEN + 1];
+  char *err;
+  int confirmed;
+  int c;
+  unsigned int drive;
+  unsigned int spc;
+  unsigned int availClus;
+  unsigned int bytesPerSec;
+  unsigned int totalClus;
+
+  buf[0] = 0;
+  err = 0;
+  for (;;) {
+    confirmed = input_dialog(MSG(MSG_LOGDSK_PROMPT), buf, LOGDSK_MAXLEN, err);
+    if (!confirmed) {
+      draw_screen();
+      return;
+    }
+    if (buf[0] == 0) {
+      err = MSG(MSG_LOGDSK_ERR_EMPTY);
+      continue;
+    }
+
+    c = buf[0];
+    if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
+    /* 2文字目はコロンだけ許す。"AB" のようなものは弾く */
+    if (c < 'A' || c > 'Z' || (buf[1] != 0 && buf[1] != ':')) {
+      err = MSG(MSG_LOGDSK_ERR_INVALID);
+      continue;
+    }
+
+    drive = (unsigned int)(c - 'A') + 1; /* AH=36hは1がA: */
+    spc = dos_diskfree(drive, &availClus, &bytesPerSec, &totalClus);
+    if (spc == 0xFFFF) {
+      err = MSG(MSG_LOGDSK_ERR_INVALID);
+      continue;
+    }
+
+    dos_setdrive(drive - 1); /* AH=0Ehは0がA: */
+    if (dos_getdrive() != drive - 1) {
+      err = MSG(MSG_LOGDSK_ERR_INVALID);
+      continue;
+    }
+    break;
+  }
+
+  read_path();
+  read_dir();
+  g_cursor = 0;
+  clear_marks();
   draw_screen();
 }
 
@@ -3927,8 +4033,12 @@ int main(int argc, char *argv[])
       do_move();
     } else if (key == 'x' || key == 'X') {
       do_exec();
+    } else if (key == 'l' || key == 'L') {
+      do_logdsk();
     } else if (key == 'q' || key == 'Q') {
       running = 0;
+    } else if (key == KEY_F1) {
+      do_logdsk();
     } else if (key == KEY_F2) {
       do_exec();
     } else if (key == KEY_F3) {
@@ -3943,7 +4053,7 @@ int main(int argc, char *argv[])
       do_mkdir();
     } else if (key == KEY_F10) {
       running = 0;
-      /* F1/F8/F9（およびそれ以外すべて）：まだコマンドが割り当てられて
+      /* F8/F9（およびそれ以外すべて）：まだコマンドが割り当てられて
          いない――g_fkeyLabel[]の予約済み（""）エントリ参照――ので
          無視する。F2は上で処理済み（do_exec()）。第9マイルストーン：
          INT 18hはファンクションキーをそれぞれ独立したスキャンコード

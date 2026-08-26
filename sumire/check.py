@@ -144,6 +144,11 @@ MSG_LIMITS = {
     "MSG_VIEW_LINENO_LABEL":    ("fragment", 40),
     "MSG_VIEW_ERR_OPEN":        ("dialog",   41),
     "MSG_VIEW_CMDLINE":         ("row",      42),
+
+    # milestone 12: Logdsk (F1)
+    "MSG_LOGDSK_PROMPT":        ("fragment", 43),
+    "MSG_LOGDSK_ERR_EMPTY":     ("dialog",   44),
+    "MSG_LOGDSK_ERR_INVALID":   ("dialog",   45),
 }
 
 
