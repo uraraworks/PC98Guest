@@ -199,6 +199,8 @@
 #define ROW_INFO      4
 #define ROW_SEP2      5
 #define ROW_LIST_TOP  6
+#define ROW_GAP       23  /* 一覧とファンクションキー行の間の行。どちらの通常描画も
+                              触れない――方針A：draw_screen_frame()側で明示的に埋める */
 #define ROW_CMD       24
 
 #define CMDLINE_WIDTH 79  /* 最下段の80桁目（0始まりで79桁目）に書き込むとコンソールが
@@ -207,6 +209,8 @@
 
 #define COL_LEFT      0
 #define COL_RIGHT     40
+#define COL_GAP       39  /* 左右2列の一覧の間、1セル分の隙間 */
+#define COL_LAST      79  /* 画面の最終列。どちらの列描画（幅39セル）も届かない */
 
 /* ---- ヘッダボックス（0～5行目）を半角罫線文字で描画 ----
  * 第5マイルストーン：画面出力をテキストVRAMへの直接書き込みに移した
@@ -3703,6 +3707,7 @@ void draw_screen_frame(void)
   int row;
   int leftIdx;
   int rightIdx;
+  int col;
   char entrybuf[40];
 
   visibleCount = g_count;
@@ -3710,12 +3715,17 @@ void draw_screen_frame(void)
   leftCount = (visibleCount > LEFT_ROWS) ? LEFT_ROWS : visibleCount;
   rightCount = visibleCount - leftCount;
 
-  /* ここでは画面全体のクリアは行わない（上のvram_*節参照）：
-     以下の各行は呼ばれるたびに常にすべて再生成されるので、
-     残ってしまう内容があるとすればそれは、今回のフレームが
-     *再訪しない*セルに残った古い値だけである――エントリ
-     ループ内の2つの「else」分岐と、draw_cmdline()の常に走る
-     末尾の埋め処理が、まさにこれを無くすために存在する。
+  /* ここではESC[2Jのような画面全体のクリアは行わない（上の
+     vram_*節参照）：その代わり、この関数自身が毎回25×80セル
+     全部を必ず再訪する――ヘッダボックス（0-5行目、罫線含む）、
+     一覧の2列（6-22行目、隙間の39桁目と最終列の79桁目も含む）、
+     23行目（ROW_GAP）、コマンド行（24行目）。内蔵ビューアは
+     0-79桁・2-23行目を使うので、ファイラの描画がこの全体を
+     覆っていないと、ビューアからESCで戻ったときにその内容が
+     ファイラの描画が再訪しないセルに残ってしまう（実機で確認
+     済み）。個々の値についてはvram_ank()/vram_puts_cells()が
+     vram_set_cell()経由で「変化があったセルだけ実際に書く」
+     ため、全セルを対象にしてもちらつきや速度の問題にはならない。
      ヘッダボックス（0-5行目）：半角罫線の枠。 */
   draw_title_row();
 
@@ -3756,6 +3766,25 @@ void draw_screen_frame(void)
     } else {
       vram_puts_cells(ROW_LIST_TOP + row, COL_RIGHT, "", ATTR_BASE, 39);
     }
+
+    /* 39桁目（左右2列の隙間）と79桁目（画面の最終列）は、上の
+       どちらのvram_puts_cells()呼び出し（幅39セル）も届かない。
+       内蔵ビューアは0～79桁を丸ごと使うので、ここを塗らずに
+       放置するとESCで一覧へ戻ったときにビューアの残骸がここに
+       残る（実機で確認済み）。方針A：「戻ってくる経路」ごとに
+       個別対策を積み増すのではなく、ファイラの通常描画自体が
+       毎フレーム25×80セル全部を必ず覆うようにして、根本を断つ。
+       vram_ank()はvram_set_cell()経由なので、値が変わらない
+       限り実際の書き込みは起きず、差分更新の性質は保たれる。 */
+    vram_ank(ROW_LIST_TOP + row, COL_GAP, ' ', ATTR_BASE);
+    vram_ank(ROW_LIST_TOP + row, COL_LAST, ' ', ATTR_BASE);
+  }
+
+  /* 23行目（ROW_GAP）：一覧（6～22行目）とファンクションキー行
+     （24行目）の間にあり、どちらの通常描画も一度も触れない。
+     同じ理由でここも明示的に空白にする。 */
+  for (col = 0; col < VRAM_COLS; col++) {
+    vram_ank(ROW_GAP, col, ' ', ATTR_BASE);
   }
 
   draw_cmdline();
