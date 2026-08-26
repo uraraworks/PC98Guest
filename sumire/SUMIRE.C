@@ -1,166 +1,169 @@
 /*
- * SUMIRE.C - PC-98 / FreeDOS(98) directory browser (milestone 7)
- * Milestone 7 renames this program to Sumire/すみれ (from its earlier
- * placeholder name FILER), fixes a measured row-0 flicker (see
- * draw_title_row() below), right-justifies the disk-totals row's numbers
- * and drops their unit suffix (see draw_disk_line()), and adds F2/eXec
- * (do_exec()), the original's own program-launch command, at the
- * original's own F2 position.
+ * SUMIRE.C - PC-98 / FreeDOS(98) 用ディレクトリブラウザ（第7マイルストーン）
+ * 第7マイルストーンで、このプログラムの名前を（それまでの仮名 FILER から）
+ * Sumire/すみれ に改名し、実測で見つかった行0のちらつきを修正し
+ * （下の draw_title_row() 参照）、ディスク合計行の数値を右詰めにして
+ * 単位サフィックスを外し（draw_disk_line() 参照）、本家自身の
+ * プログラム起動コマンドである F2/eXec（do_exec()）を本家と同じ F2 の
+ * 位置に追加した。
  *
- * Independent, from-scratch implementation. See README.md in this
- * directory for the independence declaration. All on-screen text below
- * is original wording written for this project; it does not reproduce
- * any text from any existing product.
+ * ゼロから独立に実装したもの。独立性についての宣言はこのディレクトリの
+ * README.md を参照。以下の画面表示文字列はすべてこのプロジェクトのために
+ * 書き下ろしたオリジナルの文言であり、既存製品のいかなる文字列も再現
+ * していない。
  *
- * Milestone 1 scope: directory listing, cursor movement, quit only.
- * Milestone 2 adds: marking files (SPACE/TAB/HOME), moving into/out of
- * a directory (Enter, "." and ".." shown like the original), and
- * deleting the marked files (or the file under the cursor when nothing
- * is marked) with a confirm dialog. Directories are never marked and
- * are never deleted by this command.
- * Milestone 3 adds: a reusable modal text-input dialog (input_dialog()),
- * used by Rename (R, single entry under the cursor) and mKdir (K, create
- * a directory in the current path). Both re-use the same dialog and show
- * a failure message inline in the same box rather than a separate line,
- * keeping the prompt and the partially-typed text on screen.
- * Milestone 4 adds: Copy (C) and Move (M), using the same "marked set if
- * non-empty, else the cursor entry" target rule as Delete, with a
- * per-file Y/N/ESC overwrite prompt (the original refuses same-name
- * copies outright with no prompt - see README's independence notes for
- * why this implementation asks instead). It also replaces the bottom
- * command line: instead of one long bilingual "key:description" message
- * capped at CMDLINE_WIDTH cells, it now shows English command words with
- * their key letter in reverse video.
- * Milestone 5 replaces the DOS-console/ANSI screen writer with direct
- * text-VRAM writes (see below), draws the header/dialog frames with the
- * original's half-width line-drawing codes instead of full-width ones
- * (BOX_WIDTH grows from 76 to 78 cells accordingly), reproduces the
- * cursor-row/command-key highlight with the VRAM attribute byte's
- * reverse-video bit instead of ESC[7m, and only ever writes the cells
- * that actually changed between frames instead of clearing the whole
- * screen first.
+ * 第1マイルストーンの範囲：ディレクトリ一覧表示・カーソル移動・終了のみ。
+ * 第2マイルストーンで追加：ファイルのマーク（SPACE/TAB/HOME）、
+ * ディレクトリへの出入り（Enter、"."と".."は本家同様に表示）、
+ * マークされたファイル（何もマークされていなければカーソル位置の
+ * ファイル）を確認ダイアログ付きで削除。ディレクトリは決してマークされず、
+ * このコマンドで削除されることもない。
+ * 第3マイルストーンで追加：再利用可能なモーダルテキスト入力ダイアログ
+ * （input_dialog()）。Rename（R、カーソル位置の1件のみ対象）と
+ * mKdir（K、カレントパスにディレクトリを作成）が共用する。どちらも
+ * 同じダイアログを使い回し、失敗メッセージを別行にせず同じボックス内に
+ * インラインで表示することで、プロンプトと入力途中の文字列を画面に
+ * 残したままにする。
+ * 第4マイルストーンで追加：Copy（C）と Move（M）。ターゲットの決め方は
+ * Delete と同じ「マークが空でなければマーク集合、空ならカーソル位置の
+ * 1件」というルールで、ファイルごとに Y/N/ESC の上書き確認を行う
+ * （本家はプロンプトなしで同名コピーを一律拒否する。この実装が代わりに
+ * 尋ねる理由は README の独立性に関する注記を参照）。また最下段の
+ * コマンド行も置き換え、CMDLINE_WIDTH セルに収まる長い日英併記の
+ * 「キー:説明」メッセージ1行だった従来方式をやめ、英語のコマンド単語と
+ * そのキー文字を反転表示で示す方式にした。
+ * 第5マイルストーンで、DOSコンソール/ANSIによる画面書き込みを廃止し、
+ * テキストVRAMへの直接書き込みに置き換えた（下記参照）。ヘッダ／ダイアログの
+ * 枠を本家自身の半角罫線コードで描くようにし（これに伴い BOX_WIDTH は
+ * 76から78セルへ拡張）、カーソル行／コマンドキーの強調表示は ESC[7m の
+ * 代わりにVRAM属性バイトの反転ビットで再現し、画面全体をクリアしてから
+ * 描き直す方式をやめて、フレーム間で実際に変化したセルだけを書くように
+ * した。
  *
- * Built with SmallerC (C89-ish subset, 16-bit small-model MZ EXE).
- * Milestone 5 moves all screen *content* drawing off the DOS console and
- * onto direct text-VRAM writes (see the vram_* functions below and
- * docs/tvram-measure-01.md / docs/filer-measure-03.md) - this fixes a
- * header frame that measured as invisible (this font has no glyph for
- * the full-width box-drawing characters milestones 1-4 used), a
- * flickering per-frame ESC[2J, and lets the original's own half-width
- * line-drawing codes be used, which the DOS console cannot pass through
- * (it treats 0x81-0x9F as Shift_JIS lead bytes). A few small, purely
- * ASCII pieces (showing/hiding the hardware text cursor, positioning it
- * during input_dialog(), releasing/restoring the bottom function-key
- * line) still go through DOS console ANSI-style escape sequences
- * (measured against WebNP2/FreeDOS(98); see docs/escape-measure-01.md) -
- * none of that carries SJIS text, so none of it is affected by the
- * problem VRAM writes solve. Directory access uses plain DOS INT 21h
- * services (AH=1Ah/4Eh/4Fh/47h/19h/36h), which are documented, generic
- * DOS APIs and not derived from any particular program's source code.
+ * SmallerC（C89寄りのサブセット、16ビット・スモールモデルの MZ EXE）で
+ * ビルド。第5マイルストーンで、画面の*内容*描画はすべて DOS コンソールから
+ * テキストVRAMへの直書き（下の vram_* 関数群、および
+ * docs/tvram-measure-01.md / docs/filer-measure-03.md 参照）へ移した。
+ * これにより、（1）このフォントには全角罫線文字のグリフが無く
+ * 第1～4マイルストーンで使っていたヘッダ枠が実測すると何も表示されて
+ * いなかった問題、（2）毎フレーム ESC[2J を送っていたことによる
+ * ちらつき、（3）DOSコンソールは 0x81-0x9F を Shift_JIS の先頭バイトと
+ * 解釈するため通せなかった本家自身の半角罫線コードが使えなかった問題、
+ * の3つを解決した。ごく一部の純ASCIIな処理（ハードウェアテキスト
+ * カーソルの表示／非表示、input_dialog() 中のカーソル位置決め、最下段
+ * ファンクションキー行の解放・復元）は引き続きDOSコンソールのANSI風
+ * エスケープシーケンスを通す（WebNP2/FreeDOS(98)で実測。
+ * docs/escape-measure-01.md 参照）。これらはSJISテキストを一切運ばないため
+ * VRAM書き込みで解決した問題の影響を受けない。ディレクトリアクセスは
+ * 素の DOS INT 21h サービス（AH=1Ah/4Eh/4Fh/47h/19h/36h）を使っており、
+ * これらは文書化された汎用DOS APIであって特定のプログラムのソースコード
+ * に由来するものではない。
  *
- * Screen output never goes through stdio - printf()/puts()/putchar()
- * must not be used for it.
+ * 画面出力は一切 stdio を経由しない。printf()/puts()/putchar() を
+ * 画面表示に使ってはならない。
  *
- * Screen text is bilingual (Japanese / English); see the message
- * table below. Select with the /J (Japanese, default) or /E (English)
- * command line switch.
+ * 画面文字列は日英バイリンガル対応（下のメッセージテーブル参照）。
+ * コマンドラインスイッチ /J（日本語、既定）または /E（英語）で選択する。
  *
- * Milestone 6 replaces the milestone-4 command line with the measured
- * real-product bottom row: ten fixed function-key fields (see
- * g_fkeyLabel[]/g_fkeyCol[]/draw_cmdline() and docs/filer-measure-05.md),
- * with F3/F4/F5 kept at the original's own Copy/Delete/Rename positions
- * and the rest of this program's commands placed in unused slots; slots
- * for commands this program does not implement (Logdsk/eXec/Sort/Find/
- * Tree/...) are left blank rather than named. Every command remains
- * reachable by its plain letter key exactly as before - the function
- * keys are an additional entry point.
- * Milestone 9 centers the title text inside "<< >>" on row 0 (see
- * draw_title_row() below) and migrates key input from DOS INT 21h
- * AH=08h to BIOS INT 18h AH=00h (see dos_getch()/dos_kbhit() below and
- * docs/dos-key-measure-01.md): DOS's console driver ate ^S as XOFF and
- * never delivered ROLL UP/ROLL DOWN/HELP at all (all measured), and none
- * of that goes through the DOS console any more since screen output
- * already moved to direct VRAM writes at milestone 5. INT 18h reports a
- * function key by its own scan code directly, so the old "0x1B then
- * check dos_kbhit() for a queued second byte" trick milestone 6 needed
- * is gone along with it - see the KEY_* / dos_getch() comments below.
+ * 第6マイルストーンで、第4マイルストーンのコマンド行を実測した本家の
+ * 最下段行に置き換えた：ファンクションキー10個ぶんの固定フィールド
+ * （g_fkeyLabel[]/g_fkeyCol[]/draw_cmdline() および
+ * docs/filer-measure-05.md 参照）で、F3/F4/F5は本家自身のCopy/Delete/
+ * Renameの位置のまま、このプログラムの他のコマンドは空いている枠に
+ * 配置する。このプログラムが実装していないコマンド（Logdsk/eXec/Sort/
+ * Find/Tree/…）の枠は、名前を付けず空欄のままにする。すべてのコマンドは
+ * 従来どおり普通の文字キーでも到達できる――ファンクションキーは
+ * あくまで追加の入口である。
+ * 第9マイルストーンで、行0のタイトル文字列を "<< >>" の中央に配置し
+ * （下の draw_title_row() 参照）、キー入力を DOS INT 21h AH=08h から
+ * BIOS INT 18h AH=00h へ移行した（下の dos_getch()/dos_kbhit() および
+ * docs/dos-key-measure-01.md 参照）：DOSのコンソールドライバは ^S を
+ * XOFF として飲み込み、ROLL UP/ROLL DOWN/HELP は一切届かなかった
+ * （すべて実測済み）。画面出力はすでに第5マイルストーンで直接VRAM書き込みに
+ * 移っているため、これらはもはやDOSコンソールを一切経由しない。
+ * INT 18h はファンクションキーをそれ自身のスキャンコードとして直接
+ * 報告してくるため、第6マイルストーンで必要だった旧来の
+ * 「0x1Bを受けてから dos_kbhit() で追いのバイトが来ているか確認する」
+ * トリックはこれとともに不要になった――下の KEY_* / dos_getch() の
+ * コメント参照。
  */
 
 #include <string.h>
 
-/* ---- constants ------------------------------------------------------ */
+/* ---- 定数 ------------------------------------------------------ */
 
 #define MAX_ENTRIES   1024
-#define NAME_LEN      13     /* 8.3 name + dot + NUL, as returned by DOS */
-#define INPUT_MAXLEN  12     /* max chars (not counting NUL) enterable in
-                                 input_dialog(): an 8.3 name, same limit as
-                                 NAME_LEN-1; see do_rename()/do_mkdir() */
-#define DEST_MAXLEN   40     /* max chars enterable for a Copy/Move
-                                 destination directory (e.g. "B:\\SUBDIR"),
-                                 a different (longer) limit than
-                                 INPUT_MAXLEN because this is a path, not
-                                 an 8.3 name; see do_copy()/do_move() */
-#define COPY_BUF_SIZE 4096   /* size of the single global file-copy
-                                 buffer g_copybuf; see its declaration */
+#define NAME_LEN      13     /* 8.3形式の名前 + ドット + NUL。DOSが返す形式に合わせている */
+#define INPUT_MAXLEN  12     /* input_dialog() で入力できる最大文字数（NULを含まない）：
+                                 8.3形式の名前で、NAME_LEN-1 と同じ上限。
+                                 do_rename()/do_mkdir() 参照 */
+#define DEST_MAXLEN   40     /* Copy/Move の移動先ディレクトリ（例 "B:\SUBDIR"）として入力できる
+                                 最大文字数。これはパスであって8.3名では
+                                 ないため、INPUT_MAXLENとは異なる（より長い）
+                                 上限になっている。do_copy()/do_move() 参照 */
+#define COPY_BUF_SIZE 4096   /* ファイルコピー用に共有するグローバルバッファ g_copybuf の
+                                 サイズ。その宣言部分も参照 */
 #define LEFT_ROWS     17
-#define VISIBLE_MAX   34     /* 17 rows x 2 columns; see README for the
-                                 milestone-1 "no paging yet" limitation */
+#define VISIBLE_MAX   34     /* 17行×2列。ページング未実装（第1マイルストーンの制約）に
+                                 ついてはREADMEを参照 */
 
-/* ---- cursor movement directions (used by move_cursor) ---------------- */
+/* ---- カーソル移動方向（move_cursorで使用） ---------------------- */
 #define DIR_UP    1
 #define DIR_DOWN  2
 #define DIR_LEFT  3
 #define DIR_RIGHT 4
 
-/* ---- key codes, as returned by dos_getch() below ---------------------
- * Milestone 9 moved dos_getch()/dos_kbhit() from DOS INT 21h AH=08h/0Bh
- * to BIOS INT 18h AH=00h/01h (see those functions further down), but
- * these values are kept exactly as they were under DOS so none of the
- * comparisons against them elsewhere in this file had to change.
- * INT 18h AH=00h returns AH=scan code, AL=character code, with AL=0 for
- * any key that has no character - all measured with a probe program; see
- * docs/key-measure-01.md, docs/key-measure-02.md, docs/tsukushi-keys.md,
- * docs/dos-key-measure-01.md. dos_getch() itself does the AL/scan-code
- * translation (only it ever sees the raw scan code), returning:
- *   - AL unchanged, when AL is nonzero - this already matches every one
- *     of the plain values below (BS/TAB/ENTER/SPACE/ESC/^E/^X), since
- *     INT 18h's AL for those keys is numerically the same byte DOS's
- *     AH=08h used to return for them (also measured).
- *   - one of KEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT/KEY_HOME/KEY_F1..KEY_F10/
- *     KEY_ROLLUP/KEY_ROLLDOWN below, translated from the scan code, when
- *     AL is 0 (no character).
- *   - 0 for any other no-character key (unassigned in this program;
- *     e.g. HELP/INS/DEL - not yet given a use, see README.md's TODO).
+/* ---- キーコード（下の dos_getch() が返す値） ---------------------
+ * 第9マイルストーンで dos_getch()/dos_kbhit() を DOS INT 21h AH=08h/0Bh
+ * から BIOS INT 18h AH=00h/01h へ移した（該当の関数は下の方にある）が、
+ * これらの値そのものは DOS の頃と全く同じ値に保ってあるので、この
+ * ファイルの他の場所でこれらと比較している箇所は一切変更していない。
+ * INT 18h AH=00h は AH=スキャンコード、AL=文字コードを返し、文字を
+ * 持たないキーでは AL=0 になる――すべてプローブ用プログラムで実測済み。
+ * docs/key-measure-01.md、docs/key-measure-02.md、docs/tsukushi-keys.md、
+ * docs/dos-key-measure-01.md 参照。dos_getch() 自身がAL／スキャンコードの
+ * 変換を行い（生のスキャンコードを見るのはこの関数だけ）、次のように
+ * 返す：
+ *   - AL が0でなければ AL をそのまま返す――これは下の素の値
+ *     （BS/TAB/ENTER/SPACE/ESC/^E/^X）すべてに既に一致している。
+ *     INT 18h でのこれらキーのALは、DOSのAH=08hがかつて返していたのと
+ *     数値として同じバイトだからである（これも実測済み）。
+ *   - ALが0（文字を持たない）のときは、スキャンコードから変換した
+ *     KEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT/KEY_HOME/KEY_F1..KEY_F10/
+ *     KEY_ROLLUP/KEY_ROLLDOWN のいずれかを返す。
+ *   - それ以外の文字を持たないキー（このプログラムでは未割り当て。
+ *     例：HELP/INS/DEL――まだ用途を与えていない。README.mdのTODO参照）
+ *     は0を返す。
  * ------------------------------------------------------------------- */
 #define KEY_UP     0x0b
 #define KEY_DOWN   0x0a
-#define KEY_LEFT   0x08   /* same code as BS; treated as left in the list */
+#define KEY_LEFT   0x08   /* BSと同じコードだが、このリストの中では左方向として扱う */
 #define KEY_RIGHT  0x0c
 #define KEY_HOME   0x1a
 #define KEY_ESC    0x1b
 #define KEY_TAB    0x09
 #define KEY_SPACE  0x20
 #define KEY_ENTER  0x0d
-/* WordStar-style alternates, up/down only. ^S (0x13, "left" in the
- * WordStar scheme) must NOT be bound here: real DOS's console driver
- * treats ^S as XOFF and freezes screen output until ^Q is pressed
- * (confirmed on real hardware, through the DOS console this program no
- * longer uses for input as of milestone 9 - ^S was never re-measured
- * against INT 18h directly, so it stays unbound rather than assigned on
- * a guess). ^D is left unbound too: unlike ^E/^X it has not been
- * confirmed not to collide with anything. */
-#define KEY_CTRL_E 0x05   /* alternate for up */
-#define KEY_CTRL_X 0x18   /* alternate for down */
+/* WordStar風の代替キー、上下移動のみ。^S（0x13、WordStar方式では
+ * 「左」）は絶対にここで割り当ててはならない：実機のDOSコンソール
+ * ドライバは ^S を XOFF として扱い、^Q が押されるまで画面出力を
+ * 凍結させる（実機で確認済み。ただしこのプログラムは第9マイルストーン
+ * 以降、入力にDOSコンソールをもう使っていないため、^S自体はINT 18h
+ * に対して直接再実測していない――なので推測で割り当てず、未割当の
+ * ままにしてある）。^Dも未割当のままにしてある：^E/^Xと違って何かと
+ * 衝突しないことを確認していないため。 */
+#define KEY_CTRL_E 0x05   /* 上方向の代替キー */
+#define KEY_CTRL_X 0x18   /* 下方向の代替キー */
 
-/* pseudo codes for the function keys, returned by dos_getch() when the
- * INT 18h scan code is F1-F10 (0x62-0x6B measured; see
- * docs/key-measure-01.md/-02.md). Chosen above 0xFF (out of range for
- * any real AL byte or the control-code constants above) so they can
- * never collide with a character keypress. Unlike the old DOS-console
- * scheme (a queued 0x1B + letter pair, see the removed FKEY_CODE_*
- * constants this replaces), INT 18h reports a function key as a single
- * distinct scan code, so main()'s dispatch no longer needs to peek at
- * dos_kbhit() after an ESC to tell the two apart. */
+/* ファンクションキー用の疑似コード。dos_getch() は INT 18h の
+ * スキャンコードが F1-F10（0x62-0x6Bと実測済み。docs/key-measure-01.md/
+ * -02.md 参照）のときにこれらを返す。実際のALバイトや上の制御コード
+ * 定数の範囲外である 0xFF より大きい値を選んであるので、文字キー
+ * 入力と衝突することは決してない。旧DOSコンソール方式（0x1Bに文字を
+ * 続けてキューに積む方式。これが置き換えた、削除済みの FKEY_CODE_*
+ * 定数を参照）と異なり、INT 18h はファンクションキーを単一の
+ * 独立したスキャンコードとして報告してくるため、main() のディスパッチ
+ * はESCの後で dos_kbhit() を覗いて両者を区別する必要がもうない。 */
 #define KEY_F1  0x100
 #define KEY_F2  0x101
 #define KEY_F3  0x102
@@ -172,14 +175,13 @@
 #define KEY_F9  0x108
 #define KEY_F10 0x109
 
-/* ROLL UP/ROLL DOWN: scan codes measured against real INT 18h
- * (docs/bios-key-measure-01.md: ROLL UP=0x36, ROLL DOWN=0x37, AL=0 for
- * both). Assigned only inside the built-in viewer (do_view()), which is
- * the one place their behaviour has also been measured off real hardware
- * (docs/filer-measure-07.md: ROLL UP advances VIEW_CONTENT_ROWS lines,
- * ROLL DOWN goes back the same amount and stops at the first line) - the
- * filer's own list view does not use these codes (its own paging is not
- * implemented yet; see README.md's TODO). */
+/* ROLL UP/ROLL DOWN：実機のINT 18hに対して実測したスキャンコード
+ * （docs/bios-key-measure-01.md：ROLL UP=0x36、ROLL DOWN=0x37、
+ * どちらもAL=0）。組み込みビューア（do_view()）の中でのみ割り当てて
+ * ある。その挙動も実機で実測済みなのはここだけ（docs/filer-measure-07.md：
+ * ROLL UPはVIEW_CONTENT_ROWS行ぶん進み、ROLL DOWNは同じ量だけ戻って
+ * 先頭行で止まる）――ファイラ自身の一覧表示ではこれらのキーは使わない
+ * （一覧側のページング自体が未実装。README.mdのTODO参照）。 */
 #define KEY_ROLLUP   0x10a
 #define KEY_ROLLDOWN 0x10b
 
@@ -199,95 +201,94 @@
 #define ROW_LIST_TOP  6
 #define ROW_CMD       24
 
-#define CMDLINE_WIDTH 79  /* the console can scroll if col 80 (0-based
-                              79) on the bottom row is written; see
-                              draw_screen_frame()'s cmdline truncation */
+#define CMDLINE_WIDTH 79  /* 最下段の80桁目（0始まりで79桁目）に書き込むとコンソールが
+                              スクロールしてしまう。draw_screen_frame() が
+                              コマンド行を切り詰めている理由はこれ */
 
 #define COL_LEFT      0
 #define COL_RIGHT     40
 
-/* ---- header box (rows 0-5) drawn with half-width box-drawing chars ----
- * Milestone 5: screen output moved to direct text-VRAM writes (see the
- * vram_* functions below), so the half-width single-line box characters
- * (0x9C-0x9F etc.) can be used directly - it was only the DOS console
- * output path (AH=40h through ANSI.SYS) that mangled them by treating
- * 0x81-0x9F as Shift_JIS lead bytes (measured; see
- * docs/filer-measure-03.md). These are ANK (1 screen cell) codes, not
- * SJIS text, so they are plain byte constants here, not C strings - they
- * must never be handed to a CP932-aware function like vram_puts_cells()
- * (which would misparse 0x9C.. as an SJIS lead byte needing a trail
- * byte). All width math below is in screen cells via text_width() for
- * real message text, and by direct column counting for these.
+/* ---- ヘッダボックス（0～5行目）を半角罫線文字で描画 ----
+ * 第5マイルストーン：画面出力をテキストVRAMへの直接書き込みに移した
+ * （下の vram_* 関数群参照）ので、半角の単線罫線文字（0x9C-0x9Fなど）を
+ * そのまま使えるようになった――0x81-0x9Fを Shift_JIS の先頭バイトと
+ * 解釈して化けさせていたのは、DOSコンソール側の出力経路（ANSI.SYSを
+ * 通るAH=40h）だけだった（実測済み。docs/filer-measure-03.md参照）。
+ * これらはANK（画面1セル分）のコードでありSJISテキストではないので、
+ * ここではCの文字列ではなく単なるバイト定数として扱っている――
+ * vram_puts_cells() のようなCP932前提の関数に決して渡してはならない
+ * （渡すと0x9C..をトレイルバイトを要求するSJIS先頭バイトと誤解して
+ * しまう）。実際のメッセージ文字列の幅計算はすべてtext_width()による
+ * 画面セル単位で行うが、これらの罫線文字については直接の桁数カウントで
+ * 行う。
  * ------------------------------------------------------------------- */
-#define BOX_WIDTH     78   /* interior width in cells, between the borders */
+#define BOX_WIDTH     78   /* 枠の内側の幅。ボーダーとボーダーの間のセル数 */
 
-#define BOXCH_TL      0x9c  /* topleft corner  */
-#define BOXCH_TR      0x9d  /* topright corner */
-#define BOXCH_BL      0x9e  /* bottomleft corner  */
-#define BOXCH_BR      0x9f  /* bottomright corner */
-#define BOXCH_H       0x95  /* horizontal line */
-#define BOXCH_V       0x96  /* vertical line   */
-#define BOXCH_LT      0x93  /* left T (mid separator, left end)  */
-#define BOXCH_RT      0x92  /* right T (mid separator, right end) */
-#define BOXCH_TJ      0x91  /* top border / inner vertical-divider junction
-                                (row 0); see docs/filer-measure-03.md */
-#define BOXCH_HJ      0x90  /* horizontal line / inner vertical-divider
-                                junction (row 2); see docs/filer-measure-03.md */
+#define BOXCH_TL      0x9c  /* 左上の角 */
+#define BOXCH_TR      0x9d  /* 右上の角 */
+#define BOXCH_BL      0x9e  /* 左下の角 */
+#define BOXCH_BR      0x9f  /* 右下の角 */
+#define BOXCH_H       0x95  /* 水平線 */
+#define BOXCH_V       0x96  /* 垂直線 */
+#define BOXCH_LT      0x93  /* 左T字（中間区切り線の左端） */
+#define BOXCH_RT      0x92  /* 右T字（中間区切り線の右端） */
+#define BOXCH_TJ      0x91  /* 上端の枠と内部の縦区切り線の交差点
+                                （0行目用）。docs/filer-measure-03.md参照 */
+#define BOXCH_HJ      0x90  /* 水平線と内部の縦区切り線の交差点
+                                （2行目用）。docs/filer-measure-03.md参照 */
 
-/* ---- header row 1 (disk totals) vertical dividers -----------------------
- * Row 1 (合計/使用/空き - total/used/free) gets two 0x96 dividers (see
- * docs/filer-measure-03.md); row 0's border and row 2's separator must
- * place a junction char (0x91 / 0x90) directly above/below each divider.
- * Milestone 7 measured the real product's own disk-totals row and found
- * its numbers right-justified with a 1-cell blank margin at the field's
- * right edge, and no "bytes"/"バイト" unit suffix at all (the label
- * already says what it is) - see sappend_field_rj() and draw_disk_line()
- * below.
+/* ---- ヘッダ1行目（ディスク合計）の縦区切り線 -----------------------
+ * 1行目（合計/使用/空き）には0x96の区切り線が2本入る（docs/filer-measure-03.md
+ * 参照）。0行目の枠線と2行目の区切り線は、それぞれの区切り線の真上／
+ * 真下に交差記号（0x91／0x90）を置かなければならない。
+ * 第7マイルストーンで本家自身のディスク合計行を実測したところ、
+ * 数値はフィールド右端に1セル分の余白を残して右詰めになっており、
+ * "bytes"/"バイト" という単位サフィックスは一切付いていなかった
+ * （ラベル側で既に何を表しているか分かるため）――下の
+ * sappend_field_rj() と draw_disk_line() を参照。
  *
- * The three fields are NOT all the same width: the original 20/20/20
- * split (leaving the divider columns at 21/42) left the 3rd field 36
- * cells wide - a lot of dead space to the right of "free", since this
- * program only has 3 fields where the original product had 4 ("Page"
- * included). Instead the divider columns themselves are fixed directly
- * (26/53), splitting BOX_WIDTH's 78 cells into three nearly-equal
- * thirds (25/26/25); each field's width is then derived from those
- * columns so the widths can never drift apart from them. All three still comfortably
- * clear the worst-case field size: a 6-cell label + format_u32()'s
- * widest output ("4,294,967,295", 13 cells) + the 1-cell trailing
- * margin = 20 cells, in either language (measured with check.py's
- * cell_width()). */
+ * 3つのフィールドはすべて同じ幅ではない：元の20/20/20分割（区切り線を
+ * 21/42桁目に置く案）では、このプログラムはフィールドが3つしかない
+ * （本家製品は"Page"を含め4つ）ため、3番目のフィールドが36セルもの
+ * 幅になり、"free"の右側に大きな空白ができてしまう。そこで代わりに
+ * 区切り線の桁位置自体を直接固定し（26／53桁目）、BOX_WIDTHの78セルを
+ * ほぼ等分の3つ（25／26／25）に分割している。各フィールドの幅は
+ * この区切り桁から導出されるので、区切り位置と幅がずれることは
+ * ありえない。3つとも、想定される最悪のフィールドサイズ――ラベル
+ * 6セル分＋format_u32()の最大出力（"4,294,967,295"、13セル）＋
+ * 末尾の1セル分の余白＝20セル――は、どちらの言語でも余裕をもって
+ * 収まる（check.pyのcell_width()で実測確認済み）。 */
 #define DISK_SEP_COL1      26
 #define DISK_SEP_COL2      53
 #define DISK_FIELD1_WIDTH  (DISK_SEP_COL1 - 1)
 #define DISK_FIELD2_WIDTH  (DISK_SEP_COL2 - DISK_SEP_COL1 - 1)
 #define DISK_FIELD3_WIDTH  (BOX_WIDTH - DISK_SEP_COL2)
 
-/* ---- header row 0 (title) right-hand clock field -------------------------
- * "YY-MM-DD HH:MM:SS", 17 cells, shown at the right end of the title row.
- * TITLE_DATETIME_GAP is the blank cell between the title's dash-fill and
- * the clock field. TITLE_DECOR_WIDTH is the fixed-width "<<" + " " +
- * " " + ">>" wrapped directly around the title text (measured on the
- * original - see draw_title_row(); the original's own title is centered
- * inside this bracket pair, with dash-fill runs padding both sides out
- * to the row's fixed width, one more blank cell separating each dash
- * run from the bracket pair). check.py derives g_title's cell-width
- * limit from these plus BOX_WIDTH instead of hardcoding it, so changing
- * any of them changes the enforced limit too. g_title itself is a fixed
- * English string, not part of g_msgJA/g_msgEN - see its own comment
- * near g_fkeyLabel[] below for why. */
+/* ---- ヘッダ0行目（タイトル）右側の時計フィールド -------------------------
+ * "YY-MM-DD HH:MM:SS"、17セル。タイトル行の右端に表示される。
+ * TITLE_DATETIME_GAPは、タイトルのダッシュ埋め部分と時計フィールドの
+ * 間に置く空白セル。TITLE_DECOR_WIDTHは、タイトル文字列を直接囲む
+ * 固定幅の "<<" + " " + " " + ">>" の幅（本家で実測。draw_title_row()
+ * 参照。本家自身のタイトルもこの括弧の中で中央寄せされ、その両側を
+ * ダッシュ埋めで行の固定幅まで埋める。ダッシュの連続部分と括弧の間には
+ * もう1セル空白が入る）。check.pyは、これらの値とBOX_WIDTHから
+ * g_titleのセル幅上限を導出しており、ハードコードしていない――
+ * つまりこれらの値のどれかを変えると強制される上限も一緒に変わる。
+ * g_title自体は固定の英語文字列であり、g_msgJA/g_msgENの一部ではない
+ * ――理由は下の g_fkeyLabel[] 近くにあるコメント参照。 */
 #define DATETIME_WIDTH      17
 #define TITLE_DATETIME_GAP  1
 #define TITLE_DECOR_WIDTH   6
-/* trailing " " + one BOXCH_H cell placed after the clock field and
-   before the top-right corner (measured: real hardware leaves a 1-cell
-   gap plus a border cell between the clock and the corner, not the
-   clock butted right up against it) - see draw_title_row(). */
+/* 時計フィールドの後ろ、右上の角の前に置く末尾の " "＋BOXCH_H
+   セル1つぶん（実測：実機では時計と角の間に、時計が角にぴったり
+   くっつくのではなく、1セルの空白とさらに枠線セル1つが入っている）
+   ――draw_title_row()参照。 */
 #define TITLE_TAIL_WIDTH    2
 
-/* ---- language / message table ----------------------------------------
- * All on-screen text is collected here and looked up by index; no
- * literal UI text is written directly at the call site. See
- * docs/i18n-design.md for the design rationale.
+/* ---- 言語／メッセージテーブル ----------------------------------------
+ * 画面表示文字列はすべてここに集約し、インデックスで引く。呼び出し側で
+ * リテラルのUI文字列を直接書くことはしない。設計の考え方は
+ * docs/i18n-design.md 参照。
  * ------------------------------------------------------------------- */
 
 #define LANG_JA 0
@@ -336,7 +337,7 @@
 #define MSG_EXEC_ERR_FAILED     37
 #define MSG_EXEC_PRESS_KEY      38
 
-/* Milestone 8 (built-in viewer, Enter on a non-COM/EXE file) messages */
+/* 第8マイルストーン（組み込みビューア。COM/EXE以外のファイルでEnter）のメッセージ */
 #define MSG_VIEW_FILENAME_LABEL 39
 #define MSG_VIEW_LINENO_LABEL   40
 #define MSG_VIEW_ERR_OPEN       41
@@ -440,8 +441,8 @@ int g_lang = LANG_JA;
 
 #define MSG(id) (g_msgTables[g_lang][id])
 
-/* checks that both language tables have the same number of entries and
-   that no entry is an empty string; returns 1 if OK, 0 if broken */
+/* 日英両テーブルの要素数が一致していること、どちらにも空文字列が
+   無いことを確認する。OKなら1、壊れていれば0を返す */
 int msg_selftest(void)
 {
   int nJA;
@@ -472,37 +473,38 @@ int msg_selftest(void)
  * はなく、この文字列単独に対して行うよう追従させてある。 */
 char *g_title = "Sumire - Directory viewer";
 
-/* ---- bottom row: PC-98 function-key assignment (language-independent) --
- * Milestone 6 replaces the milestone-4 "key:description" command line
- * with the original's own bottom-row convention, measured directly off a
- * real FD 3.13(98) unit (see docs/filer-measure-05.md): ten fixed 6-cell
- * fields, one per function key F1..F10 (g_fkeyLabel[i] is F(i+1)'s
- * label), left-aligned at the columns measured off the real attribute
- * plane in g_fkeyCol[]. This line is the same in both languages by
- * design - command names are plain English abbreviations, not translated
- * text - so it lives here as ordinary C data, not in g_msgJA/g_msgEN.
- * The old movement/mark/open legend ("Arrow:move SP/Tab:mark ...") is
- * gone: the measured original does not show operation help on this row
- * at all, only command locations, and those operations remain available
- * exactly as before (see main()'s key dispatch) - only where they were
- * *described on screen* changed.
- * An empty g_fkeyLabel[i] ("") means that function key is not
- * implemented yet by this program (e.g. the original's Logdsk/eXec/Sort/
- * Find/Tree/... slots) - its position is still reserved (drawn blank,
- * same as the gaps between fields) rather than reused, so a later
- * milestone can add the command without moving anything else and without
- * this program claiming to offer a command it does not have.
- * g_fkeyHiPos[i] is the index into g_fkeyLabel[i] of the character that
- * is the actual dispatch key in main() - e.g. mKdir's is 'K' at index 1,
- * matching the 'k'/'K' case there; -1 disables the highlight (used only
- * together with an empty label). Every non-empty label's key here is
- * also still reachable as a plain letter key, unchanged from milestone
- * 4/5 - the function keys are an additional entry point, not a
- * replacement. */
+/* ---- 最下段：PC-98のファンクションキー割り当て（言語非依存） --
+ * 第6マイルストーンで、第4マイルストーンの「キー:説明」コマンド行を、
+ * 実機のFD 3.13(98)から直接実測した本家自身の最下段行の慣習
+ * （docs/filer-measure-05.md参照）に置き換えた：ファンクションキー
+ * F1～F10それぞれに対応する、幅6セルの固定フィールドが10個
+ * （g_fkeyLabel[i]がF(i+1)のラベル）で、実機の属性面から実測した
+ * 桁位置（g_fkeyCol[]）に左詰めで配置される。この行はコマンド名が
+ * 単なる英語の略称であって翻訳対象の文言ではないという設計により、
+ * 意図的にどちらの言語でも同じにしてある――そのためg_msgJA/g_msgEN
+ * ではなく、ここに普通のCデータとして置いてある。
+ * 旧来の移動／マーク／開くの説明行（"Arrow:move SP/Tab:mark ..."）は
+ * 廃止した：実測した本家はこの行に操作説明を一切表示しておらず、
+ * コマンドの位置だけを示している。それらの操作自体は従来どおり
+ * すべて使用可能なままである（main()のキーディスパッチ参照）――
+ * 変わったのは*画面上での説明のされ方*だけである。
+ * g_fkeyLabel[i]が空文字列（""）であることは、そのファンクションキーが
+ * このプログラムではまだ実装されていない（例：本家のLogdsk/eXec/Sort/
+ * Find/Tree/…の枠）ことを意味する――その位置は（フィールド間の隙間と
+ * 同様に）空白のまま予約され、使い回されない。これにより将来の
+ * マイルストーンで他を動かすことなくコマンドを追加でき、かつ
+ * 実際には持っていないコマンドを持っているかのように見せることもない。
+ * g_fkeyHiPos[i]は、main()での実際のディスパッチキーとなる文字の
+ * g_fkeyLabel[i]内でのインデックスである――例えばmKdirは'K'がインデックス1
+ * で、そこの 'k'/'K' のcaseと対応している。-1はハイライト無効
+ * （空ラベルとの組み合わせでのみ使用）。ここにある空でないラベルの
+ * キーはすべて、第4/5マイルストーンから変わらず、普通の文字キーでも
+ * 引き続き到達可能である――ファンクションキーは置き換えではなく
+ * 追加の入口である。 */
 #define FKEY_COUNT       10
 
-#define IDLE_POLL_SPIN  3000  /* busy-wait between dos_kbhit() polls in
-                                 main()'s idle loop - see its comment */
+#define IDLE_POLL_SPIN  3000  /* main()のアイドルループでdos_kbhit()をポーリングする間の
+                                 ビジーウェイト――そのコメントを参照 */
 #define FKEY_FIELD_WIDTH 6
 
 int g_fkeyCol[] = { 4, 11, 18, 25, 32, 42, 49, 56, 63, 70 };
@@ -512,60 +514,61 @@ char *g_fkeyLabel[] = {
 };
 int g_fkeyHiPos[] = { -1, 1, 0, 0, 0, 0, 1, -1, -1, 0 };
 
-/* ---- built-in viewer (milestone 8, ROLL UP/ROLL DOWN added in milestone 11)
- * Enter on a non-directory entry whose extension is not COM/EXE opens a
- * read-only, full-screen text viewer instead of doing nothing - real
- * program launch stays on F2/X (do_exec()), unchanged. Screen layout and
- * key behaviour below are measured off real hardware; see
- * docs/filer-measure-07.md. ROLL UP advances VIEW_CONTENT_ROWS (22) lines
- * (measured: no overlap with the previous page, since the content area is
- * exactly 22 lines), ROLL DOWN goes back the same amount and stops at the
- * first line - see do_view() below. The filer's own list view does not
- * get these keys in this milestone: its own paging is not implemented and
- * the original's behaviour there has not been measured (see README.md's
- * TODO).
- * The file is never read into memory as a whole (small-model 64KB data
- * segment already holds the directory listing and the VRAM shadow
- * buffers); it is read forward, through a small buffer, one display line
- * at a time, and the display is (re)built by discarding forward from the
- * start of the file whenever the target line is not simply "one more than
- * what is already on screen" - see view_goto_line()/view_render() below.
- * There is no random-access line index kept in memory, so this program
- * never allocates memory proportional to the file's line count. */
-#define VROW_HEADER        0    /* "File name:"/"Line No:" row */
-#define VROW_BLANK         1    /* always-empty row, per the measured layout */
-#define VROW_CONTENT_TOP   2    /* first of the 22 file-content rows */
-#define VIEW_CONTENT_ROWS  22   /* measured: rows 2-23 */
-#define VROW_CMD           24   /* same physical row as the filer's own
-                                   function-key row - reused, not a second
-                                   copy of it (see draw_view_cmdline()) */
-#define VIEW_TAB_WIDTH     8    /* measured: tabs expand to the next
-                                   multiple of 8 display columns */
-#define VIEW_READ_BUF      512  /* disk-read chunk size for the viewer's
-                                   own buffered reader - see vreader_getc();
-                                   never read the file one byte at a time */
-#define VIEW_LINE_BUF      88   /* one display line is at most VRAM_COLS
-                                   (80) cells, which is at most 80 bytes
-                                   (every cell costs exactly 1 byte,
-                                   whether ANK or one half of a zenkaku
-                                   pair) plus room for the 2-byte
-                                   end-of-line mark and a NUL */
-#define VIEW_PATH_BUF      96   /* g_path (<=79 chars incl. drive/backslash)
-                                   + an 8.3 name; same sizing as the other
-                                   full-path buffers in this file (see
-                                   do_delete()'s path[96]) */
+/* ---- 組み込みビューア（第8マイルストーン、ROLL UP/ROLL DOWNは第11マイルストーンで追加）
+ * ディレクトリでないエントリで拡張子がCOM/EXEでないものにEnterを
+ * 押すと、何もしない代わりに読み取り専用のフルスクリーンテキスト
+ * ビューアを開く――実際のプログラム起動はF2/X（do_exec()）のままで
+ * 変更なし。以下の画面レイアウトとキー動作は実機で実測したもの。
+ * docs/filer-measure-07.md参照。ROLL UPはVIEW_CONTENT_ROWS（22）行
+ * 進む（実測：内容表示領域がちょうど22行なので前ページとの重なりは
+ * 無い）。ROLL DOWNは同じ量だけ戻り、先頭行で止まる――下のdo_view()
+ * 参照。ファイラ自身の一覧表示ではこのマイルストーンでこれらのキーは
+ * 使えない：一覧側のページング自体が未実装であり、本家でのそちら側の
+ * 挙動も実測していない（README.mdのTODO参照）。
+ * ファイルを丸ごとメモリに読み込むことは決してしない
+ * （スモールモデルの64KBデータセグメントには既にディレクトリ一覧と
+ * VRAMシャドウバッファが入っている）。小さなバッファを介して1回に
+ * 表示行1行ぶんずつ前方向に読み進め、目的の行が「今画面に出ている
+ * 行の単なる次の行」ではない場合はファイル先頭から前方に読み捨てて
+ * 表示を作り直す――下のview_goto_line()/view_render()参照。
+ * メモリ上にランダムアクセス用の行インデックスは一切保持しないため、
+ * このプログラムはファイルの行数に比例したメモリを確保することが
+ * 決してない。 */
+#define VROW_HEADER        0    /* "File name:"/"Line No:" の行 */
+#define VROW_BLANK         1    /* 常に空の行（実測したレイアウトどおり） */
+#define VROW_CONTENT_TOP   2    /* 22行あるファイル内容行の最初の行 */
+#define VIEW_CONTENT_ROWS  22   /* 実測：2～23行目 */
+#define VROW_CMD           24   /* ファイラ自身のファンクションキー行と物理的に同じ行――
+                                   使い回しであり2つ目のコピーではない
+                                   （draw_view_cmdline()参照） */
+#define VIEW_TAB_WIDTH     8    /* 実測：タブは表示上の桁位置で次の8の倍数まで
+                                   展開される */
+#define VIEW_READ_BUF      512  /* ビューア自身のバッファ付きリーダー用ディスク読み込み
+                                   チャンクサイズ――vreader_getc()参照。
+                                   ファイルを1バイトずつ読むことは決して
+                                   しない */
+#define VIEW_LINE_BUF      88   /* 1つの表示行は最大でVRAM_COLS（80）セル、すなわち最大80バイト
+                                   （どのセルもANKでも全角の半分でも
+                                   ちょうど1バイト消費する）に加えて、
+                                   2バイトの行末マークとNUL1つ分の
+                                   余裕を持たせてある */
+#define VIEW_PATH_BUF      96   /* g_path（ドライブ／バックスラッシュを含め79文字以下）
+                                   ＋8.3形式の名前。このファイルの他の
+                                   フルパス用バッファ（do_delete()の
+                                   path[96]参照）と同じサイズの考え方 */
 
-/* end-of-line mark: a full-width down arrow (CP932 0x81 0xAB), drawn only
-   when a display line actually ended on a real line terminator (never on
-   a wrapped line, and never on an unterminated final line - see
-   view_read_line()'s hadNL output). This exact glyph is this project's
-   own choice, not a reproduction of the original product's - the measured
-   fact is only that *some* full-width end-of-line mark is shown (see
-   docs/filer-measure-07.md); its precise appearance was not measured. */
+/* 行末マーク：全角の下向き矢印（CP932の0x81 0xAB）。表示行が
+   実際に本物の行終端で終わったときにのみ描画する（折り返しでは
+   決して描かず、末尾に改行の無い最終行でも決して描かない――
+   view_read_line()のhadNL出力参照）。この字形自体はこのプロジェクト
+   独自の選択であって本家製品を再現したものではない――実測で
+   分かっている事実は、*何らかの*全角の行末マークが表示される
+   ということだけであり（docs/filer-measure-07.md参照）、その正確な
+   見た目までは実測していない。 */
 #define VIEW_EOL_MARK_B1  0x81
 #define VIEW_EOL_MARK_B2  0xab
 
-/* ---- global state ------------------------------------------------------ */
+/* ---- グローバル状態 ------------------------------------------------------ */
 
 char g_name[MAX_ENTRIES * NAME_LEN];
 unsigned char g_attr[MAX_ENTRIES];
@@ -573,54 +576,55 @@ unsigned int g_time[MAX_ENTRIES];
 unsigned int g_date[MAX_ENTRIES];
 unsigned int g_sizeLo[MAX_ENTRIES];
 unsigned int g_sizeHi[MAX_ENTRIES];
-unsigned char g_marked[MAX_ENTRIES]; /* 1 = marked; directories are never
-                                         marked (see mark_cursor()) */
+unsigned char g_marked[MAX_ENTRIES]; /* 1＝マーク済み。ディレクトリは決してマークされない
+                                         （mark_cursor()参照） */
 
-int g_count;        /* number of entries actually stored (<= MAX_ENTRIES) */
-int g_truncated;     /* 1 if the directory had more than MAX_ENTRIES files */
-int g_cursor;         /* index into the visible list (0 .. visibleCount-1) */
+int g_count;        /* 実際に格納されているエントリ数（MAX_ENTRIES以下） */
+int g_truncated;     /* ディレクトリ内のファイル数がMAX_ENTRIESを超えていたら1 */
+int g_cursor;         /* 表示中の一覧内でのインデックス（0～visibleCount-1） */
 
-char g_path[80];      /* current directory, always ends with '\' */
+char g_path[80];      /* カレントディレクトリ。必ず'\\'で終わる */
 char g_search[88];    /* g_path + "*.*" */
 unsigned char g_dta[43];
 
-char g_copybuf[COPY_BUF_SIZE]; /* single shared Copy/Move I/O buffer -
-                                    see COPY_BUF_SIZE's comment; never put
-                                    a buffer this size on the stack in a
-                                    16-bit small-model program. */
+char g_copybuf[COPY_BUF_SIZE]; /* Copy/Move が共用する単一のI/Oバッファ――
+                                    COPY_BUF_SIZEのコメント参照。16ビットの
+                                    スモールモデルプログラムでこのサイズの
+                                    バッファをスタックに置いてはならない。 */
 
-/* ---- built-in viewer state (milestone 8) ------------------------------
- * One viewer session is active at a time (do_view() runs its own modal
- * loop, like do_rename()/do_copy()/... do), so this is plain global state
- * rather than a struct threaded through every call - the same shape as
- * the rest of this file's DOS-call wrappers/buffers above. */
-char g_viewPath[VIEW_PATH_BUF];   /* full path of the file being viewed */
-int g_viewHandle;                 /* DOS handle, or -1 when not open */
-char g_viewReadBuf[VIEW_READ_BUF];/* vreader_getc()'s disk-read buffer */
-int g_viewReadLen;                 /* bytes valid in g_viewReadBuf */
-int g_viewReadPos;                 /* next unread index in g_viewReadBuf */
-int g_viewPushback[2];             /* 1-2 byte pushback queue, front-first -
-                                       see vreader_pushback1()/2() below;
-                                       needed so a wrap decision that reads
-                                       one byte too far (a tab, or the
-                                       trail byte of a zenkaku pair) can
-                                       hand that byte back to the next
-                                       display line instead of losing it */
-int g_viewPushbackLen;             /* 0, 1, or 2 */
-int g_viewLineNo;                   /* 1-based number of the topmost
-                                       displayed line */
-int g_viewTotalLines;               /* total display-line count, computed
-                                       once by view_count_lines() when the
-                                       viewer is opened */
+/* ---- 組み込みビューアの状態（第8マイルストーン） ------------------------
+ * ビューアのセッションは同時に1つしか存在しない（do_view()が
+ * do_rename()/do_copy()/…と同じように自前のモーダルループを回すため）
+ * ので、呼び出しのたびに引き回す構造体ではなく、このファイルの
+ * 上の方にあるDOS呼び出しラッパー／バッファ群と同じ形の、ただの
+ * グローバル状態にしてある。 */
+char g_viewPath[VIEW_PATH_BUF];   /* 表示中のファイルのフルパス */
+int g_viewHandle;                 /* DOSハンドル。開いていなければ-1 */
+char g_viewReadBuf[VIEW_READ_BUF];/* vreader_getc()用のディスク読み込みバッファ */
+int g_viewReadLen;                 /* g_viewReadBuf内で有効なバイト数 */
+int g_viewReadPos;                 /* g_viewReadBuf内の次の未読インデックス */
+int g_viewPushback[2];             /* 1～2バイトのプッシュバックキュー（先頭が先）――
+                                       下のvreader_pushback1()/2()参照。
+                                       折り返し判定で1バイト先まで読んで
+                                       しまった場合（タブや全角文字の
+                                       トレイルバイト）に、そのバイトを
+                                       捨てずに次の表示行へ戻すために
+                                       必要 */
+int g_viewPushbackLen;             /* 0, 1, 2のいずれか */
+int g_viewLineNo;                   /* 現在いちばん上に表示されている行の
+                                       1始まりの行番号 */
+int g_viewTotalLines;               /* 表示行の総数。ビューアを開いたときに
+                                       view_count_lines()が一度だけ計算する */
 
-/* ---- low level DOS/BIOS calls (inline asm; see doc/smlrc.md "asm()") -- */
+/* ---- 低レベルなDOS/BIOS呼び出し（インラインアセンブラ。doc/smlrc.mdの"asm()"参照） -- */
 
-/* INT 18h AH=00h (BIOS keyboard input, waits for a key): returns
-   AH=scan code, AL=character code (measured; see docs/key-measure-01.md
-   and docs/key-measure-02.md). *scan receives the scan code; the
-   function's own return value is AL, zero-extended - the pointer-out-
-   param style matches this file's other multi-value DOS calls, e.g.
-   dos_getftime() above. Only dos_getch() below calls this. */
+/* INT 18h AH=00h（BIOSキーボード入力、キー入力を待つ）：
+   AH=スキャンコード、AL=文字コードを返す（実測。docs/key-measure-01.md
+   とdocs/key-measure-02.md参照）。*scanにスキャンコードを受け取り、
+   関数自体の戻り値はALをゼロ拡張したもの――このポインタ出力パラメータ
+   の形式は、このファイルの他の複数値を返すDOS呼び出し（上の
+   dos_getftime()など）と揃えてある。この関数を呼ぶのは下の
+   dos_getch()だけ。 */
 int bios_getch_raw(int *scan)
 {
   asm("mov ah, 0\n"
@@ -632,19 +636,20 @@ int bios_getch_raw(int *scan)
       "mov ah, 0");
 }
 
-/* Milestone 9: migrated from DOS INT 21h AH=08h to BIOS INT 18h AH=00h
-   (see docs/dos-key-measure-01.md for why - DOS's console driver ate ^S
-   as XOFF and never delivered ROLL UP/ROLL DOWN/HELP at all). Kept under
-   its old name and 0-argument, "return the character" shape so none of
-   the ~30 existing call sites in this file need to change. A key with a
-   character (AL != 0) is returned as-is - see the KEY_* comment above
-   for why that already matches every plain code this program compares
-   against. A key with no character (AL == 0) is translated from its
-   scan code into one of the KEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT/KEY_HOME/
-   KEY_F1..KEY_F10/KEY_ROLLUP/KEY_ROLLDOWN pseudo-codes above, or 0 if
-   this program does not assign that key (e.g. HELP/INS/DEL - the scan
-   codes are known, docs/bios-key-measure-01.md, but no use is assigned
-   yet, see README's TODO). */
+/* 第9マイルストーンでDOS INT 21h AH=08hからBIOS INT 18h AH=00hへ
+   移行した（理由はdocs/dos-key-measure-01.md参照――DOSのコンソール
+   ドライバは^SをXOFFとして飲み込み、ROLL UP/ROLL DOWN/HELPは
+   一切届かなかった）。旧来と同じ名前・0引数の「文字を返す」という
+   形はそのまま保っているので、このファイル内の約30箇所の既存
+   呼び出し元は一切変更不要。文字を持つキー（AL != 0）はそのまま
+   返す――このプログラムが比較している素の値すべてに既に一致している
+   理由は上のKEY_*のコメント参照。文字を持たないキー（AL == 0）は
+   そのスキャンコードから、上のKEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT/
+   KEY_HOME/KEY_F1..KEY_F10/KEY_ROLLUP/KEY_ROLLDOWNの疑似コードの
+   いずれかに変換される。このプログラムが割り当てていないキー
+   （例：HELP/INS/DEL――スキャンコード自体はdocs/bios-key-measure-01.md
+   で分かっているが、まだ用途を割り当てていない。READMEのTODO参照）
+   なら0になる。 */
 int dos_getch(void)
 {
   int c;
@@ -673,12 +678,12 @@ int dos_getch(void)
   return 0;
 }
 
-/* INT 18h AH=01h (BIOS keyboard sense): does not consume the pending
-   key. BH is the only reliable availability flag (1 = a key is waiting,
-   0 = not) - AX and the flags register are not reliable for this
-   (measured; see docs/key-measure-02.md, the "AH=01h" section). Replaces
-   DOS INT 21h AH=0Bh; same 0/nonzero contract as before so call sites
-   are unchanged. */
+/* INT 18h AH=01h（BIOSキーボード状態確認）：保留中のキーを消費
+   しない。信頼できる「キーがあるか」のフラグはBHだけ（1＝キーが
+   待っている、0＝無い）――AXやフラグレジスタはこの用途には信頼
+   できない（実測。docs/key-measure-02.mdの「AH=01h」の節参照）。
+   DOS INT 21h AH=0Bhの置き換え。0／非0の契約は従来と同じなので
+   呼び出し元は変更不要。 */
 int dos_kbhit(void)
 {
   asm("mov ah, 1\n"
@@ -710,12 +715,12 @@ int dos_findnext(void)
       "sbb ax, ax");
 }
 
-/* delete a file (INT 21h AH=41h, DS:DX = ASCIZ path). Returns 0 on
-   success, nonzero on failure (e.g. read-only, in use). Only ever called
-   with a path built from a non-directory entry (see do_delete()); DOS
-   itself would also refuse to unlink a directory this way, but we do not
-   rely on that - the directory case is filtered out before this is ever
-   called. */
+/* ファイルを削除する（INT 21h AH=41h、DS:DX=ASCIZパス）。成功時0、
+   失敗時（読み取り専用・使用中など）は非0を返す。呼ばれるのは常に
+   ディレクトリでないエントリから組み立てたパスに対してのみ
+   （do_delete()参照）。DOS自体もこの方法でディレクトリをunlinkする
+   ことは拒否するはずだが、それに頼ってはいない――ディレクトリの
+   ケースはここが呼ばれる前段階で既にフィルタして除外してある。 */
 int dos_delete(char *path)
 {
   asm("mov dx, [bp+4]\n"
@@ -724,8 +729,8 @@ int dos_delete(char *path)
       "sbb ax, ax");
 }
 
-/* create a directory (INT 21h AH=39h, DS:DX = ASCIZ path). Returns 0 on
-   success, nonzero on failure (e.g. name already exists). */
+/* ディレクトリを作成する（INT 21h AH=39h、DS:DX=ASCIZパス）。
+   成功時0、失敗時（すでに同名が存在する等）は非0を返す。 */
 int dos_mkdir(char *path)
 {
   asm("mov dx, [bp+4]\n"
@@ -734,11 +739,11 @@ int dos_mkdir(char *path)
       "sbb ax, ax");
 }
 
-/* rename/move a file or directory (INT 21h AH=56h, DS:DX = old ASCIZ
-   path, ES:DI = new ASCIZ path). ES is not guaranteed to already equal
-   DS in the general case, so it is saved/set/restored here rather than
-   assumed. Returns 0 on success, nonzero on failure (e.g. a name that
-   already exists at the destination). */
+/* ファイルまたはディレクトリの名前変更／移動（INT 21h AH=56h、
+   DS:DX=旧ASCIZパス、ES:DI=新ASCIZパス）。一般にESが最初からDSと
+   同じ値である保証はないため、決め打ちにせずここで退避・設定・復元
+   している。成功時0、失敗時（移動先に既に同名が存在する等）は
+   非0を返す。 */
 int dos_rename(char *oldPath, char *newPath)
 {
   asm("mov dx, [bp+4]\n"
@@ -752,32 +757,32 @@ int dos_rename(char *oldPath, char *newPath)
       "sbb ax, ax");
 }
 
-/* returns the current value of DS (the data segment every global/static
-   variable in this small-model program lives in - see COPY_BUF_SIZE's
-   comment). Needed only by dos_exec() below: the EXEC parameter block it
-   builds contains explicit offset:segment far pointers to buffers that
-   live in this same segment, and C in this dialect has no way to spell a
-   segment value directly - it has to come from a register read like this
-   one. */
+/* DSの現在値を返す（このスモールモデルプログラムのグローバル／
+   static変数がすべて置かれているデータセグメント――COPY_BUF_SIZEの
+   コメント参照）。これが必要なのは下のdos_exec()だけ：組み立てる
+   EXECパラメータブロックには、この同じセグメント内にあるバッファを
+   指す offset:segment 形式のfarポインタが明示的に含まれるが、この
+   方言のCにはセグメント値を直接書く方法が無いため、このような
+   レジスタ読み出しから得るしかない。 */
 unsigned int get_ds(void)
 {
   asm("mov ax, ds");
 }
 
-/* run a child program and wait for it to finish (INT 21h AH=4Bh AL=0,
-   EXEC "load and execute"). path is the ASCIIZ program path; paramBlock
-   is the 14-byte EXEC parameter block do_exec() below builds (word env
-   segment, then three offset:segment far pointers - command tail, first
-   default FCB, second default FCB). Returns 0 on success, nonzero on
-   failure (e.g. file not found, not enough memory).
-   Like dos_rename() above, ES is swapped to DS (the segment paramBlock
-   itself lives in, since it is always one of do_exec()'s local buffers)
-   only for the duration of the call and restored before returning, since
-   the caller cannot be assumed not to care what ES holds afterward. DS:DX
-   is left as whatever it already is (the correct data segment for path,
-   exactly like every other dos_* path argument in this file) - AH=4Bh
-   never needs ES to differ from DS here, because every buffer this
-   function touches lives in the same one small-model data segment. */
+/* 子プログラムを実行し、終了を待つ（INT 21h AH=4Bh AL=0、EXEC
+   「読み込んで実行」）。pathはASCIIZのプログラムパス。paramBlockは
+   下のdo_exec()が組み立てる14バイトのEXECパラメータブロック
+   （word型の環境セグメント、続けてoffset:segment形式のfarポインタ
+   3つ――コマンドテール、1つ目の既定FCB、2つ目の既定FCB）。成功時0、
+   失敗時（ファイルが見つからない、メモリ不足など）は非0を返す。
+   上のdos_rename()と同様、ESはこの呼び出しの間だけDS（paramBlock
+   自身が置かれているセグメント。常にdo_exec()のローカルバッファの
+   一つなので）に切り替え、戻る前に元に戻す――呼び出し元が戻った後
+   のESの値を気にしないとは限らないため。DS:DXはpath用として既に
+   正しいデータセグメントの値のまま何も触らない（このファイルの他の
+   dos_*のパス引数と全く同様）――AH=4Bhでは、この関数が触る
+   バッファがすべて同じ一つのスモールモデルのデータセグメントに
+   あるため、ESをDSと異ならせる必要は一度も無い。 */
 int dos_exec(char *path, unsigned char *paramBlock)
 {
   asm("mov dx, [bp+4]\n"
@@ -792,19 +797,20 @@ int dos_exec(char *path, unsigned char *paramBlock)
       "sbb ax, ax");
 }
 
-/* ---- file I/O (Copy/Move; INT 21h AH=3Dh/3Ch/3Fh/40h/3Eh/57h) ----------
- * These use the same "jnc LABEL / mov ax,-1 / LABEL:" idiom instead of
- * the "sbb ax,ax" trick used above, because their success value is not
- * simply 0 - it is a handle (dos_open/dos_create) or a byte count
- * (dos_read/dos_wfile) that must be returned as-is from AX when CF is
- * clear. Each label name below is unique across this whole file: this
- * inline asm is emitted verbatim into one shared assembly output (see
- * smlrc.md - "output verbatim"), so two functions reusing the same
- * label would collide at assemble time. ------------------------------ */
+/* ---- ファイルI/O（Copy/Move用。INT 21h AH=3Dh/3Ch/3Fh/40h/3Eh/57h） ----------
+ * これらは上で使っている"sbb ax,ax"のトリックではなく
+ * "jnc LABEL / mov ax,-1 / LABEL:" の形を使っている。成功時の値が
+ * 単純な0ではなく、ハンドル（dos_open/dos_create）やバイト数
+ * （dos_read/dos_wfile）であり、CFがクリアのときはAXの値をそのまま
+ * 返す必要があるため。以下の各ラベル名はこのファイル全体で重複が
+ * 無いようにしてある：このインラインアセンブラは1つの共有アセンブリ
+ * 出力にそのまま出力される（smlrc.mdの「そのまま出力」参照）ため、
+ * 2つの関数が同じラベル名を使うとアセンブル時に衝突してしまう。
+ * ------------------------------------------------------------------ */
 
-/* open an existing file (mode 0 = read-only, matching this program's
-   only use: reading a Copy/Move source). Returns a handle >= 0, or -1
-   on failure. */
+/* 既存ファイルを開く（モード0＝読み取り専用。このプログラムの
+   唯一の用途であるCopy/Moveの読み込み元に対応）。成功時はハンドル
+   （0以上）、失敗時は-1を返す。 */
 int dos_open(char *path, unsigned int mode)
 {
   asm("mov dx, [bp+4]\n"
@@ -816,8 +822,8 @@ int dos_open(char *path, unsigned int mode)
       "L_dos_open_ok:");
 }
 
-/* create (or truncate, if it already exists) a file for writing, with
-   normal attributes. Returns a handle >= 0, or -1 on failure. */
+/* ファイルを作成する（既に存在すれば切り詰める）。書き込み用、
+   通常属性で。成功時はハンドル（0以上）、失敗時は-1を返す。 */
 int dos_create(char *path, unsigned int attr)
 {
   asm("mov dx, [bp+4]\n"
@@ -829,8 +835,8 @@ int dos_create(char *path, unsigned int attr)
       "L_dos_create_ok:");
 }
 
-/* closes a handle from dos_open()/dos_create(). Returns 0 on success,
-   nonzero on failure. */
+/* dos_open()/dos_create()で得たハンドルを閉じる。成功時0、
+   失敗時は非0を返す。 */
 int dos_close(unsigned int handle)
 {
   asm("mov bx, [bp+4]\n"
@@ -839,8 +845,8 @@ int dos_close(unsigned int handle)
       "sbb ax, ax");
 }
 
-/* reads up to len bytes into buf. Returns the number of bytes actually
-   read (0 means end of file, not an error), or -1 on failure. */
+/* bufへ最大len バイトを読み込む。実際に読み込んだバイト数
+   （0はエラーではなくファイル終端を意味する）、失敗時は-1を返す。 */
 int dos_read(unsigned int handle, char *buf, unsigned int len)
 {
   asm("mov bx, [bp+4]\n"
@@ -853,10 +859,10 @@ int dos_read(unsigned int handle, char *buf, unsigned int len)
       "L_dos_read_ok:");
 }
 
-/* writes len bytes from buf to an open handle (unlike dos_write() above,
-   which is hardcoded to handle 1 for screen output). Returns the number
-   of bytes actually written, or -1 on failure; the caller compares this
-   against the requested len to catch a short write (e.g. disk full). */
+/* 開いているハンドルへbufからlenバイトを書き込む（画面出力用に
+   ハンドル1固定になっている上のdos_write()とは異なる）。実際に
+   書き込んだバイト数、失敗時は-1を返す。呼び出し元はこれを要求した
+   lenと比較して書き込み不足（ディスクフルなど）を検出する。 */
 int dos_wfile(unsigned int handle, char *buf, unsigned int len)
 {
   asm("mov bx, [bp+4]\n"
@@ -869,10 +875,10 @@ int dos_wfile(unsigned int handle, char *buf, unsigned int len)
       "L_dos_wfile_ok:");
 }
 
-/* AH=57h AL=0: reads an open handle's file date/time into *timeOut/
-   *dateOut (packed DOS format, the same encoding format_date()/
-   format_time() already decode elsewhere in this file). Returns 0 on
-   success, nonzero on failure. */
+/* AH=57h AL=0：開いているハンドルのファイル日付／時刻を
+   *timeOut/*dateOutへ読み込む（パックされたDOS形式。このファイルの
+   他所でformat_date()/format_time()が既に復号しているのと同じ
+   エンコーディング）。成功時0、失敗時は非0を返す。 */
 int dos_getftime(unsigned int handle, unsigned int *timeOut, unsigned int *dateOut)
 {
   asm("mov bx, [bp+4]\n"
@@ -891,8 +897,8 @@ int dos_getftime(unsigned int handle, unsigned int *timeOut, unsigned int *dateO
       "L_dos_getftime_done:");
 }
 
-/* AH=57h AL=1: sets an open handle's file date/time (packed DOS format).
-   Returns 0 on success, nonzero on failure. */
+/* AH=57h AL=1：開いているハンドルのファイル日付／時刻を設定する
+   （パックされたDOS形式）。成功時0、失敗時は非0を返す。 */
 int dos_setftime(unsigned int handle, unsigned int time, unsigned int date)
 {
   asm("mov bx, [bp+4]\n"
@@ -920,8 +926,8 @@ int dos_getcwd(unsigned int drive, char *buf)
       "sbb ax, ax");
 }
 
-/* AX = sectors/cluster (0xFFFF on error); *availClus, *bytesPerSec,
-   *totalClus are filled from BX/CX/DX. */
+/* AX＝クラスタあたりのセクタ数（エラー時0xFFFF）。*availClus、
+   *bytesPerSec、*totalClusはそれぞれBX/CX/DXから埋める。 */
 unsigned int dos_diskfree(unsigned int drive, unsigned int *availClus,
                            unsigned int *bytesPerSec, unsigned int *totalClus)
 {
@@ -938,9 +944,10 @@ unsigned int dos_diskfree(unsigned int drive, unsigned int *availClus,
       "pop ax");
 }
 
-/* INT 21h AH=2Ah (get date): CX=year, DH=month, DL=day (AL=day-of-week,
-   unused here). *year/*month/*day are filled from those; see
-   format_datetime() below, which is the only caller. */
+/* INT 21h AH=2Ah（日付取得）：CX=年、DH=月、DL=日
+   （AL=曜日、ここでは未使用）。*year/*month/*dayをこれらから
+   埋める――下のformat_datetime()参照。この関数の呼び出し元はそこ
+   だけ。 */
 void dos_getdate(unsigned int *year, unsigned int *month, unsigned int *day)
 {
   asm("mov ah, 0x2a\n"
@@ -957,9 +964,10 @@ void dos_getdate(unsigned int *year, unsigned int *month, unsigned int *day)
       "mov [si], ax");
 }
 
-/* INT 21h AH=2Ch (get time): CH=hour, CL=minute, DH=second (DL=1/100s,
-   unused here). *hour/*minute/*second are filled from those; see
-   format_datetime() below, which is the only caller. */
+/* INT 21h AH=2Ch（時刻取得）：CH=時、CL=分、DH=秒
+   （DL=1/100秒、ここでは未使用）。*hour/*minute/*secondをこれらから
+   埋める――下のformat_datetime()参照。この関数の呼び出し元はそこ
+   だけ。 */
 void dos_gettime(unsigned int *hour, unsigned int *minute, unsigned int *second)
 {
   asm("mov ah, 0x2c\n"
@@ -978,9 +986,10 @@ void dos_gettime(unsigned int *hour, unsigned int *minute, unsigned int *second)
       "mov [si], ax");
 }
 
-/* write len bytes starting at buf to stdout (handle 1) via INT 21h AH=40h.
-   Used instead of stdio so screen writes are explicit, single-shot DOS
-   calls rather than a line-buffered stream that never sees a newline. */
+/* buf から始まる len バイトを INT 21h AH=40h で標準出力
+   （ハンドル1）へ書き込む。stdioの代わりにこれを使うのは、画面への
+   書き込みを、改行を認識しない行バッファ付きストリーム経由ではなく、
+   1回ごとに完結する明示的なDOS呼び出しにするため。 */
 void dos_write(char *buf, unsigned int len)
 {
   asm("mov dx, [bp+4]\n"
@@ -990,9 +999,9 @@ void dos_write(char *buf, unsigned int len)
       "int 0x21");
 }
 
-/* ---- 32-bit arithmetic helpers (SmallerC 16-bit mode has no long) ---- */
+/* ---- 32ビット演算ヘルパー（SmallerCの16ビットモードにはlong型が無い） ---- */
 
-/* returns a*b (low word); *hiOut gets the high word */
+/* a*b（下位ワード）を返す。*hiOutに上位ワードが入る */
 unsigned int umul32(unsigned int a, unsigned int b, unsigned int *hiOut)
 {
   asm("mov ax, [bp+4]\n"
@@ -1002,7 +1011,7 @@ unsigned int umul32(unsigned int a, unsigned int b, unsigned int *hiOut)
       "mov [bx], dx");
 }
 
-/* (*hiP:*loP) /= 10, returns the remainder (0-9); updates *hiP/*loP in place */
+/* (*hiP:*loP) /= 10 を行い、余り（0～9）を返す。*hiP/*loPはその場で更新する */
 unsigned int divmod10(unsigned int *hiP, unsigned int *loP)
 {
   asm("mov bx, [bp+4]\n"
@@ -1018,7 +1027,7 @@ unsigned int divmod10(unsigned int *hiP, unsigned int *loP)
       "mov ax, dx");
 }
 
-/* (hi:lo) * val16, truncated to 32 bits; returns low word, *outHi = high word */
+/* (hi:lo) * val16 を32ビットに切り詰めた結果。下位ワードを返し、*outHiが上位ワード */
 unsigned int mul32x16(unsigned int hi, unsigned int lo, unsigned int val16,
                        unsigned int *outHi)
 {
@@ -1027,7 +1036,7 @@ unsigned int mul32x16(unsigned int hi, unsigned int lo, unsigned int val16,
   unsigned int t2;
 
   t1lo = umul32(lo, val16, &t1hi);
-  t2 = hi * val16; /* 16x16 unsigned multiply; high bits deliberately dropped */
+  t2 = hi * val16; /* 16×16ビットの符号無し乗算。上位ビットは意図的に捨てる */
   *outHi = t1hi + t2;
   return t1lo;
 }
@@ -1046,7 +1055,7 @@ void sub32(unsigned int aHi, unsigned int aLo, unsigned int bHi,
   *outLo = lo;
 }
 
-/* formats a 32-bit unsigned value as decimal with ',' every 3 digits */
+/* 32ビット符号無し値を3桁ごとに','を入れた10進表記で整形する */
 void format_u32(unsigned int hi, unsigned int lo, char *out)
 {
   char digits[12];
@@ -1070,10 +1079,10 @@ void format_u32(unsigned int hi, unsigned int lo, char *out)
   for (i = n - 1; i >= 0; i--) {
     out[j] = digits[i];
     j++;
-    /* digits[] is stored least-significant-first (digits[0] = units), so
-       index i is the distance of this digit from the units digit. A comma
-       belongs right after this digit whenever it completes a group of 3
-       counting from the units digit, i.e. i is a positive multiple of 3. */
+    /* digits[]は下位桁から順に格納されている（digits[0]が1の位）ので、
+       インデックスiはその桁が1の位から何桁離れているかを表す。カンマは、
+       1の位から数えて3桁ぶんのグループが完結するたび――すなわちiが
+       3の正の倍数のとき――その桁の直後に入る。 */
     if (i > 0 && (i % 3) == 0) {
       out[j] = ',';
       j++;
@@ -1082,9 +1091,9 @@ void format_u32(unsigned int hi, unsigned int lo, char *out)
   out[j] = 0;
 }
 
-/* same as format_u32() but without ',' separators; used for the plain
-   (unseparated) file-list size column - see docs/, only the header totals
-   use comma grouping there. */
+/* format_u32()と同様だが','区切りを入れない版。ファイル一覧の
+   サイズ欄（区切りなし）用――ヘッダの合計欄だけがカンマ区切りに
+   なっている。 */
 void format_u32_plain(unsigned int hi, unsigned int lo, char *out)
 {
   char digits[12];
@@ -1109,7 +1118,7 @@ void format_u32_plain(unsigned int hi, unsigned int lo, char *out)
   out[n] = 0;
 }
 
-/* ---- date/time formatting -------------------------------------------- */
+/* ---- 日付／時刻の整形 -------------------------------------------- */
 
 void format_date(unsigned int d, char *out)
 {
@@ -1146,12 +1155,12 @@ void format_time(unsigned int t, char *out)
   out[5] = 0;
 }
 
-/* current wall-clock date/time as "YY-MM-DD HH:MM:SS" (DATETIME_WIDTH ==
-   17 cells, all ASCII, plus the NUL - out[] must be at least 18 bytes).
-   Unlike format_date()/format_time() above (which decode a DOS
-   directory-entry's packed date/time), this reads the live clock via
-   INT 21h AH=2Ah/2Ch on every call, so re-calling it each frame is what
-   makes the on-screen clock advance. */
+/* 現在時刻を"YY-MM-DD HH:MM:SS"（DATETIME_WIDTH==17セル、すべて
+   ASCII、NULを含めるとout[]は少なくとも18バイト必要）として返す。
+   上のformat_date()/format_time()（DOSディレクトリエントリの
+   パックされた日付／時刻を復号する）とは異なり、これは呼ばれる
+   たびにINT 21h AH=2Ah/2Chで現在時計を読み直すので、毎フレーム
+   呼び直すことで画面上の時計が進む。 */
 void format_datetime(char *out)
 {
   unsigned int year, month, day;
@@ -1182,7 +1191,7 @@ void format_datetime(char *out)
   out[17] = 0;
 }
 
-/* attribute string "R H S A", '_' where the bit is not set */
+/* 属性文字列 "R H S A"、ビットが立っていなければ'_' */
 void format_attr(unsigned char attr, char *out)
 {
   out[0] = (attr & ATTR_RDONLY) ? 'R' : '_';
@@ -1195,7 +1204,7 @@ void format_attr(unsigned char attr, char *out)
   out[7] = 0;
 }
 
-/* ---- small text helpers ------------------------------------------------ */
+/* ---- 小さなテキストヘルパー ------------------------------------------------ */
 
 void put_str_n(char *buf, int col, char *s, int maxlen)
 {
@@ -1208,10 +1217,11 @@ void put_str_n(char *buf, int col, char *s, int maxlen)
   }
 }
 
-/* display width in screen cells: SJIS lead bytes count as 2, everything
-   else (ASCII / trail bytes are skipped along with their lead byte) as 1.
-   All column alignment must go through this, not strlen(), so Japanese
-   full-width text lines up the same way ASCII text does. */
+/* 画面セル単位での表示幅：SJISの先頭バイトは2、それ以外
+   （ASCII／トレイルバイトは先頭バイトとまとめてスキップ）は1として
+   数える。桁位置の揃えはすべてこれを通す必要があり、strlen()を
+   使ってはならない――そうすることで日本語の全角文字もASCII文字と
+   同じように桁が揃う。 */
 int text_width(char *s)
 {
   int w;
@@ -1227,7 +1237,7 @@ int text_width(char *s)
         w += 2;
         i += 2;
       } else {
-        w += 1; /* truncated lead byte at end of string; count as 1 */
+        w += 1; /* 文字列末尾で先頭バイトだけで切れている場合、1として数える */
         i += 1;
       }
     } else {
@@ -1254,17 +1264,16 @@ void right_justify(char *buf, int col, int width, char *s)
   }
 }
 
-/* appends the NUL-terminated string s to dst at byte offset *lenp, then
-   re-terminates dst; *lenp is advanced past the appended bytes. Used to
-   assemble row content (label + number + label + ...) into a plain
-   buffer before it is placed into a header box row.
-   'cap' is the total size (in bytes, including room for the NUL) of the
-   dst buffer as declared by the caller; sappend() never writes at or
-   past dst[cap-1] other than the terminating NUL, and never writes only
-   half of a 2-byte SJIS/box-drawing character - if the remaining room is
-   not enough for both bytes of such a character, that character (and
-   everything after it in s) is silently dropped and dst stays a valid,
-   NUL-terminated C string. */
+/* NUL終端された文字列sをdstのバイトオフセット*lenpに追記し、
+   改めて終端する。*lenpは追記したバイト数ぶん進める。行の内容
+   （ラベル＋数値＋ラベル…）を、ヘッダボックスの行に置く前に
+   プレーンなバッファへ組み立てるために使う。
+   'cap'は呼び出し元が宣言したdstバッファの総サイズ（NUL用の
+   余地を含めたバイト数）。sappend()は、終端のNUL以外ではdst[cap-1]
+   以降には決して書き込まず、2バイトのSJIS／罫線文字を半分だけ
+   書くことも決してない――そのような文字の両バイトぶんの余地が
+   残っていなければ、その文字（とs内でそれ以降のすべて）は黙って
+   捨てられ、dstは常に有効なNUL終端文字列のままになる。 */
 void sappend(char *dst, int *lenp, char *s, int cap)
 {
   int i;
@@ -1277,11 +1286,11 @@ void sappend(char *dst, int *lenp, char *s, int cap)
   while (s[i] != 0) {
     c = (unsigned char)s[i];
     if ((c >= 0x81 && c <= 0x9F) || (c >= 0xE0 && c <= 0xFC)) {
-      chBytes = (s[i + 1] != 0) ? 2 : 1; /* truncated lead byte: treat as 1 */
+      chBytes = (s[i + 1] != 0) ? 2 : 1; /* 先頭バイトだけで切れている場合：1として扱う */
     } else {
       chBytes = 1;
     }
-    if (lp + chBytes > cap - 1) break; /* leave room for the NUL */
+    if (lp + chBytes > cap - 1) break; /* NUL用の余地を残す */
     dst[lp] = s[i];
     lp++;
     i++;
@@ -1295,11 +1304,10 @@ void sappend(char *dst, int *lenp, char *s, int cap)
   *lenp = lp;
 }
 
-/* same as sappend(), but for an unsigned int formatted as plain decimal;
-   'cap' has the same meaning as in sappend(). Digits are ASCII (1 byte
-   each), so no multi-byte character can ever be split here, but each
-   digit is still checked against the remaining room before it is
-   written. */
+/* sappend()と同様だが、符号無しintを単純な10進数として整形した
+   ものを追記する。'cap'の意味はsappend()と同じ。桁はASCII（1バイト
+   ずつ）なのでここでマルチバイト文字が分断されることは無いが、
+   各桁を書く前に残り容量を毎回確認している。 */
 void sappend_uint(char *dst, int *lenp, unsigned int v, int cap)
 {
   char tmp[6];
@@ -1327,15 +1335,15 @@ void sappend_uint(char *dst, int *lenp, unsigned int v, int cap)
   *lenp = lp;
 }
 
-/* like sappend(), but pads the appended text with plain ASCII spaces (one
-   sappend() call per space, so 'cap' is still respected the same way) up
-   to 'width' screen cells - used by draw_disk_line() to give its
-   total/used/free fields a fixed on-screen width so the vertical
-   dividers between them land on the same column every frame. If s is
-   already 'width' cells or wider, no padding is added (draw_disk_line()
-   sizes each field to the true worst case, so this should not happen in
-   practice, but it is not treated as an error - the field is simply left
-   unpadded rather than truncated). */
+/* sappend()と同様だが、'width'画面セル分になるまで追記文字列を
+   単純なASCIIスペースでパディングする（1スペースごとにsappend()を
+   1回呼ぶので、'cap'は同様に守られる）――draw_disk_line()が
+   合計／使用／空きの各フィールドを画面上で固定幅にし、それらの間の
+   縦区切り線が毎フレーム同じ桁に来るようにするために使う。sが
+   既に'width'セル以上あれば何もパディングしない
+   （draw_disk_line()は各フィールドを想定される最悪ケースに
+   合わせてサイズしているので実際には起こらないはずだが、エラー
+   扱いにはせず単にパディングしないだけにしてある）。 */
 void sappend_padded(char *dst, int *lenp, char *s, int width, int cap)
 {
   int w;
@@ -1346,17 +1354,17 @@ void sappend_padded(char *dst, int *lenp, char *s, int width, int cap)
   for (i = w; i < width; i++) sappend(dst, lenp, " ", cap);
 }
 
-/* like sappend_padded() above, but right-justifies label+number within
-   'width' screen cells instead of left-aligning: pad spaces go between
-   the label and the number, not after the number, and the number's own
-   last digit always lands exactly 1 cell short of the field's right edge
-   (a fixed 1-cell trailing margin), matching the real product's own
-   disk-totals row (measured; see draw_disk_line() and the
-   DISK_SEP_COL1/DISK_SEP_COL2 comment above) - "各欄で数値は右詰め、右端に
-   1桁ぶんの余白". If label+number+the 1-cell margin is already 'width'
-   cells or wider, no padding is added (draw_disk_line() sizes each field
-   to the true worst case, so this should not happen in practice, but as
-   with sappend_padded() it is not treated as an error). */
+/* 上のsappend_padded()と似ているが、左詰めではなくラベル＋数値を
+   'width'画面セル内で右詰めにする：パディングのスペースは数値の後
+   ではなくラベルと数値の間に入り、数値の最後の桁は常にフィールド
+   右端からちょうど1セル手前（固定1セルの末尾余白）に来る。これは
+   本家自身のディスク合計行（実測。draw_disk_line()と上の
+   DISK_SEP_COL1/DISK_SEP_COL2のコメント参照）――「各欄で数値は
+   右詰め、右端に1桁ぶんの余白」――と一致させたもの。ラベル＋数値＋
+   1セルの余白が既に'width'セル以上あれば何もパディングしない
+   （draw_disk_line()は各フィールドを想定される最悪ケースに合わせて
+   サイズしているので実際には起こらないはずだが、sappend_padded()
+   同様エラー扱いにはしない）。 */
 void sappend_field_rj(char *dst, int *lenp, char *label, char *number, int width, int cap)
 {
   int labelCells;
@@ -1374,73 +1382,75 @@ void sappend_field_rj(char *dst, int *lenp, char *label, char *number, int width
   sappend(dst, lenp, " ", cap);
 }
 
-/* ---- text VRAM (direct screen writes; milestone 5) --------------------
- * Screen output no longer goes through the DOS console (AH=40h + ANSI.SYS
- * escapes) at all for content - it writes straight to the two PC-98 text
- * VRAM planes, char plane at 0xA0000 and attribute plane at 0xA2000, both
- * 80x25 cells x 2 bytes/cell, laid out identically (measured; see
- * docs/tvram-measure-01.md). This fixes three things measured against
- * the real console path: (1) the full-width box-drawing glyphs this
- * program used to draw a header frame with have no glyph in the font
- * used here and drew nothing at all; (2) every redraw sent ESC[2J first,
- * clearing the whole screen before repainting it, which flickers; (3)
- * the original's own half-width line-drawing codes (0x9C-0x9F etc., see
- * BOXCH_* above) cannot be sent through the DOS console because
- * 0x81-0x9F are Shift_JIS lead bytes there - direct VRAM writes have no
- * such interpretation, so they can be used exactly as the original does.
+/* ---- テキストVRAM（画面への直接書き込み。第5マイルストーン） --------------------
+ * 画面出力は内容についてはもうDOSコンソール（AH=40h＋ANSI.SYSの
+ * エスケープ）を一切経由せず、PC-98のテキストVRAM2面――文字面
+ * 0xA0000と属性面0xA2000、どちらも80×25セル×2バイト/セルで
+ * 同じレイアウト（実測。docs/tvram-measure-01.md参照）――へ直接
+ * 書き込む。これにより、実機のコンソール経路に対して実測した
+ * 次の3点を解決した：(1) このプログラムがヘッダ枠に使っていた
+ * 全角罫線グリフはここで使っているフォントにグリフが無く、何も
+ * 描画されていなかった。(2) 再描画のたびにまずESC[2Jを送っており、
+ * 画面全体をクリアしてから再描画するためちらついていた。(3) 本家
+ * 自身の半角罫線コード（0x9C-0x9Fなど。上のBOXCH_*参照）は、
+ * DOSコンソールでは0x81-0x9FがShift_JISの先頭バイトとして解釈
+ * されるため送れなかった――VRAMへの直接書き込みにはそのような
+ * 解釈が無いため、本家と全く同じように使うことができる。
  *
- * ANK (half-width) cells: high byte 0x00, low byte = the character code
- * (this is also how the half-width box-drawing codes above are stored -
- * they are ANK codes, not SJIS). Zenkaku (full-width) cells: the source
- * text here is CP932 (Shift_JIS); VRAM wants JIS X 0208 instead, so
- * sjis_to_jis() converts each pair of SJIS bytes first, then the cell's
- * low byte = (JIS first byte - 0x20), high byte = JIS second byte
- * (measured; see docs/tvram-measure-01.md). A zenkaku character occupies
- * two screen cells; the right-hand cell's content does not affect
- * rendering (also measured), but it is still given a definite value (a
- * blank ANK space) rather than left stale, so a later redraw that only
- * changes what is in the left-hand cell cannot leave old data sitting in
- * the right-hand one where something might later read it.
+ * ANK（半角）セル：上位バイト0x00、下位バイト＝文字コードそのまま
+ * （上の半角罫線コードもこの形式で格納されている――これらはSJISで
+ * はなくANKコードである）。全角セル：ここでのソーステキストは
+ * CP932（Shift_JIS）だが、VRAM側はJIS X 0208を要求するため、
+ * まずsjis_to_jis()でSJISバイトのペアを変換し、セルの下位バイト＝
+ * （JIS第1バイト － 0x20）、上位バイト＝JIS第2バイト（実測。
+ * docs/tvram-measure-01.md参照）とする。全角文字は画面セルを
+ * 2つ占有する。右側のセルの内容は表示に影響しない（これも実測
+ * 済み）が、それでも古い値のまま放置せず明確な値（空白のANK
+ * スペース）を入れておく――そうしないと、後の再描画で左側の
+ * セルの内容だけが変わった場合に、右側のセルに古いデータが
+ * 残ったままになり、後で何かがそれを読んでしまう可能性がある。
  *
- * No full-screen clear happens on every redraw. Instead, g_curChar[]/
- * g_curAttr[] mirror what is currently actually sitting in VRAM for each
- * of the 2000 cells; every put-a-cell call compares the new value against
- * that mirror first and only touches hardware (and updates the mirror)
- * when something actually changed. draw_screen_frame() (and everything
- * under it - draw_dialog(), draw_input_box()) always regenerates the
- * *entire* frame's content on every call, cell by cell, through these
- * functions, so this comparison alone is what keeps a redraw from
- * flickering or blanking anything: unchanged cells are simply never
- * written again, and changed ones are updated in place with nothing in
- * between ever going blank.
+ * 再描画のたびに画面全体をクリアすることはしない。代わりに
+ * g_curChar[]/g_curAttr[]が、2000セルそれぞれについて現在実際に
+ * VRAMに入っている内容を反映しており、1セルを書き込むすべての
+ * 呼び出しはまずこのミラーと新しい値を比較し、実際に変化した
+ * ときだけハードウェアに触れて（そしてミラーを更新して）いる。
+ * draw_screen_frame()（およびその下位にあるdraw_dialog()、
+ * draw_input_box()）は呼ばれるたびに常に*フレーム全体*の内容を
+ * これらの関数を通してセル単位で再生成するので、この比較こそが
+ * 再描画でちらつきや空白化を防いでいる唯一の仕組みである――
+ * 変化していないセルは単に二度と書き込まれず、変化したセルは
+ * 一切空白を経由せずその場で更新される。
  * ------------------------------------------------------------------- */
 
 #define VRAM_ROWS  25
 #define VRAM_COLS  80
 #define VRAM_CELLS (VRAM_ROWS * VRAM_COLS)
 
-/* attribute byte (see docs/tvram-measure-01.md): bits 7-5 = color (GRB),
-   b3 = underline (never used - measured rendering bug, shifts the glyph
-   4 dots right), b2 = reverse video, b0 = character displayed at all
-   (must stay set or the cell goes blank). ATTR_BASE is plain white;
-   ATTR_REV is the same color with the cell reversed, used for the
-   cursor row and for highlighting a command letter - see README. */
+/* 属性バイト（docs/tvram-measure-01.md参照）：bit7-5＝色(GRB)、
+   b3＝下線（実測した描画バグのため未使用――グリフが4ドット
+   右にずれる）、b2＝反転表示、b0＝そのセルを表示するかどうか
+   （立っていないとセルが空白になるので常に立てておく必要がある）。
+   ATTR_BASEは普通の白。ATTR_REVは同じ色でセルだけ反転したもので、
+   カーソル行やコマンド文字のハイライトに使う――README参照。 */
 #define ATTR_BASE  0xE1
 #define ATTR_REV   0xE5
 
-/* ---- measured original colors (docs/filer-measure-06.md) --------------
- * ATTR_BORDER: box-drawing borders/dividers and header labels (cyan).
- * ATTR_TITLE:  title text and the row-0 clock field (yellow).
- * ATTR_VALUE:  header values (path/filename/numbers) - same byte value as
- *              ATTR_BASE, kept as a separate name so call sites read as
- *              "this is a value", not "this is the historical default".
- * ATTR_LIST_DIR/ATTR_LIST_FILE/ATTR_LIST_SYS: file-list row colors by
- * entry type (directory / normal file / system-or-hidden file). The
- * cursor row keeps its type color and only adds the reverse-video bit
- * (ATTR_CURSOR_BIT) - see entry_attr() below; measured cursor/non-cursor
- * attribute bytes for the same file differ only by that bit, never by
- * color, unlike the old "cursor=yellow / other=white" scheme this
- * replaces. ------------------------------------------------------- */
+/* ---- 実機で実測した本家の色（docs/filer-measure-06.md） --------------
+ * ATTR_BORDER：罫線の枠／区切り線とヘッダのラベル（シアン）。
+ * ATTR_TITLE：タイトル文字列と0行目の時計フィールド（黄色）。
+ * ATTR_VALUE：ヘッダの値（パス／ファイル名／数値）――ATTR_BASEと
+ *             バイト値は同じだが、呼び出し側で「これは値である」
+ *             ことが読み取れるよう、あえて別名にしてある
+ *             （「これは歴史的な既定値である」ではなく）。
+ * ATTR_LIST_DIR/ATTR_LIST_FILE/ATTR_LIST_SYS：エントリの種類
+ * （ディレクトリ／通常ファイル／システムまたは隠しファイル）ごとの
+ * ファイル一覧行の色。カーソル行はその種別色をそのまま保ち、反転
+ * ビット（ATTR_CURSOR_BIT）を足すだけ――下のentry_attr()参照。
+ * 同じファイルについて実測したカーソル行／非カーソル行の属性
+ * バイトはこのビットだけが異なり、色は決して変わらない。これは
+ * これが置き換えた「カーソル＝黄色／それ以外＝白」という旧方式
+ * とは異なる。 ------------------------------------------------------- */
 #define ATTR_BORDER      0xA1
 #define ATTR_LABEL       0xA1
 #define ATTR_TITLE       0xC1
@@ -1450,29 +1460,29 @@ void sappend_field_rj(char *dst, int *lenp, char *label, char *number, int width
 #define ATTR_LIST_SYS    0x61
 #define ATTR_CURSOR_BIT  0x04
 
-/* bottom function-key row attributes (row 24 only) - measured off the
- * real product's attribute plane, a different convention from ATTR_REV
- * above: the whole label is reversed AND uses a non-white color, and the
- * single character that is the actual key gets its own (yellow) color on
- * top of that same reverse bit - it is not simply "the key letter
- * reversed, rest plain" the way the old command line worked. See
- * docs/filer-measure-05.md. */
-#define ATTR_FKEY_LABEL 0xA5  /* reversed, color 101 - the label text */
-#define ATTR_FKEY_KEY   0xC5  /* reversed, color 110 (yellow) - the key char only */
+/* 最下段のファンクションキー行の属性（24行目のみ）――実機の属性面
+ * から実測したもので、上のATTR_REVとは異なる慣習になっている：
+ * ラベル全体が反転され、かつ非白の色を使い、実際のディスパッチ
+ * キーである1文字だけが、その同じ反転ビットの上にさらに独自の
+ * （黄色の）色を持つ――旧コマンド行のような「キー文字だけ反転、
+ * 残りは平文」という単純な形ではない。docs/filer-measure-05.md
+ * 参照。 */
+#define ATTR_FKEY_LABEL 0xA5  /* 反転、色101――ラベル文字全体 */
+#define ATTR_FKEY_KEY   0xC5  /* 反転、色110（黄色）――キー文字のみ */
 
-unsigned int g_curChar[VRAM_CELLS];  /* mirrors what is actually in VRAM */
+unsigned int g_curChar[VRAM_CELLS];  /* 現在実際にVRAMへ入っている内容を反映するミラー */
 unsigned char g_curAttr[VRAM_CELLS];
 
-/* the only function that actually touches hardware. offset is a byte
-   offset into either plane (0, 2, 4, ... 3998 - i.e. cellIndex*2);
-   chWord is stored as a 16-bit word (low byte at offset, high byte at
-   offset+1, i.e. the plain x86 little-endian store this is), attr's low
-   byte is stored as a single byte at the same offset in the attribute
-   plane. Segments are loaded through a general register (cx) because
-   x86 cannot move an immediate directly into a segment register; es is
-   saved/restored around this the same way dos_rename() above saves/
-   restores it around int 21h, since the caller cannot be assumed to not
-   care what es holds afterward. */
+/* 実際にハードウェアへ触れる唯一の関数。offsetはいずれかの面への
+   バイトオフセット（0, 2, 4, ... 3998、すなわちcellIndex*2）。
+   chWordは16ビットのワードとして格納する（offsetに下位バイト、
+   offset+1に上位バイト。すなわちx86のリトルエンディアンそのままの
+   格納）。attrの下位バイトは属性面の同じオフセットへ1バイトとして
+   格納する。セグメントは汎用レジスタ（cx）経由でロードしている
+   （x86ではセグメントレジスタへ即値を直接movできないため）。esは、
+   呼び出し元がその後のesの値を気にしないとは限らないため、上の
+   dos_rename()がint 21hの前後でesを退避・復元しているのと同じ
+   考え方でこの周りでも退避・復元している。 */
 void vram_put_raw(unsigned int offset, unsigned int chWord, unsigned int attr)
 {
   asm("mov di, [bp+4]\n"
@@ -1488,13 +1498,14 @@ void vram_put_raw(unsigned int offset, unsigned int chWord, unsigned int attr)
       "pop es");
 }
 
-/* CP932 (Shift_JIS) -> JIS X 0208, one character. Verified against a
-   table of 16 kanji/kana measured from the real screen (see the
-   milestone 5 commit message / docs) before this was ever used to draw
-   anything - not derived from reading any existing conversion table.
-   s1/s2 must be a valid SJIS lead/trail byte pair (0x81-0x9F or
-   0xE0-0xFC lead, 0x40-0xFC trail excluding 0x7F - the same range
-   text_width()/sappend() already assume elsewhere in this file). */
+/* CP932（Shift_JIS）→JIS X 0208、1文字ぶん。これを実際に何かの
+   描画に使う前に、実機の画面から実測した漢字／かな16文字の
+   表から検証済み（第5マイルストーンのコミットメッセージ／
+   ドキュメント参照）――既存の変換表を読んで作ったものではない。
+   s1/s2は正当なSJISの先頭／トレイルバイトのペアでなければならない
+   （0x81-0x9Fまたは0xE0-0xFCが先頭、0x40-0xFC（0x7Fを除く）が
+   トレイル――このファイルの他所でtext_width()/sappend()が既に
+   前提としているのと同じ範囲）。 */
 void sjis_to_jis(unsigned char s1, unsigned char s2, unsigned char *j1Out, unsigned char *j2Out)
 {
   unsigned char t1;
@@ -1514,11 +1525,12 @@ void sjis_to_jis(unsigned char s1, unsigned char s2, unsigned char *j1Out, unsig
   *j2Out = t2;
 }
 
-/* clears the mirror to a state that cannot match any real cell content
-   this program ever writes (chWord 0 only ever occurs as a would-be ANK
-   NUL, which is never written - see vram_ank()/vram_zenkaku()), so the
-   very first frame always writes every cell it touches instead of
-   trusting stale BSS zero-init. Called once at startup. */
+/* ミラーを、このプログラムが実際に書き込むどんなセルの内容にも
+   決して一致しない状態にクリアする（chWord 0は、書き込まれることの
+   無い「ANKのNUL」に相当する値としてしか発生しない――
+   vram_ank()/vram_zenkaku()参照）。これにより最初のフレームは、
+   古びたBSSのゼロ初期化を信用するのではなく、必ず触れるすべての
+   セルを実際に書き込むことになる。起動時に一度だけ呼ばれる。 */
 void vram_shadow_init(void)
 {
   int i;
@@ -1529,11 +1541,12 @@ void vram_shadow_init(void)
   }
 }
 
-/* writes one cell if (and only if) it differs from what the mirror says
-   is already there. row/col are cell coordinates (0-24 / 0-79); out of
-   range is silently ignored (defensive - every caller below already
-   stays in range, but a fixed-width field computed from a message that
-   somehow ran long must never be allowed to index past VRAM_CELLS). */
+/* ミラーが示している現在の内容と異なる場合に限り1セルを書く。
+   row/colはセル座標（0-24／0-79）。範囲外は黙って無視する
+   （防御的なもの――下の各呼び出し元はすでにすべて範囲内に
+   収まっているが、何らかのメッセージが想定より長くなって計算された
+   固定幅フィールドがVRAM_CELLSを超えてインデックスすることが
+   絶対に無いようにするため）。 */
 void vram_set_cell(int row, int col, unsigned int chWord, unsigned int attr)
 {
   unsigned int idx;
@@ -1546,18 +1559,18 @@ void vram_set_cell(int row, int col, unsigned int chWord, unsigned int attr)
   g_curAttr[idx] = (unsigned char)attr;
 }
 
-/* one ANK (half-width) cell: high byte 0x00, low byte = code as-is. Used
-   both for real ANK text and for the half-width box-drawing codes
-   (BOXCH_* above), which are plain byte constants, never C strings. */
+/* ANK（半角）セル1つぶん：上位バイト0x00、下位バイト＝コードその
+   まま。実際のANKテキストにも、半角罫線コード（上のBOXCH_*。単なる
+   バイト定数でありCの文字列では決してない）にも使う。 */
 void vram_ank(int row, int col, unsigned char code, unsigned int attr)
 {
   vram_set_cell(row, col, (unsigned int)code, attr);
 }
 
-/* one zenkaku (full-width) character spanning two cells at (row,col) and
-   (row,col+1); s1/s2 is the raw CP932 byte pair. See the file-header
-   comment above for the cell encoding and why the right-hand cell is
-   written too. */
+/* (row,col)と(row,col+1)の2セルにまたがる全角文字1文字ぶん。
+   s1/s2は生のCP932バイトペア。セルのエンコーディングと、なぜ
+   右側のセルにも書き込むのかについてはファイル冒頭のコメント
+   参照。 */
 void vram_zenkaku(int row, int col, unsigned char s1, unsigned char s2, unsigned int attr)
 {
   unsigned char j1;
@@ -1570,14 +1583,14 @@ void vram_zenkaku(int row, int col, unsigned char s1, unsigned char s2, unsigned
   vram_ank(row, col + 1, 0x20, attr);
 }
 
-/* places a NUL-terminated CP932 string at (row,col), at most 'width'
-   screen cells (same SJIS lead-byte rule as text_width()/sappend()
-   elsewhere in this file), then pads whatever is left of 'width' with
-   blanks - replaces put_str_cells() (which built a byte buffer for the
-   old ANSI writer) now that every cell is written straight through this.
-   Padding the remainder is required now that there is no more per-frame
-   ESC[2J: without it, a shorter string would leave older, longer
-   content sitting in the cells past its end. */
+/* (row,col)にNUL終端のCP932文字列を最大'width'画面セルぶん配置し
+   （このファイルの他所のtext_width()/sappend()と同じSJIS先頭バイト
+   ルール）、'width'の残り部分は空白でパディングする――旧ANSI
+   ライターのためにバイトバッファを組み立てていたput_str_cells()の
+   置き換え。今やすべてのセルがこの関数を通して直接書かれるように
+   なった。残りをパディングするのは、毎フレームのESC[2Jが無く
+   なった今では必須である：これをしないと、短い文字列が以前の
+   長い内容を末尾のセルに残したままにしてしまう。 */
 void vram_puts_cells(int row, int col, char *s, unsigned int attr, int width)
 {
   int i;
@@ -1595,7 +1608,7 @@ void vram_puts_cells(int row, int col, char *s, unsigned int attr, int width)
         cell += 2;
         i += 2;
       } else {
-        vram_ank(row, col + cell, c, attr); /* truncated lead byte: ANK fallback */
+        vram_ank(row, col + cell, c, attr); /* 先頭バイトだけで切れている：ANKにフォールバック */
         cell += 1;
         i += 1;
       }
@@ -1611,12 +1624,11 @@ void vram_puts_cells(int row, int col, char *s, unsigned int attr, int width)
   }
 }
 
-/* blanks every one of the 2000 cells to a plain white space - used once
-   at startup (to get rid of whatever the boot/DOS prompt left behind
-   before the first frame is drawn) and once at exit (to leave the
-   screen in a state DOS can use again). Both go through vram_set_cell(),
-   so like everything else here this only actually writes the cells that
-   need it. */
+/* 2000セルすべてを普通の白いスペースで塗りつぶす――起動時に
+   一度（ブート／DOSプロンプトが残していたものを消すため）、
+   終了時に一度（DOSがまた使える状態に画面を戻すため）使う。
+   どちらもvram_set_cell()を経由するので、ここでも実際に必要な
+   セルだけが書き込まれる。 */
 void vram_clear_all(void)
 {
   int i;
@@ -1626,12 +1638,13 @@ void vram_clear_all(void)
   }
 }
 
-/* positions the DOS/BIOS text cursor (the blinking hardware cursor,
-   shown only during input_dialog() - see its "\x1b[>5l"/"\x1b[>5h"
-   calls) via a plain ANSI CUP escape. This is unrelated to the SJIS/
-   half-width-box problem the vram_* functions above solve - it carries
-   no text, only ASCII digits - so it is still sent through the DOS
-   console exactly like write_str() below, rather than through VRAM. */
+/* DOS/BIOSのテキストカーソル（点滅するハードウェアカーソル。
+   input_dialog()の間だけ表示される――その"\x1b[>5l"/"\x1b[>5h"の
+   呼び出し参照）を、普通のANSI CUPエスケープで位置決めする。これは
+   上のvram_*関数群が解決しているSJIS／半角罫線の問題とは無関係――
+   運ぶのはASCIIの数字だけでテキストは含まない――なので、VRAM
+   経由ではなく、下のwrite_str()と全く同様に引き続きDOSコンソール
+   経由で送っている。 */
 void ansi_goto(int row, int col)
 {
   char out[16];
@@ -1652,8 +1665,8 @@ void ansi_goto(int row, int col)
   write_str(out);
 }
 
-/* draws one row of the header box: left border char + content
-   (space-padded/truncated to BOX_WIDTH cells) + right border char. */
+/* ヘッダボックスの1行を描画する：左枠文字＋内容（BOX_WIDTH
+   セルに合わせてスペース埋め／切り詰め）＋右枠文字。 */
 void box_row(int row, unsigned char lb, unsigned char rb, char *content, unsigned int contentAttr)
 {
   vram_ank(row, 0, lb, ATTR_BORDER);
@@ -1661,12 +1674,12 @@ void box_row(int row, unsigned char lb, unsigned char rb, char *content, unsigne
   vram_ank(row, 1 + BOX_WIDTH, rb, ATTR_BORDER);
 }
 
-/* draws a header-box separator row: border char, BOX_WIDTH horizontal
-   line cells, border char. Replaces build_dash_row() + box_row(), which
-   used to build a BOX_WIDTH-cell string of the (2-cell, full-width)
-   horizontal line character first - now that the line character is a
-   1-cell ANK code, and ANK codes cannot be handed to vram_puts_cells()
-   (see the file-header comment above), the cells are written directly. */
+/* ヘッダボックスの区切り行を描画する：枠文字、BOX_WIDTH個の
+   水平線セル、枠文字。build_dash_row() + box_row()の置き換え――
+   これらはかつて（2セル幅の全角）水平線文字をBOX_WIDTHセルぶん
+   並べた文字列をまず組み立てていたが、水平線文字が今は1セルの
+   ANKコードになっており、ANKコードはvram_puts_cells()に渡せない
+   （ファイル冒頭のコメント参照）ため、各セルを直接書いている。 */
 void box_dash_row(int row, unsigned char lb, unsigned char rb)
 {
   int i;
@@ -1676,45 +1689,47 @@ void box_dash_row(int row, unsigned char lb, unsigned char rb)
   vram_ank(row, 1 + BOX_WIDTH, rb, ATTR_BORDER);
 }
 
-/* draws the header box's top border row (row 0): corners, horizontal
-   line, the title message, horizontal line, filling exactly BOX_WIDTH
-   interior cells. Width is computed in cells via text_width(), never
-   assumed, so this adapts to either language table without hardcoding a
-   length. Replaces build_title_row() + box_row() for the same reason as
-   box_dash_row() above - BOXCH_H is now an ANK code, not SJIS text, so
-   it cannot be mixed into a plain string with the (real, CP932) title
-   text and handed to vram_puts_cells() in one call. */
-/* Milestone 7 fix: measured on real hardware, column DISK_SEP_COL1 (the
-   disk-line divider's row-0 junction) flickered between a blank space and
-   the junction char 0x91 - roughly 5:9 over 14 samples - even though this
-   function always converges to the same final content every frame. The
-   cause: the previous version wrote every cell of the fill run first
-   (plain dashes, unconditionally) and only afterward, in two more calls at
-   the very end, overwrote DISK_SEP_COL1/2 with the junction char. Both
-   writes happen on *every single frame*, not just when something actually
-   changed - vram_set_cell()'s mirror only skips a write when the *new*
-   value already matches the *last* value written to that cell, and here
-   the two stages genuinely write two different values in sequence, every
-   frame. So real hardware saw two real writes to that cell every frame -
-   dash, then junction - and the screen could be sampled mid-frame, between
-   them. (Separately measured: the right-hand cell of a full-width
-   character does not affect what is drawn, but it still holds whatever
-   value was last written to it - so a junction char placed over a title
-   character's right-hand cell changes the byte in VRAM without changing
-   what is visible, which is consistent with the space/junction pattern
-   observed here landing on such a cell.)
-   The fix: decide each cell's final content exactly once, in a single pass
-   over the row, so a cell is written at most once per frame (zero times
-   once the mirror already holds that value). Milestone 9 keeps this same
-   single-pass discipline while centering the title: the junction char is
-   placed only while iterating one of the two dash-fill runs (left or
-   right of the "<< title >>" block) - i.e. only in columns not already
-   occupied by the bracket pair, the title text, or the gap before the
-   clock/the clock digits. If DISK_SEP_COL1/2 land inside one of those
-   occupied regions instead (a long title in the other language, say),
-   the junction is simply not drawn there - that column keeps whatever
-   the occupying content drew, once, matching this file's "occupied
-   columns don't get a junction" rule. */
+/* ヘッダボックスの上端（0行目）を描画する：角、水平線、タイトル
+   メッセージ、水平線で、内側のBOX_WIDTHセルをちょうど埋める。幅は
+   決め打ちにせず常にtext_width()でセル単位に計算するので、
+   長さをハードコードすることなくどちらの言語テーブルにも対応
+   できる。build_title_row() + box_row()の置き換え理由は上の
+   box_dash_row()と同じ――BOXCH_Hは今やSJISテキストではなくANK
+   コードなので、実際の（CP932の）タイトル文字列と1つの文字列に
+   混ぜてvram_puts_cells()へ一括で渡すことができない。 */
+/* 第7マイルストーンでの修正：実機で実測したところ、DISK_SEP_COL1
+   の桁（ディスク行区切りの0行目での交差点）が、14サンプル中
+   おおよそ5:9の比率で、空白と交差記号0x91の間でちらついていた
+   ――このこと自体、この関数が毎フレーム最終的には同じ内容へ
+   収束しているにもかかわらず、である。原因：以前のバージョンは
+   まず埋め部分のすべてのセルを（単純にダッシュで、無条件に）書き、
+   その後の最後の2回の呼び出しでDISK_SEP_COL1/2を交差記号で
+   上書きしていた。この2回の書き込みは、実際に何かが変化したか
+   どうかにかかわらず*毎フレーム*発生する――vram_set_cell()の
+   ミラーは、そのセルへ*最後に*書いた値と*新しい*値が一致する
+   ときだけ書き込みを省略するが、ここでは2つの段階が実際に
+   毎フレーム順番に異なる2つの値を書いているのでスキップされない。
+   つまり実機はそのセルへ毎フレーム2回の実際の書き込み――ダッシュ、
+   そして交差記号――を見ており、画面はその間のフレーム中間の
+   タイミングでサンプリングされうる。（別途実測：全角文字の
+   右側セルは表示には影響しないが、そこに最後に書かれた値は
+   そのまま保持される――つまりタイトル文字の右側セルの上に
+   交差記号を置くと、見た目を変えずにVRAM上のバイトだけが変わる
+   ことになり、これはここで観測された空白／交差記号パターンが
+   そのようなセルに来ていたことと整合する。）
+   修正：各セルの最終的な内容を、行を1回だけ走査してちょうど
+   一度に決める。これにより1つのセルはフレームごとに最大1回
+   （ミラーが既にその値を保持していれば0回）しか書き込まれない。
+   第9マイルストーンでもタイトルを中央寄せしつつこの単一パス
+   方式を保っている：交差記号は、"<< タイトル >>"ブロックの
+   左右いずれかのダッシュ埋め部分を走査している間にのみ置く――
+   つまり、括弧・タイトル文字列・時計前の隙間／時計の桁のいずれ
+   にも既に占有されていない桁でのみ置く。もしDISK_SEP_COL1/2が
+   それらの占有領域の中に来た場合（例えば別言語で長いタイトルに
+   なったとき）は、その位置には交差記号を描かない――その桁は
+   それを占有している内容が一度描いたものをそのまま保持する。
+   これは「占有済みの桁には交差記号を置かない」というこのファイル
+   の規則と一致している。 */
 void draw_title_row(void)
 {
   char *title;
@@ -1731,27 +1746,26 @@ void draw_title_row(void)
 
   title = g_title;
   titleCells = text_width(title);
-  /* dash-fill, then a blank cell, then "<< title >>" (measured on the
-     original: the title is centered inside a bracket pair, not left-
-     aligned - see TITLE_DECOR_WIDTH's comment above), then another blank
-     cell, then dash-fill again, then the gap and the clock field on the
-     right. totalFill is split as evenly as possible between the left and
-     right dash runs (any odd cell goes to the right) so the block reads
-     as centered; either way the row always ends exactly at the right
-     border regardless of title length, same as before. */
+  /* ダッシュ埋め、空白セル、"<< タイトル >>"（本家で実測：タイトルは
+     左寄せではなく括弧の中で中央寄せされている――上のTITLE_DECOR_WIDTH
+     のコメント参照）、さらに空白セル、再びダッシュ埋め、その後
+     右側に時計フィールドとの隙間と時計フィールド、という順。
+     totalFillは左右のダッシュにできるだけ均等に分配する（余った
+     1セルは右側へ）ことで、中央寄せに見えるようにする――どちらに
+     せよ、この行はタイトルの長さに関わらず常に右端ぴったりで
+     終わる（従来どおり）。 */
   totalFill = BOX_WIDTH - TITLE_DECOR_WIDTH - titleCells - 2
               - TITLE_DATETIME_GAP - DATETIME_WIDTH - TITLE_TAIL_WIDTH;
-  if (totalFill < 0) totalFill = 0; /* defensive: title too wide to fit */
+  if (totalFill < 0) totalFill = 0; /* 防御的処理：タイトルが幅に収まらない場合 */
   leftFill = totalFill / 2;
   rightFill = totalFill - leftFill;
 
   col = 1;
   for (i = 0; i < leftFill; i++) {
-    /* one of the two places this row ever places the disk-separator
-       junction char - see the function comment above for why doing it
-       here, inline with the fill loops, instead of as a separate
-       unconditional pass afterward, is what stops this cell from
-       flickering. */
+    /* この行がディスク区切りの交差記号を置く2箇所のうちの1つ――
+       埋めループの中でインラインにここで行う理由（後から別の
+       無条件パスとして行うのではなく）は、このセルがちらつかない
+       ようにするためであり、上の関数コメント参照。 */
     if (col == DISK_SEP_COL1 || col == DISK_SEP_COL2) {
       vram_ank(ROW_TITLE, col, BOXCH_TJ, ATTR_BORDER);
     } else {
@@ -1783,22 +1797,22 @@ void draw_title_row(void)
   for (i = 0; i < DATETIME_WIDTH; i++) {
     vram_ank(ROW_TITLE, col, (unsigned char)datetime[i], ATTR_TITLE); col++;
   }
-  /* TITLE_TAIL_WIDTH: a blank cell then one more border-line cell,
-     landing just before the top-right corner written at the top of this
-     function - see the TITLE_TAIL_WIDTH comment above. */
+  /* TITLE_TAIL_WIDTH：空白セル1つ、続けて枠線セルもう1つ。ちょうど
+     この関数の冒頭で書かれる右上の角の直前に来る――上の
+     TITLE_TAIL_WIDTHのコメント参照。 */
   vram_ank(ROW_TITLE, col, ' ', ATTR_TITLE); col++;
   vram_ank(ROW_TITLE, col, BOXCH_H, ATTR_BORDER); col++;
 }
 
-/* immediate one-off write, used only for the pre/post-frame terminal mode
-   escapes in main() (not part of a screen frame) and by ansi_goto()
-   above. */
+/* その場限りの即時書き込み。main()のフレーム前後の端末モード
+   エスケープ（画面フレームの一部ではない）と、上のansi_goto()
+   だけで使う。 */
 void write_str(char *s)
 {
   dos_write(s, (unsigned int)strlen(s));
 }
 
-/* ---- directory scanning ------------------------------------------------ */
+/* ---- ディレクトリスキャン ------------------------------------------------ */
 
 void read_dir(void)
 {
@@ -1856,11 +1870,11 @@ void read_path(void)
   if (cwdbuf[0] != 0) strcat(g_path, "\\");
 }
 
-/* ---- marking ----------------------------------------------------------- */
+/* ---- マーク処理 ----------------------------------------------------------- */
 
-/* directories are never markable - measured against the original: of 32
-   entries only the 18 non-directory files could be marked, the 14
-   directories could not. */
+/* ディレクトリは決してマーク不可――本家に対する実測：32件中、
+   マーク可能だったのは非ディレクトリの18件のみで、14件の
+   ディレクトリはマークできなかった。 */
 int is_dir_entry(int idx)
 {
   return (g_attr[idx] & ATTR_DIR) ? 1 : 0;
@@ -1885,9 +1899,9 @@ void clear_marks(void)
   for (i = 0; i < MAX_ENTRIES; i++) g_marked[i] = 0;
 }
 
-/* SPACE/TAB: sets the mark on the entry under the cursor (does not
-   toggle it back off - only HOME toggles). No-op on a directory and
-   no-op when the list is empty. */
+/* SPACE/TAB：カーソル位置のエントリにマークを立てる（オフには
+   戻さない――トグルするのはHOMEだけ）。ディレクトリでは何もせず、
+   一覧が空でも何もしない。 */
 void mark_cursor(void)
 {
   if (g_count == 0) return;
@@ -1895,8 +1909,9 @@ void mark_cursor(void)
   g_marked[g_cursor] = 1;
 }
 
-/* HOME: if any entry is marked, clears every mark; otherwise marks every
-   markable (non-directory) entry. */
+/* HOME：何か1つでもマークされていれば全マークを解除し、そうで
+   なければマーク可能な（非ディレクトリの）エントリすべてに
+   マークを立てる。 */
 void toggle_all_marks(void)
 {
   int i;
@@ -1910,11 +1925,12 @@ void toggle_all_marks(void)
   }
 }
 
-/* ---- directory navigation ----------------------------------------------- */
+/* ---- ディレクトリの移動 ----------------------------------------------- */
 
-/* builds g_path + name into out[]; 'cap' is out[]'s declared size and is
-   enforced the same way sappend() enforces it elsewhere - truncates
-   rather than overflowing, never splits a multi-byte character. */
+/* g_path＋nameをout[]へ組み立てる。'cap'はout[]の宣言サイズで、
+   このファイルの他所でsappend()が強制しているのと同じ方法で
+   強制する――あふれさせず切り詰め、マルチバイト文字を分断
+   することは決してない。 */
 void build_full_path(char *out, int cap, char *name)
 {
   int p;
@@ -1924,11 +1940,12 @@ void build_full_path(char *out, int cap, char *name)
   sappend(out, &p, name, cap);
 }
 
-/* true if name's extension (case-insensitive) is COM or EXE - the same
-   rule do_exec() uses to decide whether F2/X may run a file. Shared by
-   enter_selected() (milestone 8): Enter on such a file does nothing here
-   (running a program stays F2/X-only, unchanged), Enter on anything else
-   non-directory opens the built-in viewer (do_view()) instead. */
+/* nameの拡張子（大文字小文字を区別しない）がCOMまたはEXEなら真
+   ――F2/Xでファイルを実行してよいかをdo_exec()が判断するのと
+   同じルール。enter_selected()（第8マイルストーン）と共用：
+   そのようなファイルへのEnterはここでは何もしない（プログラムの
+   実行は従来どおりF2/Xのみ）が、それ以外の非ディレクトリへの
+   Enterは代わりに組み込みビューア（do_view()）を開く。 */
 int is_exec_ext(char *name)
 {
   int len;
@@ -1952,12 +1969,12 @@ int is_exec_ext(char *name)
   return (strcmp(ext, "COM") == 0 || strcmp(ext, "EXE") == 0);
 }
 
-/* Enter on a directory entry: "." (stay), ".." (go up one level, "." and
-   ".." are listed like the original and not hidden), or a subdirectory
-   name (go into it). g_path always ends with '\\'; both branches keep
-   that invariant. All appends are bounds-checked against sizeof(g_path)
-   via sappend(), the same discipline as everywhere else that builds a
-   fixed-size string in this file. */
+/* ディレクトリエントリへのEnter："."（その場に留まる）、".."
+   （1つ上の階層へ。"."と".."は本家同様に一覧に表示され、隠さない）、
+   またはサブディレクトリ名（その中へ入る）。g_pathは常に'\\'で
+   終わる。どちらの分岐もその不変条件を保つ。追記操作はすべて、
+   このファイルの他所で固定長文字列を組み立てる場合と同じ
+   規律で、sappend()経由でsizeof(g_path)に対して境界チェックされる。 */
 void enter_selected(void)
 {
   char *name;
@@ -1969,9 +1986,9 @@ void enter_selected(void)
   name = &g_name[g_cursor * NAME_LEN];
 
   if (!is_dir_entry(g_cursor)) {
-    /* milestone 8: COM/EXE stays a no-op here (run it with F2/X instead,
-       matching do_exec()'s own launch rule); anything else opens the
-       built-in viewer. */
+    /* 第8マイルストーン：COM/EXEはここでは引き続き何もしない
+       （代わりにF2/Xで実行する――do_exec()自身の起動ルールと
+       一致）。それ以外は組み込みビューアを開く。 */
     if (is_exec_ext(name)) return;
     do_view(name);
     return;
@@ -1985,7 +2002,7 @@ void enter_selected(void)
     len = strlen(g_path);
     if (len > 0 && g_path[len - 1] == '\\') len--;
     while (len > 0 && g_path[len - 1] != '\\') len--;
-    if (len < 3) len = 3; /* keep the drive root "X:\\" intact */
+    if (len < 3) len = 3; /* ドライブルート "X:\\" はそのまま保つ */
     g_path[len] = 0;
   } else {
     p = strlen(g_path);
@@ -1999,17 +2016,18 @@ void enter_selected(void)
   draw_screen();
 }
 
-/* ---- delete -------------------------------------------------------------- */
+/* ---- 削除 -------------------------------------------------------------- */
 
-/* draws the base screen, then overlays a small modal dialog box (2 lines:
-   the prompt, and optionally an error line under it). Every cell this
-   touches goes straight through vram_set_cell()'s "skip if unchanged"
-   check (see the vram_* section above), so this never blanks anything -
-   the underlying list stays visible right up until the exact cells the
-   dialog box occupies change. This is the "no dedicated bottom status
-   line; errors appear inside the dialog, prompt stays up" behaviour
-   measured from the original - see the milestone doc. errmsg may be 0
-   for "no error line". */
+/* ベースの画面を描いた上に、小さなモーダルダイアログボックス
+   （2行：プロンプト、そして任意でその下にエラー行）を重ねる。
+   ここが触るセルはすべて、vram_set_cell()の「変化が無ければ
+   スキップ」というチェック（上のvram_*節参照）を通るため、これは
+   何かを空白にすることが決してない――背後の一覧は、ダイアログ
+   ボックスが占めるまさにそのセルが変化するその瞬間まで表示され
+   続ける。これは本家で実測した「専用のステータス行は無く、
+   エラーはダイアログの中に現れ、プロンプトは表示されたまま」
+   という挙動――マイルストーンのドキュメント参照。errmsgは
+   「エラー行なし」を表すのに0を渡してよい。 */
 #define DIALOG_WIDTH  60
 #define DIALOG_ROW    10
 #define DIALOG_COL    8
@@ -2044,25 +2062,27 @@ void draw_dialog(char *msg, char *errmsg)
   vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BORDER);
 }
 
-/* ---- reusable text-input dialog (Rename / mKdir) -----------------------
- * Draws the same kind of box as draw_dialog() (base screen still visible
- * underneath - only the dialog area is overwritten) but with one editable
- * field: a prompt fragment followed by the text being typed. Used by both
- * do_rename() and do_mkdir() so the box, the edit keys, and the "error
- * shown inline, prompt stays up, keep typing" behaviour exist in exactly
- * one place.
+/* ---- 再利用可能なテキスト入力ダイアログ（Rename / mKdir） -----------------------
+ * draw_dialog()と同種のボックスを描く（下の基本画面はそのまま
+ * 見えており、ダイアログの領域だけが上書きされる）が、編集可能な
+ * フィールドを1つ持つ：プロンプトの断片＋入力中のテキスト。
+ * do_rename()とdo_mkdir()の両方から使われるので、ボックス・編集
+ * キー・「エラーはインラインで表示、プロンプトは表示されたまま、
+ * 入力継続」という挙動が、ちょうど1箇所にだけ存在する。
  * ------------------------------------------------------------------- */
 
-/* renders one frame of the input dialog: base screen, box border, the
-   prompt+typed-text line, an optional error line below it, and leaves
-   the (temporarily visible) text cursor positioned right after the last
-   typed character so the user can see where they are. 'buf' holds
-   'len' already-typed characters (not necessarily NUL-terminated at
-   'len' yet - the caller NUL-terminates on return, not per frame).
-   'line' is sized generously: prompt fragments here are short JA/EN
-   labels and 'buf' is at most INPUT_MAXLEN ASCII bytes, so this never
-   comes close to overflowing; sappend() bounds it defensively anyway,
-   the same discipline as every other row-building function above. */
+/* 入力ダイアログの1フレームを描画する：基本画面、ボックスの枠、
+   プロンプト＋入力済みテキストの行、その下の任意のエラー行、
+   そして（一時的に表示される）テキストカーソルを最後に入力した
+   文字のすぐ後ろに置き、ユーザーが今どこにいるか分かるようにする。
+   'buf'には既に入力済みの'len'文字が入っている（まだ'len'の位置で
+   NUL終端されているとは限らない――呼び出し元は戻るときにNUL終端
+   するのであって、フレームごとにではない）。'line'はかなり
+   余裕を持たせたサイズになっている：ここでのプロンプトの断片は
+   短い日英ラベルであり、'buf'は最大でもINPUT_MAXLENバイトの
+   ASCIIなので、これがあふれることには到底ならない。それでも
+   sappend()が念のため防御的に制限をかけている――上の他の行組み立て
+   関数すべてと同じ規律。 */
 void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
 {
   char line[DIALOG_WIDTH * 2 + NAME_LEN + 4];
@@ -2084,7 +2104,7 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   p = 0;
   sappend(line, &p, prompt, sizeof(line));
   promptCells = text_width(line);
-  buf[len] = 0; /* line/sappend below need a NUL-terminated C string */
+  buf[len] = 0; /* 下のline/sappendにはNUL終端されたC文字列が必要 */
   sappend(line, &p, buf, sizeof(line));
 
   vram_ank(row, DIALOG_COL, BOXCH_V, ATTR_BORDER);
@@ -2104,41 +2124,44 @@ void draw_input_box(char *prompt, char *buf, int len, char *errmsg)
   for (i = 0; i < DIALOG_WIDTH; i++) vram_ank(row, DIALOG_COL + 1 + i, BOXCH_H, ATTR_BORDER);
   vram_ank(row, DIALOG_COL + 1 + DIALOG_WIDTH, BOXCH_BR, ATTR_BORDER);
 
-  /* BOXCH_V is now a 1-cell ANK border character, so the field text
-     starts 1 cell past the border column (this used to be 2, when the
-     border was a 2-cell full-width character). */
+  /* BOXCH_Vは今や1セルのANK枠文字になったので、フィールドの
+     テキストは枠の桁の1セル後ろから始まる（枠が2セルの全角
+     文字だった頃は2セルだった）。 */
   fieldCol = DIALOG_COL + 1 + promptCells + len;
   ansi_goto(fieldRow, fieldCol);
 }
 
-/* runs the modal edit loop for one text field. 'buf' holds the initial
-   value on entry (may be empty; must already be NUL-terminated) and
-   receives the edited text (also NUL-terminated) on return, whether
-   confirmed or cancelled. 'buf' must be declared with at least
-   maxlen+1 bytes - see INPUT_MAXLEN, the limit every caller in this
-   file uses (an 8.3 DOS name). 'errmsg' may be 0 for "no error line to
-   start"; passing a non-0 errmsg lets a caller re-enter this loop after
-   a failed DOS operation with the error still showing next to the same
-   prompt and the same typed text, rather than losing the prompt behind
-   a separate "press any key" dialog.
-   Editing: BS (0x08 - the same code KEY_LEFT uses outside this dialog,
-   but here it is always backspace, never "move left") deletes the last
-   character; printable ASCII (0x20-0x7E) is appended if there is still
-   room under maxlen; anything else is ignored. Any edit keypress clears
-   a currently-shown error, since the user is now acting on it.
-   The text cursor is hidden everywhere else in this program (see
-   main()'s "\x1b[>5h" at start), so it is shown just for the lifetime
-   of this loop and hidden again before returning, on every exit path.
-   Returns 1 if Enter confirmed the input, 0 if ESC cancelled it. */
+/* 1つのテキストフィールドについてモーダル編集ループを回す。
+   'buf'には入る時点で初期値が入っている（空でもよいが、既に
+   NUL終端されていること）。戻るときには、確定・キャンセルの
+   いずれの場合も編集後のテキスト（同じくNUL終端）が入る。
+   'buf'は少なくともmaxlen+1バイトで宣言されていなければならない
+   ――INPUT_MAXLENを参照。このファイルのすべての呼び出し元が
+   使う上限（8.3形式のDOS名）である。'errmsg'は「開始時にエラー
+   行なし」を表すのに0を渡してよい。0以外のerrmsgを渡すことで、
+   呼び出し元は失敗したDOS操作の後、同じプロンプトの横にエラーを
+   表示したまま、入力済みのテキストもそのままの状態でこのループへ
+   再入できる――別の「何かキーを押してください」ダイアログの陰に
+   プロンプトを失わせることなく。
+   編集：BS（0x08――このダイアログの外でKEY_LEFTが使うのと同じ
+   コードだが、ここでは常にバックスペースであり、「左へ移動」で
+   あることは決して無い）は最後の1文字を削除する。表示可能な
+   ASCII（0x20-0x7E）は、maxlen未満の余地がまだあれば追記される。
+   それ以外はすべて無視される。編集キーが押されると、ユーザーが
+   今それに対処しているという理由で、表示中のエラーは消える。
+   このプログラムの他のあらゆる場所ではテキストカーソルは隠されて
+   いる（main()の起動時の"\x1b[>5h"参照）ので、このループの
+   生存期間中だけ表示し、どの脱出経路でも戻る前に必ず再び隠す。
+   Enterで入力が確定されれば1、ESCでキャンセルされれば0を返す。 */
 int input_dialog(char *prompt, char *buf, int maxlen, char *errmsg)
 {
   int len;
   int key;
 
   len = strlen(buf);
-  if (len > maxlen) len = maxlen; /* defensive */
+  if (len > maxlen) len = maxlen; /* 防御的処理 */
 
-  write_str("\x1b[>5l"); /* show the text cursor while editing */
+  write_str("\x1b[>5l"); /* 編集中はテキストカーソルを表示する */
 
   for (;;) {
     draw_input_box(prompt, buf, len, errmsg);
@@ -2154,7 +2177,7 @@ int input_dialog(char *prompt, char *buf, int maxlen, char *errmsg)
       write_str("\x1b[>5h");
       return 1;
     }
-    if (key == 0x08) { /* BS; same code as KEY_LEFT, treated as BS here */
+    if (key == 0x08) { /* BS。KEY_LEFTと同じコードだが、ここではBSとして扱う */
       if (len > 0) len--;
       errmsg = 0;
       continue;
@@ -2167,20 +2190,22 @@ int input_dialog(char *prompt, char *buf, int maxlen, char *errmsg)
       errmsg = 0;
       continue;
     }
-    /* any other key (arrows, TAB, HOME, ...): ignored in this dialog */
+    /* それ以外のキー（矢印、TAB、HOMEなど）：このダイアログでは無視する */
   }
 }
 
-/* D/d: deletes the marked files, or (when nothing is marked) the single
-   file under the cursor. The target rule is one rule, not two cases that
-   can disagree: "marked set if non-empty, else the cursor entry" - see
-   the milestone doc.
-   Directories are never in the marked set (mark_cursor() refuses them),
-   so the only way a directory can be "the target" is the no-mark,
-   cursor-on-a-directory case; that is caught up front and refused with
-   an explicit error dialog rather than silently skipped or silently
-   deleting something else. No "delete completed" message is shown on
-   success, matching the original; the list is simply shorter afterward. */
+/* D/d：マークされたファイル、あるいは（何もマークされていなければ）
+   カーソル位置の1件を削除する。ターゲットの決め方は、食い違う
+   ことがありうる2つのケースではなく、ただ1つのルール――「マークが
+   空でなければマーク集合、空ならカーソル位置のエントリ」――で
+   ある。マイルストーンのドキュメント参照。
+   ディレクトリは決してマーク集合に入らない（mark_cursor()が
+   拒否する）ので、ディレクトリが「対象」になりうるのは、マーク
+   無し・カーソルがディレクトリ上にあるケースだけである。それは
+   事前にとらえて、黙ってスキップしたり別の何かを黙って削除したり
+   するのではなく、明示的なエラーダイアログで拒否する。成功時は
+   本家に合わせて「削除完了」メッセージは表示しない。一覧が単に
+   後で短くなっているだけである。 */
 void do_delete(void)
 {
   int i;
@@ -2227,8 +2252,9 @@ void do_delete(void)
     return;
   }
 
-  /* marked set: guaranteed to contain no directories (mark_cursor()
-     never marks one), so no per-entry directory check is needed here. */
+  /* マーク集合：ディレクトリを一切含まないことが保証されている
+     （mark_cursor()が決してマークしないため）ので、ここでは
+     エントリごとのディレクトリチェックは不要。 */
   p = 0;
   sappend(msg, &p, MSG(MSG_DEL_CONFIRM_MARK_PRE), sizeof(msg));
   sappend_uint(msg, &p, (unsigned int)count_marked(), sizeof(msg));
@@ -2259,14 +2285,14 @@ void do_delete(void)
   draw_screen();
 }
 
-/* R/r: renames the single entry under the cursor (marks are not used -
-   the target is always the cursor entry, unlike D which prefers the
-   marked set). "." and ".." are not renameable and are silently
-   ignored, matching enter_selected()'s treatment of "." as a no-op.
-   The input dialog is pre-filled with the current name; on confirm,
-   dos_rename() is attempted and, on failure, the dialog re-opens with
-   an error line and the text the user typed still in the field so they
-   can correct it without retyping everything. */
+/* R/r：カーソル位置の1件だけを名前変更する（マークは使わない――
+   対象は常にカーソル位置のエントリで、マーク集合を優先するDとは
+   異なる）。"."と".."は名前変更不可で、enter_selected()が"."を
+   何もしないものとして扱うのと同様、黙って無視される。
+   入力ダイアログには現在の名前があらかじめ入っている。確定すると
+   dos_rename()を試み、失敗した場合はエラー行付きでダイアログを
+   再度開き、入力欄にはユーザーが入力したテキストがそのまま
+   残っているので、全部打ち直さずに修正できる。 */
 void do_rename(void)
 {
   char buf[INPUT_MAXLEN + 1];
@@ -2283,7 +2309,7 @@ void do_rename(void)
   name = &g_name[idx * NAME_LEN];
   if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return;
 
-  strcpy(buf, name); /* name is at most NAME_LEN-1 = INPUT_MAXLEN chars */
+  strcpy(buf, name); /* 名前は最大でNAME_LEN-1＝INPUT_MAXLEN文字 */
 
   err = 0;
   for (;;) {
@@ -2308,10 +2334,10 @@ void do_rename(void)
   draw_screen();
 }
 
-/* K/k: creates a new directory in the current path (g_path). The input
-   dialog starts empty; on confirm, dos_mkdir() is attempted and, on
-   failure (e.g. a name that already exists), the dialog re-opens with
-   an error line, same shape as do_rename() above. */
+/* K/k：カレントパス（g_path）に新しいディレクトリを作成する。
+   入力ダイアログは空の状態で始まる。確定するとdos_mkdir()を試み、
+   失敗した場合（既に同名が存在する等）は、上のdo_rename()と
+   同じ形で、エラー行付きでダイアログを再度開く。 */
 void do_mkdir(void)
 {
   char buf[INPUT_MAXLEN + 1];
@@ -2343,30 +2369,34 @@ void do_mkdir(void)
   draw_screen();
 }
 
-/* ---- execute (F2 / eXec) ------------------------------------------------- */
+/* ---- 実行（F2 / eXec） ------------------------------------------------- */
 
-/* X/x, F2: runs the file under the cursor (marks are not used - the
-   target is always the cursor entry, the same "single, cursor-only"
-   target rule do_rename() uses, not do_delete()/do_copy()/do_move()'s
-   "marked set if non-empty" rule - running more than one program per
-   keypress does not make sense). Only a .COM or .EXE file is run;
-   anything else - a directory, a file with no extension or a different
-   one - is refused with an explicit error dialog, never silently doing
-   nothing (see the do_exec() task's requirement).
-   Runs the child with INT 21h AH=4Bh (dos_exec() above): this program's
-   MZ header sets minalloc == maxalloc (confirmed by measurement, not
-   assumed here), so it never claims all of conventional memory at load
-   time and there is free memory left for DOS to load a child into.
-   The child is free to leave the screen in any state at all (an ordinary
-   console program will have overwritten most or all of it) and this
-   program has no way to know what it left behind, so on return this
-   always invalidates the VRAM shadow mirror (vram_shadow_init() - see the
-   vram_* section above) before drawing anything else, forcing every one
-   of the next redraw's cells to actually be written instead of trusting
-   stale "what's already on screen" state that no longer matches reality.
-   A "press any key" dialog is shown first (success or failure) so the
-   user actually gets to see whatever the child printed before this
-   program's own full-screen redraw overwrites it. */
+/* X/x、F2：カーソル位置のファイルを実行する（マークは使わない――
+   対象は常にカーソル位置のエントリで、do_rename()と同じ
+   「単一・カーソルのみ」というターゲットルールであり、
+   do_delete()/do_copy()/do_move()の「マークが空でなければマーク
+   集合」というルールではない――キー1つで複数のプログラムを実行
+   するのは意味をなさないため）。実行するのは.COMまたは.EXE
+   ファイルのみ。それ以外（ディレクトリ、拡張子が無いファイル、
+   別の拡張子）は、何もせず黙って終わるのではなく、明示的な
+   エラーダイアログで拒否する（do_exec()タスクの要件参照）。
+   子プロセスはINT 21h AH=4Bh（上のdos_exec()）で実行する：この
+   プログラムのMZヘッダはminalloc == maxallocに設定されており
+   （ここで決め打ちにせず実測で確認済み）、ロード時にコンベンショナル
+   メモリを丸ごと確保することは無いので、DOSが子プロセスを
+   ロードするための空きメモリが残る。
+   子プロセスは画面をどんな状態にしていってもよく（普通の
+   コンソールプログラムなら大部分、あるいは全部を上書きしている
+   だろう）、このプログラムには子プロセスが何を残していったか
+   知る術が無いので、戻ってきたら何か他を描画する前に必ずVRAM
+   シャドウミラー（vram_shadow_init()――上のvram_*節参照）を
+   無効化し、実態と一致しなくなった古びた「既に画面にあるもの」
+   状態を信用するのではなく、次の再描画のすべてのセルを実際に
+   書き込ませる。
+   「何かキーを押してください」ダイアログを（成功・失敗いずれの
+   場合も）まず表示するので、このプログラム自身のフルスクリーン
+   再描画が上書きしてしまう前に、ユーザーは子プロセスが何を
+   表示したのかを実際に見ることができる。 */
 void do_exec(void)
 {
   char *name;
@@ -2422,19 +2452,21 @@ void do_exec(void)
 
   build_full_path(path, sizeof(path), name);
 
-  /* command tail: a length-prefixed string (count byte, then that many
-     characters, then a trailing CR) - empty here (count 0), same as
-     pressing Enter at a DOS prompt with no arguments typed. */
+  /* コマンドテール：長さ接頭辞付きの文字列（カウントバイト、続けて
+     その文字数ぶんの文字、末尾にCR）――ここでは空（カウント0）で、
+     DOSプロンプトで引数を何も打たずにEnterを押した場合と同じ。 */
   cmdTail[0] = 0;
   cmdTail[1] = 0x0d;
   for (i = 0; i < 16; i++) { fcb1[i] = 0; fcb2[i] = 0; }
   for (i = 0; i < 14; i++) param[i] = 0;
 
-  /* EXEC parameter block (INT 21h AH=4Bh): word env segment (0 = copy
-     this program's own environment to the child - the normal case), then
-     three offset:segment far pointers (command tail, FCB1, FCB2). Every
-     pointer here targets a buffer in this same small-model data segment,
-     so the segment half of each one is just get_ds() repeated. */
+  /* EXECパラメータブロック（INT 21h AH=4Bh）：word型の環境
+     セグメント（0＝このプログラム自身の環境を子プロセスへ
+     コピーする、通常のケース）、続けてoffset:segment形式の
+     farポインタ3つ（コマンドテール、FCB1、FCB2）。ここでの
+     ポインタはすべてこの同じスモールモデルのデータセグメント
+     内のバッファを指すので、それぞれのセグメント側は単に
+     get_ds()を繰り返し呼んでいるだけである。 */
   ds = get_ds();
   off = (unsigned int)cmdTail;
   param[2] = (char)(off & 0xff);
@@ -2454,25 +2486,27 @@ void do_exec(void)
 
   rc = dos_exec(path, (unsigned char *)param);
 
-  /* the child may have written anything to the screen (or nothing, if
-     dos_exec() itself failed before ever loading it) - invalidate the
-     mirror unconditionally so every write below actually happens; see
-     this function's header comment above.
-     Measured bug (real hardware, F2 -> COMMAND.COM -> EXIT): the child's
-     own output can scroll the physical screen, which shifts old content
-     (e.g. this program's own function-key row) into cells this program's
-     normal redraw never revisits on its own - row 23 sits between the
-     file list and the function-key row and nothing ever draws it, and the
-     1-cell gap column between the two list columns and the very last
-     screen column are never drawn either. Invalidating the mirror alone
-     is not enough for this: draw_dialog()/draw_screen() below only ever
-     repaint the cells they actually use, so a stale cell outside that set
-     stays stale forever - the shifted content just sits there. */
+  /* 子プロセスは画面に何を書いていてもおかしくない（あるいは、
+     dos_exec()自体がロードする前に失敗していれば何も書いて
+     いないかもしれない）――上のこの関数の冒頭コメントのとおり、
+     以下のすべての書き込みが実際に行われるよう、無条件にミラーを
+     無効化する。
+     実測したバグ（実機、F2 → COMMAND.COM → EXIT）：子プロセス
+     自身の出力によって実際の画面がスクロールすることがあり、
+     これにより古い内容（例えばこのプログラム自身のファンクション
+     キー行）が、このプログラムの通常の再描画が自力では再訪しない
+     セルへずれ込んでしまう――23行目はファイル一覧とファンクション
+     キー行の間にあって誰もそこを描画せず、2つの一覧の列の間の
+     1セル分の隙間と、画面の一番最後の列も同様に誰も描画しない。
+     ミラーを無効化するだけではこれには不十分である：下の
+     draw_dialog()/draw_screen()は自分たちが実際に使うセルしか
+     再塗りしないので、その集合に含まれない古びたセルは永遠に
+     古びたまま残ってしまう――ずれた内容がそこにそのまま居座る。 */
   vram_shadow_init();
-  /* Force every one of the 25x80 cells to actually be overwritten with a
-     blank space once, regardless of whether this program's own drawing
-     ever touches that cell again - only after that is it safe to let the
-     usual partial-redraw functions take over below. */
+  /* このプログラム自身の描画がそのセルに二度と触れないとしても、
+     25×80セルすべてを一度、強制的に空白で確実に上書きする――
+     これが終わって初めて、以下の通常の部分再描画関数に処理を
+     任せても安全になる。 */
   vram_clear_all();
 
   if (rc != 0) {
@@ -2488,12 +2522,13 @@ void do_exec(void)
 }
 
 
-/* ---- built-in viewer (milestone 8) --------------------------------------- */
+/* ---- 組み込みビューア（第8マイルストーン） --------------------------------------- */
 
-/* refills g_viewReadBuf from g_viewHandle; the only place that actually
-   calls dos_read() for the viewer - see VIEW_READ_BUF's comment for why
-   reading in chunks like this (never one INT 21h call per byte) is what
-   keeps a large file from being slow to scan. */
+/* g_viewHandleからg_viewReadBufへ補充する。ビューア用に実際に
+   dos_read()を呼ぶのはここだけ――このようにまとまった単位で
+   読む（1バイトごとにINT 21hを1回呼ぶことは決してしない）理由は
+   VIEW_READ_BUFのコメント参照。これが、大きなファイルの走査を
+   遅くならないようにしている仕組みである。 */
 void vreader_fill(void)
 {
   g_viewReadLen = dos_read((unsigned int)g_viewHandle, g_viewReadBuf, (unsigned int)VIEW_READ_BUF);
@@ -2501,10 +2536,11 @@ void vreader_fill(void)
   g_viewReadPos = 0;
 }
 
-/* opens path for the viewer; returns 1 on success, 0 on failure. Resets all
-   reader state (buffer + pushback), so this is always safe to call again
-   for a fresh forward pass over the same file - see view_goto_line() below,
-   the only other caller. */
+/* ビューア用にpathを開く。成功時1、失敗時0を返す。リーダーの
+   状態（バッファ＋プッシュバック）をすべてリセットするので、
+   同じファイルに対して新しく前方向のパスをやり直すために
+   何度でも安全に呼べる――下のview_goto_line()（唯一のもう1つの
+   呼び出し元）参照。 */
 int vreader_open(char *path)
 {
   int h;
@@ -2524,8 +2560,8 @@ void vreader_close(void)
   g_viewHandle = -1;
 }
 
-/* raw next byte (0-255), or -1 at end of file. Buffered - see VIEW_READ_BUF
-   and vreader_fill() above. */
+/* 生の次の1バイト（0～255）、ファイル終端なら-1を返す。バッファ
+   経由――VIEW_READ_BUFと上のvreader_fill()参照。 */
 int vreader_getc(void)
 {
   if (g_viewReadPos >= g_viewReadLen) {
@@ -2535,11 +2571,11 @@ int vreader_getc(void)
   return (unsigned char)g_viewReadBuf[g_viewReadPos++];
 }
 
-/* like vreader_getc(), but serves g_viewPushback[] first - see its
-   declaration (with g_viewPushbackLen) above for why view_read_line()
-   needs this: a look-ahead byte, or a whole zenkaku pair, that turns out
-   to belong to the *next* display line has to be handed back rather than
-   lost. */
+/* vreader_getc()と同様だが、まずg_viewPushback[]から出す――
+   宣言部分（g_viewPushbackLenとともに上にある）にある通り、
+   view_read_line()がこれを必要とする理由：先読みした1バイト、
+   あるいは全角文字のペア丸ごとが実は*次*の表示行に属すると
+   分かった場合、それを失わずに戻す必要があるため。 */
 int vreader_getc_pb(void)
 {
   int c;
@@ -2567,19 +2603,19 @@ void vreader_pushback2(int c1, int c2)
   g_viewPushbackLen = 2;
 }
 
-/* reads one display line (tab-expanded, wrapped at VRAM_COLS cells without
-   ever splitting a zenkaku pair) into out[] (a NUL-terminated raw CP932
-   byte string, at most VIEW_LINE_BUF-1 bytes - every screen cell costs
-   exactly 1 byte here, whether ANK or one half of a zenkaku pair, so a
-   cap of VIEW_LINE_BUF is always enough room; every append below is still
-   checked against 'cap' anyway, the same discipline sappend() uses
-   elsewhere in this file). *outCells gets the line's on-screen width;
-   *outHadNL is 1 only if this display line ended on a real line
-   terminator (CRLF or LF) - never on a wrap, and never on the last,
-   EOF-ended line of a file with no trailing newline (both measured
-   behaviours; see docs/filer-measure-07.md). Returns 1 if a line was
-   produced, 0 if the file had nothing left at all (this call started
-   exactly at end of file). */
+/* 表示行を1行（タブを展開し、全角ペアを分断せずにVRAM_COLSセルで
+   折り返した状態で）out[]（NUL終端された生のCP932バイト文字列、
+   最大でVIEW_LINE_BUF-1バイト――ここでは画面セル1つがANKでも
+   全角の半分でもちょうど1バイトなので、VIEW_LINE_BUFの上限で
+   常に十分な余地があるが、それでも下の各追記はこのファイルの
+   他所でsappend()が使うのと同じ規律で'cap'に対してチェックされる）
+   へ読み込む。*outCellsにはその行の画面上の幅が入る。*outHadNLは、
+   この表示行が本物の行終端（CRLFまたはLF）で終わったときにのみ1に
+   なる――折り返しでは決して1にならず、末尾に改行の無いファイルの
+   最後のEOF終端行でも決して1にならない（どちらも実測した挙動。
+   docs/filer-measure-07.md参照）。行が生成できれば1、ファイルに
+   何も残っていなければ（この呼び出しがちょうどファイル終端から
+   始まった場合）0を返す。 */
 int view_read_line(char *out, int cap, int *outCells, int *outHadNL)
 {
   int cell;
@@ -2630,7 +2666,7 @@ int view_read_line(char *out, int cap, int *outCells, int *outHadNL)
         return 1;
       }
       for (i = 0; i < spaces; i++) {
-        if (len + 1 > cap - 1) break; /* defensive; never actually hit */
+        if (len + 1 > cap - 1) break; /* 防御的処理：実際には到達しないはず */
         out[len] = ' ';
         len++;
       }
@@ -2642,8 +2678,9 @@ int view_read_line(char *out, int cap, int *outCells, int *outHadNL)
     if ((c >= 0x81 && c <= 0x9f) || (c >= 0xe0 && c <= 0xfc)) {
       c2 = vreader_getc_pb();
       if (c2 == -1) {
-        /* truncated lead byte at EOF: 1-cell ANK fallback, same rule
-           text_width()/sappend() use elsewhere in this file. */
+        /* EOFで先頭バイトだけで切れている場合：このファイルの他所で
+           text_width()/sappend()が使うのと同じルールで、1セルの
+           ANKにフォールバックする。 */
         if (cell + 1 > VRAM_COLS || len + 1 > cap - 1) {
           vreader_pushback1(c);
           out[len] = 0; *outCells = cell; *outHadNL = 0;
@@ -2668,7 +2705,7 @@ int view_read_line(char *out, int cap, int *outCells, int *outHadNL)
       continue;
     }
 
-    /* plain ANK byte */
+    /* 普通のANKバイト */
     if (cell + 1 > VRAM_COLS || len + 1 > cap - 1) {
       vreader_pushback1(c);
       out[len] = 0; *outCells = cell; *outHadNL = 0;
@@ -2681,13 +2718,15 @@ int view_read_line(char *out, int cap, int *outCells, int *outHadNL)
   }
 }
 
-/* scans the whole file once (from the current reader position - do_view()
-   always calls this right after vreader_open(), i.e. from byte 0),
-   counting display lines without storing anything about them. This is
-   the one place a large file's full size is visited; it is a single
-   forward pass through vreader_getc()'s buffer (never one dos_read() call
-   per byte, never an array sized by the file's line count), so it always
-   terminates and never allocates memory proportional to file size. */
+/* ファイル全体を（現在のリーダー位置から――do_view()は常に
+   vreader_open()の直後、つまりバイト0からこれを呼ぶ）一度だけ
+   走査し、内容を何も保持せずに表示行数だけを数える。大きな
+   ファイルの全体サイズを訪れるのはここだけであり、
+   vreader_getc()のバッファを通した1回の前方向パスに過ぎない
+   （1バイトごとに1回のdos_read()呼び出しは決してせず、
+   ファイルの行数に応じた配列も決して確保しない）ので、
+   常に必ず終了し、ファイルサイズに比例したメモリを確保することも
+   決してない。 */
 int view_count_lines(void)
 {
   char dummy[VIEW_LINE_BUF];
@@ -2700,16 +2739,18 @@ int view_count_lines(void)
   return n;
 }
 
-/* repositions the reader so the next view_read_line() call returns display
-   line 'target' (1-based). There is no random-access line index kept
-   anywhere - see the viewer state comment above g_viewLineNo - so this
-   always reopens the file and re-reads forward from the start, discarding
-   'target'-1 lines. That cost is proportional to how far into the file
-   'target' is, not to the file's total size, and it always terminates for
-   the same reason view_count_lines() does (a plain forward scan) - slower
-   the deeper into a very large file 'target' is, but never hanging.
-   Returns 1 on success, 0 if the file could not be reopened (should not
-   happen once do_view() has already opened it once successfully). */
+/* 次のview_read_line()呼び出しが表示行'target'（1始まり）を
+   返すよう、リーダーの位置を再設定する。どこにもランダムアクセス
+   用の行インデックスは保持していない――g_viewLineNoの上にある
+   ビューア状態のコメント参照――ので、これは常にファイルを開き
+   直し、先頭から前方向に読み直して'target'-1行ぶんを読み捨てる。
+   このコストはファイルの総サイズにではなく、'target'がファイルの
+   どれだけ奥にあるかに比例する。そして、view_count_lines()と
+   同じ理由（単純な前方向スキャンであること）で常に終了する――
+   非常に大きなファイルの奥まで'target'が進むほど遅くなるが、
+   ハングすることは決して無い。
+   成功時1、ファイルを開き直せなかった場合は0を返す
+   （do_view()が既に一度正常に開いている以上、起こらないはず）。 */
 int view_goto_line(int target)
 {
   char dummy[VIEW_LINE_BUF];
@@ -2720,22 +2761,24 @@ int view_goto_line(int target)
   vreader_close();
   if (!vreader_open(g_viewPath)) return 0;
   for (i = 1; i < target; i++) {
-    if (!view_read_line(dummy, sizeof(dummy), &cells, &hadNL)) break; /* past EOF */
+    if (!view_read_line(dummy, sizeof(dummy), &cells, &hadNL)) break; /* EOFより後ろ */
   }
   return 1;
 }
 
-/* row VROW_HEADER: "File name: <path>" (reversed, left) and "Line No:
-   N/M" (label cyan / ATTR_LABEL, value yellow / ATTR_TITLE - see
-   docs/filer-measure-07.md) on the right. Every cell is written by
-   exactly one of the four vram_puts_cells()/vram_ank() calls below (no
-   cell is ever written twice with two different values in the same
-   frame) - row 0 is the one row this file's own history shows really
-   does flicker when a cell's content is decided in two separate passes
-   per frame (see draw_title_row()'s milestone 7 fix comment above), so
-   the viewer's own row-0 header follows that same single-pass discipline
-   instead of the two-pass "value then relabel" style draw_path_line()/
-   draw_disk_line() use on other rows. */
+/* VROW_HEADER行：左に"File name: <path>"（反転）、右に
+   "Line No: N/M"（ラベルはシアン／ATTR_LABEL、値は黄色／
+   ATTR_TITLE――docs/filer-measure-07.md参照）。以下の4つの
+   vram_puts_cells()/vram_ank()呼び出しのうち、いずれか正確に
+   1つだけがすべてのセルを書く（同じフレーム内で1つのセルが
+   2つの異なる値で二度書かれることは決して無い）――0行目は、
+   このファイル自身の歴史の中で、1フレームの中でセルの内容が
+   2回に分けて決められると実際にちらつくことが分かっている
+   唯一の行なので（上のdraw_title_row()の第7マイルストーン
+   修正コメント参照）、ビューア自身の0行目ヘッダも、他の行で
+   draw_path_line()/draw_disk_line()が使っている「まず値、次に
+   ラベルを重ね塗り」という2パス方式ではなく、同じ単一パスの
+   規律に従っている。 */
 void draw_view_header(void)
 {
   char leftBuf[VIEW_PATH_BUF + 16];
@@ -2778,18 +2821,17 @@ void draw_view_header(void)
   vram_puts_cells(VROW_HEADER, rightStart + labelCells, valuePart, ATTR_TITLE, valueCells);
 }
 
-/* rows VROW_CONTENT_TOP .. VROW_CONTENT_TOP+VIEW_CONTENT_ROWS-1: the file
-   content itself, one already-wrapped display line per row, in
-   ATTR_VALUE (plain white - see docs/filer-measure-07.md). The
-   end-of-line mark (VIEW_EOL_MARK_B1/B2 above) is appended to the same
-   line buffer handed to vram_puts_cells() - it is an ordinary two-byte
-   CP932 character as far as that function is concerned, exactly like any
-   other zenkaku text in this file - but only when there is room for it
-   without exceeding VRAM_COLS; a display line that happens to fill the
-   row exactly and also end on a real newline has nowhere left to put the
-   mark, and it is silently omitted there, the same defensive-truncation
-   policy sappend()/vram_puts_cells() already use everywhere else in this
-   file. */
+/* VROW_CONTENT_TOP ～ VROW_CONTENT_TOP+VIEW_CONTENT_ROWS-1行：
+   ファイルの内容そのものを、既に折り返し済みの表示行1行ずつを
+   ATTR_VALUE（普通の白――docs/filer-measure-07.md参照）で表示する。
+   行末マーク（上のVIEW_EOL_MARK_B1/B2）は、vram_puts_cells()へ
+   渡す同じ行バッファに追記される――その関数にとっては、この
+   ファイルの他の全角テキストと全く同様に、ただの2バイトのCP932
+   文字である――ただし、VRAM_COLSを超えずに収まる余地がある場合
+   のみ。表示行がちょうどその行を埋めきり、かつ本物の改行で
+   終わっている場合はマークを置く場所が無く、その場合は黙って
+   省略される――このファイルの他所でsappend()/vram_puts_cells()が
+   既に使っている防御的な切り詰め方針と同じである。 */
 void draw_view_content(void)
 {
   char buf[VIEW_LINE_BUF];
@@ -2815,13 +2857,14 @@ void draw_view_content(void)
   }
 }
 
-/* row VROW_CMD: same physical row as the filer's own function-key row, but
-   showing a small viewer-specific hint instead of that ten-field
-   assignment - this program has no measured "view mode" function-key
-   layout (only the original's own eXec/Copy/Delete/... row was ever
-   measured; see docs/filer-measure-05.md), so this deliberately does not
-   reuse g_fkeyLabel[]/g_fkeyCol[]/draw_cmdline(). Minimum requirement:
-   make it visually obvious that ESC returns to the list. */
+/* VROW_CMD行：ファイラ自身のファンクションキー行と物理的に
+   同じ行だが、あの10フィールドの割り当てではなく、ビューア専用の
+   小さなヒントを表示する――このプログラムには実測済みの
+   「ビューアモード」用ファンクションキーレイアウトが無い
+   （実測されているのは本家自身のeXec/Copy/Delete/…行だけ。
+   docs/filer-measure-05.md参照）ため、意図的にg_fkeyLabel[]/
+   g_fkeyCol[]/draw_cmdline()を再利用しない。最低限の要件：
+   ESCで一覧へ戻れることが視覚的に明らかであること。 */
 void draw_view_cmdline(void)
 {
   int col;
@@ -2834,12 +2877,13 @@ void draw_view_cmdline(void)
   vram_puts_cells(VROW_CMD, 0, MSG(MSG_VIEW_CMDLINE), ATTR_VALUE, cells);
 }
 
-/* draws one full viewer frame. Always repositions the reader to
-   g_viewLineNo first (see view_goto_line()'s comment - there is no
-   persistent "reader is already positioned correctly" invariant kept
-   across calls, so this is always correct regardless of what changed
-   g_viewLineNo since the last frame) and then reads exactly
-   VIEW_CONTENT_ROWS lines forward from there for the content rows. */
+/* ビューアの1フレーム全体を描画する。常にまずリーダーを
+   g_viewLineNoへ再配置し（view_goto_line()のコメント参照――
+   「リーダーは前回呼び出し以降の変化に対しても既に正しい位置に
+   ある」という永続的な不変条件は保持していないので、これにより
+   前回のフレーム以降g_viewLineNoが何によって変わっていても常に
+   正しくなる）、その後そこからVIEW_CONTENT_ROWS行ぶんを内容行用に
+   前方向に読み込む。 */
 void view_render(void)
 {
   view_goto_line(g_viewLineNo);
@@ -2849,16 +2893,18 @@ void view_render(void)
   draw_view_cmdline();
 }
 
-/* Enter on a non-directory, non-COM/EXE entry (milestone 8): opens the
-   file under the cursor in a read-only, full-screen viewer - see the
-   milestone 8 comment above g_fkeyHiPos[] for the overall design and
-   docs/filer-measure-07.md for what was actually measured (screen layout,
-   key behaviour, tab/wrap/EOL handling). Down/Up/HOME/ESC plus, since
-   milestone 11, ROLL UP/ROLL DOWN (see the KEY_ROLLUP/KEY_ROLLDOWN
-   comment above and docs/bios-key-measure-01.md for the scan codes) are
-   implemented. Returning (ESC) redraws the directory list exactly as
-   before - this never leaves the screen in a state only a full external
-   redraw could fix, matching every other modal path in this file. */
+/* 非ディレクトリかつ非COM/EXEのエントリでEnter（第8マイルストーン）：
+   カーソル位置のファイルを読み取り専用のフルスクリーンビューアで
+   開く――全体の設計についてはg_fkeyHiPos[]の上にある第8
+   マイルストーンのコメント、実際に何を実測したか（画面
+   レイアウト・キー動作・タブ／折り返し／行末の扱い）については
+   docs/filer-measure-07.mdを参照。Down/Up/HOME/ESCに加え、第11
+   マイルストーン以降はROLL UP/ROLL DOWN（上のKEY_ROLLUP/
+   KEY_ROLLDOWNのコメントとスキャンコードについては
+   docs/bios-key-measure-01.md参照）を実装している。（ESCで）戻ると
+   ディレクトリ一覧を以前と全く同じように再描画する――このファイルの
+   他のあらゆるモーダル経路と同様、外部からの完全な再描画でしか
+   直せないような状態を画面に残すことは決して無い。 */
 void do_view(char *name)
 {
   int key;
@@ -2873,11 +2919,11 @@ void do_view(char *name)
     return;
   }
 
-  /* one full forward pass to get the total display-line count - see
-     view_count_lines()'s comment; this is the one place a large file's
-     size is fully visited, and it goes through a buffered reader, not
-     byte by byte, specifically so it does not freeze - then start over
-     from line 1 for the actual display. */
+  /* 表示行の総数を得るための1回の前方向全走査――view_count_lines()の
+     コメント参照。大きなファイルのサイズを完全に訪れるのはここ
+     だけで、ハングしないよう、1バイトずつではなくバッファ付きの
+     リーダーを通す――その後、実際の表示のために1行目からやり
+     直す。 */
   g_viewTotalLines = view_count_lines();
   vreader_close();
 
@@ -2914,14 +2960,15 @@ void do_view(char *name)
   draw_screen();
 }
 
-/* ---- copy / move --------------------------------------------------------- */
+/* ---- コピー／移動 --------------------------------------------------------- */
 
-/* builds destDir + "\" + name into out[] (unlike build_full_path(), which
-   always joins against g_path - Copy/Move destinations are a directory
-   the user just typed, not the current directory). Adds the separating
-   backslash only if destDir doesn't already end with one, so both
-   "B:\SUBDIR" and "B:\SUBDIR\" work as input. Same bounds discipline as
-   build_full_path()/sappend() everywhere else in this file. */
+/* destDir + "\" + name をout[]へ組み立てる（常にg_pathに対して
+   結合するbuild_full_path()とは異なる――Copy/Moveの移動先は
+   カレントディレクトリではなく、ユーザーがたった今入力した
+   ディレクトリである）。destDirが既に区切りのバックスラッシュで
+   終わっていない場合にのみそれを追加するので、"B:\SUBDIR"と
+   "B:\SUBDIR\"のどちらを入力しても動作する。境界の規律は
+   このファイルの他所のbuild_full_path()/sappend()と同じ。 */
 void join_dir_name(char *out, int cap, char *destDir, char *name)
 {
   int p;
@@ -2936,15 +2983,17 @@ void join_dir_name(char *out, int cap, char *destDir, char *name)
   sappend(out, &p, name, cap);
 }
 
-/* true if a (non-directory) file already exists at path. Reuses
-   dos_setdta()/dos_findfirst() as a one-off lookup; this is safe even
-   though read_dir() also uses g_dta for its own FindFirst/FindNext scan,
-   because the two never run at the same time - read_dir() always calls
-   dos_setdta() again itself the next time it runs. The search attribute
-   mask intentionally omits ATTR_DIR: DOS's FindFirst always matches
-   plain files regardless of the mask, but only matches a directory if
-   ATTR_DIR is set in it, so this looks for "a file with this name",
-   which is exactly the overwrite question Copy/Move need answered. */
+/* pathに（非ディレクトリの）ファイルが既に存在すれば真。
+   dos_setdta()/dos_findfirst()を一回限りの検索として再利用する
+   ――read_dir()もFindFirst/FindNextの自前のスキャンでg_dtaを
+   使っているが、この2つは決して同時に走らないので安全である
+   （read_dir()は次に走るときには必ず自分でdos_setdta()を
+   呼び直す）。検索属性マスクは意図的にATTR_DIRを含めていない：
+   DOSのFindFirstはマスクに関わらず常に普通のファイルにマッチ
+   するが、ディレクトリにマッチするのはATTR_DIRがマスクに含まれて
+   いる場合だけなので、これは「この名前のファイル」を探して
+   おり、これはまさにCopy/Moveが答えを必要としている上書きの
+   問いそのものである。 */
 int file_exists(char *path)
 {
   int ok;
@@ -2954,10 +3003,11 @@ int file_exists(char *path)
   return (ok == 0) ? 1 : 0;
 }
 
-/* the destination drive letter implied by a typed destDir string: its
-   own "X:" prefix if it has one, otherwise the current directory's drive
-   (g_path[0], always an uppercase letter - see read_path()). Used by
-   do_move() to decide same-drive rename vs. cross-drive copy+delete. */
+/* 入力されたdestDir文字列が意味する移動先のドライブ文字：
+   自分自身に"X:"接頭辞があればそれ、無ければカレント
+   ディレクトリのドライブ（g_path[0]、常に大文字――read_path()
+   参照）。do_move()が同一ドライブ内リネームかドライブをまたぐ
+   コピー＋削除かを判断するために使う。 */
 char dest_drive(char *destDir)
 {
   char c;
@@ -2970,12 +3020,12 @@ char dest_drive(char *destDir)
   return g_path[0];
 }
 
-/* case-insensitive path comparison (no stricmp() in this program's
-   string.h subset). Used only to guard against a Move whose destination
-   turns out to be identical to its source (e.g. the user retyped the
-   current directory) - without this check, move_confirm_and_move()'s
-   overwrite handling would delete the file and then fail to recreate
-   it. */
+/* 大文字小文字を区別しないパス比較（このプログラムのstring.h
+   サブセットにはstricmp()が無い）。Moveの移動先が結局のところ
+   移動元と同一になっているケース（例えばユーザーがカレント
+   ディレクトリをそのまま打ち直した場合）だけを防ぐために使う
+   ――このチェックが無いと、move_confirm_and_move()の上書き処理が
+   ファイルを削除してから、再作成に失敗してしまう。 */
 int path_eq(char *a, char *b)
 {
   int i;
@@ -2994,21 +3044,22 @@ int path_eq(char *a, char *b)
   }
 }
 
-/* copies one file from srcPath to dstPath (INT 21h AH=3Dh open / 3Fh
-   read / 3Ch create / 40h write / 3Eh close), then copies the source's
-   timestamp onto the destination with AH=57h - get it from the still-open
-   source handle, set it on the still-open destination handle, both
-   before either is closed. Uses the single global g_copybuf (see its
-   declaration) in COPY_BUF_SIZE-byte chunks rather than a stack buffer:
-   SmallerC's small model keeps all data in one 64KB segment, and this
-   program's directory-listing arrays (g_name et al., sized by
-   MAX_ENTRIES) already claim a large share of it, so a second
-   already-large buffer must not also be duplicated on the stack.
-   Returns 0 on success, nonzero on failure. On failure, a partially
-   written destination file is deliberately left as-is rather than
-   deleted - do_move() relies on a nonzero return here to mean "the
-   source must NOT be deleted", and guessing at cleanup here would risk
-   destroying data instead. */
+/* srcPathからdstPathへ1つのファイルをコピーする（INT 21h
+   AH=3Dh open / 3Fh read / 3Ch create / 40h write / 3Eh close）。
+   その後、AH=57hでコピー元のタイムスタンプをコピー先へ移す――
+   まだ開いているコピー元ハンドルから取得し、まだ開いている
+   コピー先ハンドルへ設定する、両方を閉じる前に。単一の
+   グローバルなg_copybuf（宣言部分参照）をCOPY_BUF_SIZEバイト単位
+   で使い、スタックバッファは使わない：SmallerCのスモールモデルは
+   全データを1つの64KBセグメントに収めており、このプログラムの
+   ディレクトリ一覧用配列（g_nameなど、MAX_ENTRIESでサイズ決め）が
+   既にその大きな割合を占めているため、もう一つの既に大きな
+   バッファをスタック上にも重複して置いてはならない。
+   成功時0、失敗時は非0を返す。失敗時、部分的に書き込まれた
+   コピー先ファイルは意図的に削除せずそのままにする――do_move()は
+   ここでの非0の戻り値を「コピー元は削除してはならない」という
+   意味として頼りにしており、ここで後片付けを勝手に推測すると
+   かえってデータを壊す危険がある。 */
 int copy_one_file(char *srcPath, char *dstPath)
 {
   int srcH;
@@ -3031,7 +3082,7 @@ int copy_one_file(char *srcPath, char *dstPath)
   for (;;) {
     n = dos_read((unsigned int)srcH, g_copybuf, COPY_BUF_SIZE);
     if (n < 0) { ok = -1; break; }
-    if (n == 0) break; /* end of file */
+    if (n == 0) break; /* ファイル終端 */
     if (dos_wfile((unsigned int)dstH, g_copybuf, (unsigned int)n) != n) {
       ok = -1;
       break;
@@ -3049,15 +3100,15 @@ int copy_one_file(char *srcPath, char *dstPath)
   return ok;
 }
 
-/* per-file Copy step, shared by the "cursor only" and "marked set" paths
-   in do_copy(): builds the source/destination paths, asks Y/N/ESC before
-   clobbering an existing destination file (the original refuses same-
-   name copies outright with no prompt at all - see do_copy()'s header
-   comment for why this implementation asks instead), then copies.
-   Returns 1 = copied, 0 = skipped (N to the overwrite prompt; not an
-   error), -1 = failed (an error dialog was already shown), -2 = the user
-   pressed ESC at the overwrite prompt, meaning "abort the whole
-   operation", not just this one file. */
+/* do_copy()の「カーソルのみ」と「マーク集合」双方の経路が共用する
+   ファイルごとのコピー処理：コピー元／コピー先のパスを組み立て、
+   既存のコピー先ファイルを上書きする前にY/N/ESCで確認する
+   （本家は同名コピーを確認なしで一律拒否する――この実装が代わりに
+   尋ねる理由はdo_copy()冒頭コメント参照）。その後コピーする。
+   戻り値：1＝コピーした、0＝スキップした（上書き確認でNだった。
+   エラーではない）、-1＝失敗した（既にエラーダイアログを表示
+   済み）、-2＝上書き確認でユーザーがESCを押した。これは「その
+   1ファイルだけでなく、操作全体を中止する」ことを意味する。 */
 int copy_confirm_and_copy(int idx, char *destDir)
 {
   char srcPath[96];
@@ -3093,14 +3144,15 @@ int copy_confirm_and_copy(int idx, char *destDir)
   return 1;
 }
 
-/* per-file Move step - see copy_confirm_and_copy() for the return-value
-   meanings, which are the same here. sameDrive is computed once by
-   do_move() (destDir is the same for every file in one Move operation,
-   so its implied drive letter does not need recomputing per file). On
-   the same drive, INT 21h AH=56h renames in place - no data is copied at
-   all. Across drives, this falls back to copy_one_file() and only
-   deletes the source once the copy has actually succeeded, so a failed
-   cross-drive Move never loses the original file. */
+/* ファイルごとのMove処理――戻り値の意味はcopy_confirm_and_copy()
+   と同じ。sameDriveはdo_move()が一度だけ計算する（1回のMove操作の
+   間、destDirはすべてのファイルで同じなので、そこから示される
+   ドライブ文字をファイルごとに計算し直す必要はない）。同じ
+   ドライブならINT 21h AH=56hでその場でリネームし、データは
+   一切コピーしない。ドライブをまたぐ場合はcopy_one_file()に
+   フォールバックし、コピーが実際に成功した場合にのみコピー元を
+   削除するので、失敗したドライブをまたぐMoveで元のファイルを
+   失うことは決して無い。 */
 int move_confirm_and_move(int idx, char *destDir, int sameDrive)
 {
   char srcPath[96];
@@ -3115,7 +3167,7 @@ int move_confirm_and_move(int idx, char *destDir, int sameDrive)
   build_full_path(srcPath, sizeof(srcPath), name);
   join_dir_name(dstPath, sizeof(dstPath), destDir, name);
 
-  if (path_eq(srcPath, dstPath)) return 1; /* already there; nothing to do */
+  if (path_eq(srcPath, dstPath)) return 1; /* 既にそこにある。何もすることは無い */
 
   if (file_exists(dstPath)) {
     p = 0;
@@ -3126,10 +3178,11 @@ int move_confirm_and_move(int idx, char *destDir, int sameDrive)
     key = dos_getch();
     if (key == KEY_ESC) return -2;
     if (key != 'y' && key != 'Y') return 0;
-    /* AH=56h (rename) fails if the destination name already exists, so
-       a confirmed same-drive overwrite must clear it first. The
-       cross-drive path doesn't need this - dos_create() inside
-       copy_one_file() overwrites an existing file on its own. */
+    /* AH=56h（リネーム）は移動先の名前が既に存在すると失敗するので、
+       同一ドライブでの上書きが確認された場合、まずそれを消して
+       おく必要がある。ドライブをまたぐ経路ではこれは不要
+       ――copy_one_file()内のdos_create()が既存ファイルを
+       自力で上書きする。 */
     if (sameDrive) dos_delete(dstPath);
   }
 
@@ -3151,20 +3204,22 @@ int move_confirm_and_move(int idx, char *destDir, int sameDrive)
   return 1;
 }
 
-/* C/c: copies the marked files, or (when nothing is marked) the single
-   file under the cursor - the same target rule as do_delete(): "marked
-   set if non-empty, else the cursor entry", not two cases that can
-   disagree. Directories are never in the marked set (mark_cursor()
-   refuses them), so the only way one can be "the target" is the
-   no-mark/cursor-on-a-directory case; that is caught up front and
-   refused with an explicit error dialog, the same as do_delete().
-   Unlike the original filer, which refuses a same-name copy outright
-   with no confirmation at all (measured; see README's independence
-   notes), this asks a Y/N/ESC overwrite question per colliding file
-   instead - silently overwriting or silently skipping are both worse
-   than asking. A completion dialog is shown on success (also unlike
-   Delete, which shows nothing - matching the original's behaviour for
-   each of those two commands respectively). */
+/* C/c：マークされたファイル、あるいは（何もマークされて
+   いなければ）カーソル位置の1件をコピーする――do_delete()と同じ
+   ターゲットルール：「マークが空でなければマーク集合、空なら
+   カーソル位置のエントリ」であり、食い違いうる2つのケースでは
+   ない。ディレクトリは決してマーク集合に入らない
+   （mark_cursor()が拒否する）ので、ディレクトリが「対象」に
+   なりうるのはマーク無し・カーソルがディレクトリ上にあるケース
+   だけであり、do_delete()と同様、それは事前にとらえて明示的な
+   エラーダイアログで拒否する。
+   確認なしで一律に同名コピーを拒否する本家のファイラとは異なり
+   （実測。READMEの独立性に関する注記参照）、これは衝突する
+   ファイルごとにY/N/ESCの上書き確認を行う――黙って上書きする
+   ことも黙ってスキップすることも、尋ねることよりは悪い選択で
+   ある。成功時には完了ダイアログを表示する（これもDeleteとは
+   異なる。Deleteは何も表示しない――それぞれのコマンドについて
+   本家の挙動に合わせている）。 */
 void do_copy(void)
 {
   int i;
@@ -3227,14 +3282,17 @@ void do_copy(void)
   draw_screen();
 }
 
-/* M/m: moves the marked files, or (when nothing is marked) the single
-   file under the cursor - same target rule, same up-front directory
-   refusal, same per-file Y/N/ESC overwrite prompt, and same completion
-   dialog as do_copy() (see its header comment); the only difference is
-   move_confirm_and_move()'s same-drive-rename vs. cross-drive-copy+
-   delete choice. Timestamps are always the original file's, never
-   "now" - on the same drive that falls out of AH=56h renaming in place;
-   across drives, copy_one_file() explicitly carries it over. */
+/* M/m：マークされたファイル、あるいは（何もマークされて
+   いなければ）カーソル位置の1件を移動する――do_copy()（その
+   冒頭コメント参照）と同じターゲットルール、同じ事前の
+   ディレクトリ拒否、同じファイルごとのY/N/ESC上書き確認、
+   同じ完了ダイアログ。唯一の違いは
+   move_confirm_and_move()の同一ドライブリネームかドライブを
+   またぐコピー＋削除かという選択である。タイムスタンプは
+   常に元のファイルのものであり、「今」にはならない――同じ
+   ドライブではAH=56hのその場リネームの結果として自然にそうなり、
+   ドライブをまたぐ場合はcopy_one_file()が明示的に引き継いで
+   いる。 */
 void do_move(void)
 {
   int i;
@@ -3300,7 +3358,7 @@ void do_move(void)
   draw_screen();
 }
 
-/* ---- screen drawing ------------------------------------------------------ */
+/* ---- 画面描画 ------------------------------------------------------------ */
 
 void build_entry_text(int idx, char *buf)
 {
@@ -3315,21 +3373,21 @@ void build_entry_text(int idx, char *buf)
 
   for (i = 0; i < 39; i++) buf[i] = ' ';
   buf[39] = 0;
-  /* no '.' by default; only shown when there is an actual extension */
+  /* 既定では'.'を付けない。実際に拡張子があるときだけ表示する */
 
-  /* mark indicator: '*' at column 0, plain text (no color/reverse - the
-     real product's mark is a plain character too, confirmed by pixel
-     measurement). Directories are never marked, so this can never fire
-     for a directory row. */
+  /* マークの印：0桁目に'*'。色や反転無しの普通の文字（本家の
+     マーク表示も普通の文字であることをピクセル単位の実測で
+     確認済み）。ディレクトリは決してマークされないので、
+     この分岐がディレクトリ行で発火することは決して無い。 */
   if (g_marked[idx]) buf[0] = '*';
 
   rawname = &g_name[idx * NAME_LEN];
 
-  /* "." and ".." are not 8.3 name+extension pairs - splitting them on
-     '.' puts an empty name and a "." extension, landing ".." at column
-     10-11 (the extension slot) with the name column left blank. The
-     original shows them unsplit in the name column instead, so they are
-     special-cased here before the normal dot search. */
+  /* "."と".."は8.3の名前＋拡張子のペアではない――これらを'.'で
+     分割すると、空の名前と拡張子"."になってしまい、".."が
+     10-11桁目（拡張子欄）に来て名前欄が空白になる。本家はこれらを
+     分割せずに名前欄にそのまま表示するので、通常のドット検索の
+     前にここで特別扱いしている。 */
   if (strcmp(rawname, ".") == 0 || strcmp(rawname, "..") == 0) {
     put_str_n(buf, 2, rawname, strlen(rawname));
   } else {
@@ -3354,8 +3412,8 @@ void build_entry_text(int idx, char *buf)
     }
   }
 
-  /* file-list size column: no ',' grouping in the real product, only the
-     header totals (draw_disk_line) are comma-grouped */
+  /* ファイル一覧のサイズ欄：本家では','区切りを入れない。カンマ
+     区切りになっているのはヘッダの合計欄（draw_disk_line）だけ */
   if (g_attr[idx] & ATTR_DIR) {
     strcpy(sizebuf, "<DIR>");
   } else {
@@ -3370,9 +3428,10 @@ void build_entry_text(int idx, char *buf)
   put_str_n(buf, 34, timebuf, 5);
 }
 
-/* builds the disk total/used/free line (header box row ROW_DISK) into a
-   plain buffer for box_row(); comma-grouped, unlike the file-list sizes -
-   this is one of the header totals lines. */
+/* ディスクの合計／使用／空きの行（ヘッダボックスのROW_DISK行）を
+   box_row()用のプレーンなバッファへ組み立てる。ファイル一覧の
+   サイズとは異なりカンマ区切り――これはヘッダの合計行の一つ
+   だから。 */
 void draw_disk_line(void)
 {
   unsigned int drive;
@@ -3398,36 +3457,36 @@ void draw_disk_line(void)
   if (secPerClus == 0xFFFF) {
     sappend(row, &p, MSG(MSG_DISK_UNAVAIL), sizeof(row));
     box_row(ROW_DISK, BOXCH_V, BOXCH_V, row, ATTR_LABEL);
-    return; /* no fields, so no dividers either - row stays plain text */
+    return; /* フィールドが無いので区切り線も無い――行は単なる平文のまま */
   }
 
-  cLo = umul32(secPerClus, bytesPerSec, &cHi);            /* bytes/cluster */
-  totLo = mul32x16(cHi, cLo, totalClus, &totHi);          /* total bytes   */
-  freeLo = mul32x16(cHi, cLo, availClus, &freeHi);        /* free bytes    */
-  sub32(totHi, totLo, freeHi, freeLo, &usedHi, &usedLo);  /* used bytes    */
+  cLo = umul32(secPerClus, bytesPerSec, &cHi);            /* クラスタあたりのバイト数 */
+  totLo = mul32x16(cHi, cLo, totalClus, &totHi);          /* 合計バイト数   */
+  freeLo = mul32x16(cHi, cLo, availClus, &freeHi);        /* 空きバイト数    */
+  sub32(totHi, totLo, freeHi, freeLo, &usedHi, &usedLo);  /* 使用バイト数    */
 
   format_u32(totHi, totLo, totalBuf);
   format_u32(usedHi, usedLo, usedBuf);
   format_u32(freeHi, freeLo, freeBuf);
 
-  /* right-justified, no unit suffix - measured off the real product's own
-     disk-totals row (see the DISK_SEP_COL1/DISK_SEP_COL2 comment above
-     and sappend_field_rj()). Each field uses its own derived width so
-     the three columns come out nearly equal instead of the 3rd one
-     trailing off into empty space. */
+  /* 右詰め、単位サフィックス無し――本家自身のディスク合計行を
+     実測したもの（上のDISK_SEP_COL1/DISK_SEP_COL2のコメントと
+     sappend_field_rj()参照）。各フィールドはそれぞれ導出された
+     幅を使うので、3列は3列目だけ空白に流れ込むのではなく
+     ほぼ等しい幅になる。 */
   sappend_field_rj(row, &p, MSG(MSG_DISK_TOTAL), totalBuf, DISK_FIELD1_WIDTH, sizeof(row));
-  sappend(row, &p, " ", sizeof(row)); /* divider cell; overwritten below */
+  sappend(row, &p, " ", sizeof(row)); /* 区切り線のセル。下で上書きされる */
 
   sappend_field_rj(row, &p, MSG(MSG_DISK_USED), usedBuf, DISK_FIELD2_WIDTH, sizeof(row));
-  sappend(row, &p, " ", sizeof(row)); /* divider cell; overwritten below */
+  sappend(row, &p, " ", sizeof(row)); /* 区切り線のセル。下で上書きされる */
 
   sappend_field_rj(row, &p, MSG(MSG_DISK_FREE), freeBuf, DISK_FIELD3_WIDTH, sizeof(row));
 
-  /* whole row painted white (values) first, then each field's own label is
-     painted cyan on top (measured; see docs/filer-measure-06.md) - a label
-     always starts at its field's first column since sappend_field_rj()
-     puts the label before the number, so no extra position tracking is
-     needed beyond the field boundaries already defined above. */
+  /* まず行全体を白（値）で塗り、その後各フィールド自身のラベルを
+     シアンで上塗りする（実測。docs/filer-measure-06.md参照）――
+     sappend_field_rj()が数値の前にラベルを置くので、ラベルは
+     常にそのフィールドの最初の桁から始まり、上で既に定義した
+     フィールド境界以上の位置追跡は不要。 */
   box_row(ROW_DISK, BOXCH_V, BOXCH_V, row, ATTR_VALUE);
 
   labelCells = text_width(MSG(MSG_DISK_TOTAL));
@@ -3437,18 +3496,18 @@ void draw_disk_line(void)
   labelCells = text_width(MSG(MSG_DISK_FREE));
   vram_puts_cells(ROW_DISK, DISK_SEP_COL2 + 1, MSG(MSG_DISK_FREE), ATTR_LABEL, labelCells);
 
-  /* 0x96 is itself in the SJIS-lead-byte range, so it cannot be embedded
-     in 'row' and handed to vram_puts_cells() (see the file-header VRAM
-     comment) - it is written directly afterwards instead, same as the
-     BOXCH_* corner/border chars elsewhere in this file. */
+  /* 0x96自体がSJIS先頭バイトの範囲に入っているため、'row'に
+     埋め込んでvram_puts_cells()へ渡すことができない（ファイル
+     冒頭のVRAMコメント参照）――このファイルの他所のBOXCH_*の
+     角／枠文字と同様、代わりに後から直接書き込んでいる。 */
   vram_ank(ROW_DISK, DISK_SEP_COL1, BOXCH_V, ATTR_BORDER);
   vram_ank(ROW_DISK, DISK_SEP_COL2, BOXCH_V, ATTR_BORDER);
 }
 
-/* builds the current-path line (header box row ROW_PATH) into a plain
-   buffer for box_row(). Split out of draw_screen() so all header-box
-   content assembly follows the same "build a string, then box_row()"
-   shape. */
+/* カレントパスの行（ヘッダボックスのROW_PATH行）をbox_row()用の
+   プレーンなバッファへ組み立てる。draw_screen()から切り出した
+   もので、ヘッダボックスの内容組み立てをすべて「文字列を組み立て、
+   その後box_row()」という同じ形に揃えるため。 */
 void draw_path_line(void)
 {
   char row[256];
@@ -3459,7 +3518,7 @@ void draw_path_line(void)
 
   p = 0;
   sappend(row, &p, MSG(MSG_PATH_PREFIX), sizeof(row));
-  pathLabelCells = text_width(row); /* "Path=" alone always starts at column 1 */
+  pathLabelCells = text_width(row); /* "Path=" 単体は常に1桁目から始まる */
   sappend(row, &p, g_path, sizeof(row));
   if (g_truncated) {
     sappend(row, &p, MSG(MSG_TRUNC_PREFIX), sizeof(row));
@@ -3472,18 +3531,19 @@ void draw_path_line(void)
   markedLabelCells = text_width(row) - markedLabelStart;
   sappend_uint(row, &p, (unsigned int)count_marked(), sizeof(row));
 
-  /* whole row white (values) first, then the "Path="/"Marked:" labels are
-     painted cyan on top - see draw_disk_line()'s comment for why a second
-     targeted pass is used instead of tracking per-character attributes
-     while 'row' is being built. */
+  /* まず行全体を白（値）で塗り、その後"Path="/"Marked:"の
+     ラベルをシアンで上塗りする――'row'を組み立てている最中に
+     文字ごとの属性を追跡するのではなく、こうして2回目に狙い
+     撃ちで塗る理由はdraw_disk_line()のコメント参照。 */
   box_row(ROW_PATH, BOXCH_V, BOXCH_V, row, ATTR_VALUE);
   vram_puts_cells(ROW_PATH, 1, MSG(MSG_PATH_PREFIX), ATTR_LABEL, pathLabelCells);
   vram_puts_cells(ROW_PATH, 1 + markedLabelStart, MSG(MSG_MARKED_LABEL), ATTR_LABEL, markedLabelCells);
 }
 
-/* builds the selected-entry info line (header box row ROW_INFO); keeps
-   comma-grouped sizes like draw_disk_line() - it is part of the same
-   header box, not the file-list grid. */
+/* 選択中エントリの情報行（ヘッダボックスのROW_INFO行）を
+   組み立てる。draw_disk_line()と同様カンマ区切りのサイズを
+   保つ――これはファイル一覧のグリッドではなく同じヘッダ
+   ボックスの一部だから。 */
 void draw_info_line(int visibleCount)
 {
   char entrybuf[40];
@@ -3523,10 +3583,10 @@ void draw_info_line(int visibleCount)
   sappend(row, &p, &g_name[g_cursor * NAME_LEN], sizeof(row));
   sappend(row, &p, "  ", sizeof(row));
   sappend(row, &p, sizebuf, sizeof(row));
-  /* "<DIR>" is not a byte count, so the bytes-suffix label ("bytes"/
-     "バイト") is only appended for an actual file, matching the
-     size column in the file list (build_entry_text) which never shows a
-     unit at all next to "<DIR>". */
+  /* "<DIR>"はバイト数ではないので、bytesサフィックスのラベル
+     （"bytes"/"バイト"）は実際のファイルのときだけ追記する――
+     ファイル一覧のサイズ欄（build_entry_text）が"<DIR>"の隣に
+     単位を一切表示しないのと同じ扱い。 */
   if (!(g_attr[g_cursor] & ATTR_DIR)) {
     sappend(row, &p, MSG(MSG_BYTES_SUFFIX), sizeof(row));
   }
@@ -3540,31 +3600,33 @@ void draw_info_line(int visibleCount)
   attrLabelCells = text_width(row) - attrLabelStart;
   sappend(row, &p, attrbuf, sizeof(row));
 
-  /* whole row white (values) first, then the "Info:"/"Attr:" labels are
-     painted cyan on top - same two-pass approach as draw_disk_line()/
-     draw_path_line() above. */
+  /* まず行全体を白（値）で塗り、その後"Info:"/"Attr:"の
+     ラベルをシアンで上塗りする――上のdraw_disk_line()/
+     draw_path_line()と同じ2パス方式。 */
   box_row(ROW_INFO, BOXCH_V, BOXCH_V, row, ATTR_VALUE);
   vram_puts_cells(ROW_INFO, 1, MSG(MSG_INFO_PREFIX), ATTR_LABEL, infoLabelCells);
   vram_puts_cells(ROW_INFO, 1 + attrLabelStart, MSG(MSG_ATTR_LABEL), ATTR_LABEL, attrLabelCells);
 }
 
-/* draws the bottom row (row 24) as the measured PC-98 function-key
-   assignment: the whole row is blanked to ATTR_BASE first (this is what
-   the 1-cell gaps between fields, the 4-cell F5/F6 gap, and any reserved
-   (unimplemented) field end up showing - see docs/filer-measure-05.md's
-   0xE1 "outside a field" measurement), then each non-empty g_fkeyLabel[i]
-   is placed at g_fkeyCol[i], roughly centered within FKEY_FIELD_WIDTH
-   cells (left-biased when the label's length is odd, same as an integer
-   divide - the original's own centering is not exact either). Every cell
-   of the label uses ATTR_FKEY_LABEL (reversed) except the single
-   character at g_fkeyHiPos[i], which uses ATTR_FKEY_KEY instead (still
-   reversed, different color) - matching the measured "reverse the whole
-   label, recolor only the key letter" convention, not the milestone 4/5
-   "reverse only the key letter" one. Labels are plain ASCII (see
-   g_fkeyLabel[]), so this indexes by byte, not by a SJIS-aware cell
-   count. check.py verifies every g_fkeyLabel[] entry fits
-   FKEY_FIELD_WIDTH cells and that every g_fkeyCol[]/FKEY_FIELD_WIDTH
-   field stays inside VRAM_COLS. */
+/* 最下段（24行目）を、実測したPC-98のファンクションキー割り当てと
+   して描画する：まず行全体をATTR_BASEで塗りつぶす（これが
+   フィールド間の1セルの隙間、F5/F6間の4セルの隙間、予約済み
+   （未実装）のフィールドで結局表示されるものになる――
+   docs/filer-measure-05.mdの0x91「フィールドの外」の実測参照）。
+   その後、空でない各g_fkeyLabel[i]をg_fkeyCol[i]の位置に、
+   FKEY_FIELD_WIDTHセルの中でおおよそ中央寄せして配置する
+   （ラベルの長さが奇数のときは左寄りになる、整数除算と同じ――
+   本家自身の中央寄せも厳密ではない）。ラベルの各セルは、
+   g_fkeyHiPos[i]の1文字だけを除いてATTR_FKEY_LABEL（反転）を
+   使い、その1文字だけはATTR_FKEY_KEY（同じく反転だが色が異なる）
+   を使う――「ラベル全体を反転し、キー文字だけ色を変える」という
+   実測した慣習に合わせたもので、第4/5マイルストーンの「キー文字
+   だけ反転」という方式ではない。ラベルは普通のASCII（g_fkeyLabel[]
+   参照）なので、これはSJISを意識したセル数ではなくバイト単位で
+   インデックスしている。check.pyは、すべてのg_fkeyLabel[]の
+   要素がFKEY_FIELD_WIDTHセルに収まること、すべての
+   g_fkeyCol[]/FKEY_FIELD_WIDTHのフィールドがVRAM_COLS内に
+   収まることを検証する。 */
 void draw_cmdline(void)
 {
   int i;
@@ -3583,13 +3645,13 @@ void draw_cmdline(void)
   for (i = 0; i < FKEY_COUNT; i++) {
     label = g_fkeyLabel[i];
     len = (int)strlen(label);
-    if (len == 0) continue; /* reserved (not implemented yet): leave blank */
+    if (len == 0) continue; /* 予約済み（まだ未実装）：空白のままにする */
     pad = (FKEY_FIELD_WIDTH - len) / 2;
     if (pad < 0) pad = 0;
-    /* the whole FKEY_FIELD_WIDTH-cell field is reversed, including the
-       blank padding cells around the label - measured against real
-       hardware as 6 reversed cells per field, not just the label's own
-       characters (see docs/filer-measure-05.md). */
+    /* FKEY_FIELD_WIDTHセルのフィールド全体が反転する。ラベル
+       文字自身だけでなく、その周りの空白パディングセルも含めて
+       ――実機に対する実測ではフィールドごとに6セル反転しており、
+       ラベル文字だけではない（docs/filer-measure-05.md参照）。 */
     for (c = 0; c < FKEY_FIELD_WIDTH; c++) {
       if (c >= pad && c < pad + len) {
         ch = (unsigned char)label[c - pad];
@@ -3604,13 +3666,15 @@ void draw_cmdline(void)
 }
 
 
-/* file-list row color by entry type (measured; see docs/filer-measure-
-   06.md): directories cyan, plain files yellow, files with the system or
-   hidden attribute magenta. The cursor row keeps this same color and only
-   adds the reverse-video bit - measured cursor/non-cursor attribute bytes
-   for the same file (e.g. 0x65 vs 0x61) differ by exactly that bit, never
-   by color, so this must never substitute a different color for the
-   cursor row the way the old "cursor=yellow / other=white" scheme did. */
+/* エントリの種類ごとのファイル一覧行の色（実測。
+   docs/filer-measure-06.md参照）：ディレクトリはシアン、通常
+   ファイルは黄色、システムまたは隠し属性のファイルはマゼンタ。
+   カーソル行はこの同じ色を保ち、反転ビットを足すだけ――同じ
+   ファイルについて実測したカーソル行／非カーソル行の属性
+   バイト（例えば0x65と0x61）はちょうどそのビットだけ異なり、
+   色は決して変わらない。したがって、旧来の「カーソル＝黄色／
+   それ以外＝白」という方式のように、カーソル行に別の色を
+   代わりに使うことは決してあってはならない。 */
 unsigned int entry_attr(int idx, int isCursor)
 {
   unsigned int base;
@@ -3641,19 +3705,20 @@ void draw_screen_frame(void)
   leftCount = (visibleCount > LEFT_ROWS) ? LEFT_ROWS : visibleCount;
   rightCount = visibleCount - leftCount;
 
-  /* No full-screen clear here (see the vram_* section above): every row
-     below is fully regenerated on every call, so leftover content is
-     only ever a stale value in a cell this frame does *not* revisit -
-     which the two "else" branches in the entries loop, and the
-     always-run trailing fill in draw_cmdline(), exist specifically to
-     rule out. header box, rows 0-5: half-width box-drawing borders. */
+  /* ここでは画面全体のクリアは行わない（上のvram_*節参照）：
+     以下の各行は呼ばれるたびに常にすべて再生成されるので、
+     残ってしまう内容があるとすればそれは、今回のフレームが
+     *再訪しない*セルに残った古い値だけである――エントリ
+     ループ内の2つの「else」分岐と、draw_cmdline()の常に走る
+     末尾の埋め処理が、まさにこれを無くすために存在する。
+     ヘッダボックス（0-5行目）：半角罫線の枠。 */
   draw_title_row();
 
   draw_disk_line();
 
   box_dash_row(ROW_SEP1, BOXCH_LT, BOXCH_RT);
-  vram_ank(ROW_SEP1, DISK_SEP_COL1, BOXCH_HJ, ATTR_BORDER); /* under the
-     disk-line dividers - see DISK_SEP_COL1/2's comment above */
+  vram_ank(ROW_SEP1, DISK_SEP_COL1, BOXCH_HJ, ATTR_BORDER); /* ディスク行の区切り線の
+     下――上のDISK_SEP_COL1/2のコメント参照 */
   vram_ank(ROW_SEP1, DISK_SEP_COL2, BOXCH_HJ, ATTR_BORDER);
 
   draw_path_line();
@@ -3671,10 +3736,12 @@ void draw_screen_frame(void)
       vram_puts_cells(ROW_LIST_TOP + row, COL_LEFT, entrybuf,
                        entry_attr(leftIdx, leftIdx == g_cursor), 39);
     } else {
-      /* nothing here now - blank it explicitly; a shrunk directory
-         listing (after Delete, or moving into a smaller directory) must
-         not leave a previous frame's row sitting here, now that there is
-         no per-frame ESC[2J to have done that for free. */
+      /* ここにはもう何も無い――明示的に空白にする。縮小した
+         ディレクトリ一覧（Deleteの後、あるいはより小さな
+         ディレクトリへ移動した後）では、前のフレームの行が
+         ここに残ったままになってはならない。毎フレームの
+         ESC[2Jがそれをタダでやってくれる時代はもう終わった
+         ため。 */
       vram_puts_cells(ROW_LIST_TOP + row, COL_LEFT, "", ATTR_BASE, 39);
     }
     if (rightIdx < visibleCount) {
@@ -3694,7 +3761,7 @@ void draw_screen(void)
   draw_screen_frame();
 }
 
-/* ---- input / cursor movement -------------------------------------------- */
+/* ---- 入力／カーソル移動 -------------------------------------------------- */
 
 void move_cursor(int dir)
 {
@@ -3714,23 +3781,23 @@ void move_cursor(int dir)
     if (dir == DIR_UP) { if (row > 0) g_cursor = row - 1; }
     else if (dir == DIR_DOWN) { if (row < leftCount - 1) g_cursor = row + 1; }
     else if (dir == DIR_RIGHT) { if (row < rightCount) g_cursor = leftCount + row; }
-    /* left: already in left column, nothing to do */
+    /* 左：既に左の列にいるので何もしない */
   } else {
     row = g_cursor - leftCount;
     if (dir == DIR_UP) { if (row > 0) g_cursor = leftCount + row - 1; }
     else if (dir == DIR_DOWN) { if (row < rightCount - 1) g_cursor = leftCount + row + 1; }
     else if (dir == DIR_LEFT) { g_cursor = row; }
-    /* right: already in right column, nothing to do */
+    /* 右：既に右の列にいるので何もしない */
   }
 }
 
-/* ---- command line switches ----------------------------------------------- */
+/* ---- コマンドラインスイッチ ----------------------------------------------- */
 
 void parse_args(int argc, char *argv[])
 {
   int i;
 
-  g_lang = LANG_JA; /* default, per docs/i18n-design.md */
+  g_lang = LANG_JA; /* docs/i18n-design.mdに従い既定値 */
   for (i = 1; i < argc; i++) {
     if (strcmp(argv[i], "/E") == 0 || strcmp(argv[i], "/e") == 0) {
       g_lang = LANG_EN;
@@ -3754,16 +3821,15 @@ int main(int argc, char *argv[])
 
   parse_args(argc, argv);
 
-  write_str("\x1b[>1h"); /* release the bottom function-key line */
-  write_str("\x1b[>5h"); /* hide the text cursor */
+  write_str("\x1b[>1h"); /* 最下段のファンクションキー行を解放する */
+  write_str("\x1b[>5h"); /* テキストカーソルを隠す */
 
-  g_viewHandle = -1; /* milestone 8: no viewer file open yet */
+  g_viewHandle = -1; /* 第8マイルストーン：まだビューアのファイルは開いていない */
 
   vram_shadow_init();
-  vram_clear_all(); /* one-time clear of whatever the boot/DOS prompt left
-                        behind; every redraw after this only ever touches
-                        the cells that actually change - see the vram_*
-                        section above. */
+  vram_clear_all(); /* ブート／DOSプロンプトが残していたものを一度だけ
+                        クリアする。これ以降の再描画はすべて実際に
+                        変化したセルだけに触れる――上のvram_*節参照。 */
 
   read_path();
   read_dir();
@@ -3772,17 +3838,19 @@ int main(int argc, char *argv[])
 
   running = 1;
   while (running) {
-    /* dos_getch() (INT 18h AH=00h) blocks until a key is pressed, which
-       would freeze the row-0 clock while idle. Poll dos_kbhit() (INT 18h
-       AH=01h) instead and redraw the title row (the only thing that
-       changes while idle) between polls; vram_set_cell()'s change-only
-       writes mean a redraw that finds nothing changed touches no
-       hardware at all. IDLE_POLL_SPIN is a plain busy-wait between
-       AH=01h calls - real-mode DOS has no blocking "wait for key or N
-       ticks" primitive this program already used elsewhere, and a fixed
-       spin count is enough to keep this from calling INT 18h flat out
-       while still updating the clock well within a second; see the
-       #define. */
+    /* dos_getch()（INT 18h AH=00h）はキーが押されるまでブロック
+       するので、アイドル中は0行目の時計が止まってしまう。代わりに
+       dos_kbhit()（INT 18h AH=01h）をポーリングし、ポーリングの
+       合間にタイトル行（アイドル中に変化する唯一のもの）を
+       再描画する。vram_set_cell()の「変化があったときだけ書く」
+       性質により、何も変化していないと分かった再描画は
+       ハードウェアに一切触れない。IDLE_POLL_SPINは、AH=01h呼び出し
+       の間の単純なビジーウェイトである――リアルモードDOSには、
+       このプログラムが他で既に使っているような「キー入力かNティック
+       のどちらか早い方まで待つ」というブロッキングのプリミティブが
+       無く、固定回数のスピンで、INT 18hを全力で呼び続けることを
+       防ぎつつ、時計を1秒以内に十分収まる頻度で更新するには
+       これで足りる。#define参照。 */
     while (!dos_kbhit()) {
       int spin;
       draw_title_row();
@@ -3841,27 +3909,30 @@ int main(int argc, char *argv[])
       do_mkdir();
     } else if (key == KEY_F10) {
       running = 0;
-      /* F1/F8/F9 (and anything else): no command assigned yet - see
-         g_fkeyLabel[]'s reserved ("") entries - so ignored. F2 is
-         handled above (do_exec()). Milestone 9: INT 18h reports each
-         function key by its own scan code, so - unlike the removed
-         milestone-6 DOS-console scheme - no dos_kbhit() lookahead after
-         ESC is needed to tell F-keys apart from a bare ESC keypress. */
+      /* F1/F8/F9（およびそれ以外すべて）：まだコマンドが割り当てられて
+         いない――g_fkeyLabel[]の予約済み（""）エントリ参照――ので
+         無視する。F2は上で処理済み（do_exec()）。第9マイルストーン：
+         INT 18hはファンクションキーをそれぞれ独立したスキャンコード
+         として報告してくるので、削除済みの第6マイルストーンの
+         DOSコンソール方式とは異なり、素のESCキー押下とファンクション
+         キーを区別するためにESCの後でdos_kbhit()を先読みする必要が
+         ない。 */
     } else if (key == KEY_ESC) {
-      running = 0; /* bare ESC: quit, same as Q */
+      running = 0; /* 単独のESC：Qと同じく終了 */
     }
   }
 
-  /* leave the screen in a state DOS can use again: clear it via the same
-     direct VRAM write everything else in this program uses (not
-     ESC[2J/ANSI.SYS - this program never set the DOS console's own
-     notion of the current color, so asking it to clear "with the
-     current attribute" would be relying on state nothing here ever set)
-     and re-home the cursor before showing it. */
+  /* DOSがまた使える状態に画面を戻す：このプログラムの他の
+     すべてが使っているのと同じ直接VRAM書き込みで画面をクリアし
+     （ESC[2J/ANSI.SYSは使わない――このプログラムはDOSコンソール
+     自身の「現在の色」という概念を一度も設定していないので、
+     「現在の属性で」クリアするようそれに頼るのは、ここで何も
+     設定していない状態に頼ることになってしまう）、カーソルを
+     表示する前にホーム位置へ戻す。 */
   vram_clear_all();
   ansi_goto(0, 0);
-  write_str("\x1b[>5l"); /* show the text cursor again */
-  write_str("\x1b[>1l"); /* restore the function-key line */
+  write_str("\x1b[>5l"); /* テキストカーソルを再び表示する */
+  write_str("\x1b[>1l"); /* ファンクションキー行を復元する */
 
   return 0;
 }
