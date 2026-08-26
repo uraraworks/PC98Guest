@@ -24,6 +24,9 @@ Checks (all must pass, otherwise this exits non-zero):
                     fit within BOX_WIDTH cells.
        - "dialog" : placed alone into a draw_dialog() or draw_input_box()
                     box, must fit within DIALOG_WIDTH cells.
+       - "row"    : placed alone into a full-width, unbordered screen row
+                    (milestone 8's draw_view_cmdline()), must fit within
+                    VRAM_COLS (80) cells.
        - "fragment": concatenated at runtime with other fragments and/or
                     variable-length data (a path, a filename, a number)
                     before being placed into a row. The combined row is
@@ -119,6 +122,11 @@ MSG_LIMITS = {
     "MSG_EXEC_ERR_NOTEXE":      ("dialog",   37),
     "MSG_EXEC_ERR_FAILED":      ("dialog",   38),
     "MSG_EXEC_PRESS_KEY":       ("dialog",   39),
+    # milestone 8: built-in viewer (Enter on a non-COM/EXE file)
+    "MSG_VIEW_FILENAME_LABEL":  ("fragment", 40),
+    "MSG_VIEW_LINENO_LABEL":    ("fragment", 41),
+    "MSG_VIEW_ERR_OPEN":        ("dialog",   42),
+    "MSG_VIEW_CMDLINE":         ("row",      43),
 }
 
 
@@ -201,6 +209,11 @@ def main():
     box_width = extract_define_int(text, "BOX_WIDTH")
     cmdline_width = extract_define_int(text, "CMDLINE_WIDTH")
     dialog_width = extract_define_int(text, "DIALOG_WIDTH")
+    # milestone 8: VRAM_COLS is also the cell limit for a "row"-kind message
+    # (draw_view_cmdline()'s full-width, unbordered hint row); extracted
+    # here (rather than only down in check 6, as before) so check 5 can use
+    # it too.
+    screen_cols = extract_define_int(text, "VRAM_COLS")
     # MSG_TITLE (row 0) shares its row with a right-hand clock field
     # ("YY-MM-DD HH:MM:SS", see draw_title_row() in SUMIRE.C), so its real
     # on-screen budget is BOX_WIDTH minus that field, its gap, the 2-cell
@@ -238,6 +251,7 @@ def main():
         "box": box_width,
         "box_title": title_width,
         "dialog": dialog_width,
+        "row": screen_cols,
     }
     limit_names = {
         "box": "BOX_WIDTH",
@@ -245,6 +259,7 @@ def main():
                       "DATETIME_WIDTH - TITLE_DATETIME_GAP - "
                       "TITLE_DECOR_WIDTH - TITLE_TAIL_WIDTH)",
         "dialog": "DIALOG_WIDTH",
+        "row": "VRAM_COLS",
     }
     n = len(ja)
     known_indices = set(idx for (_kind, idx) in MSG_LIMITS.values())
@@ -278,8 +293,8 @@ def main():
 
     print("PASS: 5) every message fits the cell limit implied by its use "
           "site, in both languages")
-    print("     (box=%d box_title=%d dialog=%d cells)" %
-          (box_width, title_width, dialog_width))
+    print("     (box=%d box_title=%d dialog=%d row=%d cells)" %
+          (box_width, title_width, dialog_width, screen_cols))
     for line in report:
         print(line)
 
@@ -299,7 +314,8 @@ def main():
             fail("%s[] has %d entries, expected FKEY_COUNT (%d)" %
                  (name, len(arr), fkey_count))
 
-    screen_cols = extract_define_int(text, "VRAM_COLS")
+    # screen_cols (VRAM_COLS) was already extracted above, for check 5's
+    # "row" message kind.
 
     report = []
     prev_end = -1

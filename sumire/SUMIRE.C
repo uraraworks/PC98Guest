@@ -294,6 +294,12 @@
 #define MSG_EXEC_ERR_FAILED     38
 #define MSG_EXEC_PRESS_KEY      39
 
+/* Milestone 8 (built-in viewer, Enter on a non-COM/EXE file) messages */
+#define MSG_VIEW_FILENAME_LABEL 40
+#define MSG_VIEW_LINENO_LABEL   41
+#define MSG_VIEW_ERR_OPEN       42
+#define MSG_VIEW_CMDLINE        43
+
 const char *g_msgJA[] = {
   "すみれ - ディレクトリビューア",
   "パス=",
@@ -334,7 +340,11 @@ const char *g_msgJA[] = {
   " 件",
   "COM/EXEのみ実行できます（何かキーを押してください）",
   "実行に失敗しました（何かキーを押してください）",
-  "実行を終了しました（何かキーを押してください）"
+  "実行を終了しました（何かキーを押してください）",
+  "ファイル名: ",
+  "行番号: ",
+  "ファイルを開けません（何かキーを押してください）",
+  "ESC:一覧へ戻る"
 };
 
 const char *g_msgEN[] = {
@@ -377,7 +387,11 @@ const char *g_msgEN[] = {
   " file(s)",
   "Only COM/EXE files can be executed (press any key)",
   "Execute failed (press any key)",
-  "Finished executing (press any key)"
+  "Finished executing (press any key)",
+  "File name: ",
+  "Line No: ",
+  "Cannot open the file (press any key)",
+  "ESC: back to list"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -445,6 +459,56 @@ char *g_fkeyLabel[] = {
 };
 int g_fkeyHiPos[] = { -1, 1, 0, 0, 0, 0, 1, -1, -1, 0 };
 
+/* ---- built-in viewer (milestone 8) -------------------------------------
+ * Enter on a non-directory entry whose extension is not COM/EXE opens a
+ * read-only, full-screen text viewer instead of doing nothing - real
+ * program launch stays on F2/X (do_exec()), unchanged. Screen layout and
+ * key behaviour below are measured off real hardware; see
+ * docs/filer-measure-07.md. ROLL UP/ROLL DOWN are NOT implemented here:
+ * their key codes have not been measured yet (only up/down arrow, HOME and
+ * ESC were), and this project does not guess an unmeasured key code - see
+ * README.md.
+ * The file is never read into memory as a whole (small-model 64KB data
+ * segment already holds the directory listing and the VRAM shadow
+ * buffers); it is read forward, through a small buffer, one display line
+ * at a time, and the display is (re)built by discarding forward from the
+ * start of the file whenever the target line is not simply "one more than
+ * what is already on screen" - see view_goto_line()/view_render() below.
+ * There is no random-access line index kept in memory, so this program
+ * never allocates memory proportional to the file's line count. */
+#define VROW_HEADER        0    /* "File name:"/"Line No:" row */
+#define VROW_BLANK         1    /* always-empty row, per the measured layout */
+#define VROW_CONTENT_TOP   2    /* first of the 22 file-content rows */
+#define VIEW_CONTENT_ROWS  22   /* measured: rows 2-23 */
+#define VROW_CMD           24   /* same physical row as the filer's own
+                                   function-key row - reused, not a second
+                                   copy of it (see draw_view_cmdline()) */
+#define VIEW_TAB_WIDTH     8    /* measured: tabs expand to the next
+                                   multiple of 8 display columns */
+#define VIEW_READ_BUF      512  /* disk-read chunk size for the viewer's
+                                   own buffered reader - see vreader_getc();
+                                   never read the file one byte at a time */
+#define VIEW_LINE_BUF      88   /* one display line is at most VRAM_COLS
+                                   (80) cells, which is at most 80 bytes
+                                   (every cell costs exactly 1 byte,
+                                   whether ANK or one half of a zenkaku
+                                   pair) plus room for the 2-byte
+                                   end-of-line mark and a NUL */
+#define VIEW_PATH_BUF      96   /* g_path (<=79 chars incl. drive/backslash)
+                                   + an 8.3 name; same sizing as the other
+                                   full-path buffers in this file (see
+                                   do_delete()'s path[96]) */
+
+/* end-of-line mark: a full-width down arrow (CP932 0x81 0xAB), drawn only
+   when a display line actually ended on a real line terminator (never on
+   a wrapped line, and never on an unterminated final line - see
+   view_read_line()'s hadNL output). This exact glyph is this project's
+   own choice, not a reproduction of the original product's - the measured
+   fact is only that *some* full-width end-of-line mark is shown (see
+   docs/filer-measure-07.md); its precise appearance was not measured. */
+#define VIEW_EOL_MARK_B1  0x81
+#define VIEW_EOL_MARK_B2  0xab
+
 /* ---- global state ------------------------------------------------------ */
 
 char g_name[MAX_ENTRIES * NAME_LEN];
@@ -468,6 +532,30 @@ char g_copybuf[COPY_BUF_SIZE]; /* single shared Copy/Move I/O buffer -
                                     see COPY_BUF_SIZE's comment; never put
                                     a buffer this size on the stack in a
                                     16-bit small-model program. */
+
+/* ---- built-in viewer state (milestone 8) ------------------------------
+ * One viewer session is active at a time (do_view() runs its own modal
+ * loop, like do_rename()/do_copy()/... do), so this is plain global state
+ * rather than a struct threaded through every call - the same shape as
+ * the rest of this file's DOS-call wrappers/buffers above. */
+char g_viewPath[VIEW_PATH_BUF];   /* full path of the file being viewed */
+int g_viewHandle;                 /* DOS handle, or -1 when not open */
+char g_viewReadBuf[VIEW_READ_BUF];/* vreader_getc()'s disk-read buffer */
+int g_viewReadLen;                 /* bytes valid in g_viewReadBuf */
+int g_viewReadPos;                 /* next unread index in g_viewReadBuf */
+int g_viewPushback[2];             /* 1-2 byte pushback queue, front-first -
+                                       see vreader_pushback1()/2() below;
+                                       needed so a wrap decision that reads
+                                       one byte too far (a tab, or the
+                                       trail byte of a zenkaku pair) can
+                                       hand that byte back to the next
+                                       display line instead of losing it */
+int g_viewPushbackLen;             /* 0, 1, or 2 */
+int g_viewLineNo;                   /* 1-based number of the topmost
+                                       displayed line */
+int g_viewTotalLines;               /* total display-line count, computed
+                                       once by view_count_lines() when the
+                                       viewer is opened */
 
 /* ---- low level DOS calls (inline asm; see doc/smlrc.md "asm()") ------- */
 
@@ -1711,6 +1799,34 @@ void build_full_path(char *out, int cap, char *name)
   sappend(out, &p, name, cap);
 }
 
+/* true if name's extension (case-insensitive) is COM or EXE - the same
+   rule do_exec() uses to decide whether F2/X may run a file. Shared by
+   enter_selected() (milestone 8): Enter on such a file does nothing here
+   (running a program stays F2/X-only, unchanged), Enter on anything else
+   non-directory opens the built-in viewer (do_view()) instead. */
+int is_exec_ext(char *name)
+{
+  int len;
+  int dotpos;
+  int i;
+  char ext[4];
+  char c;
+
+  len = strlen(name);
+  dotpos = -1;
+  for (i = 0; i < len; i++) {
+    if (name[i] == '.') dotpos = i;
+  }
+  if (dotpos < 0 || (len - dotpos - 1) != 3) return 0;
+  for (i = 0; i < 3; i++) {
+    c = name[dotpos + 1 + i];
+    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+    ext[i] = c;
+  }
+  ext[3] = 0;
+  return (strcmp(ext, "COM") == 0 || strcmp(ext, "EXE") == 0);
+}
+
 /* Enter on a directory entry: "." (stay), ".." (go up one level, "." and
    ".." are listed like the original and not hidden), or a subdirectory
    name (go into it). g_path always ends with '\\'; both branches keep
@@ -1724,9 +1840,17 @@ void enter_selected(void)
   int p;
 
   if (g_count == 0) return;
-  if (!is_dir_entry(g_cursor)) return;
 
   name = &g_name[g_cursor * NAME_LEN];
+
+  if (!is_dir_entry(g_cursor)) {
+    /* milestone 8: COM/EXE stays a no-op here (run it with F2/X instead,
+       matching do_exec()'s own launch rule); anything else opens the
+       built-in viewer. */
+    if (is_exec_ext(name)) return;
+    do_view(name);
+    return;
+  }
 
   if (strcmp(name, ".") == 0) {
     return;
@@ -2235,6 +2359,425 @@ void do_exec(void)
 
   draw_dialog(MSG(MSG_EXEC_PRESS_KEY), 0);
   dos_getch();
+  draw_screen();
+}
+
+
+/* ---- built-in viewer (milestone 8) --------------------------------------- */
+
+/* refills g_viewReadBuf from g_viewHandle; the only place that actually
+   calls dos_read() for the viewer - see VIEW_READ_BUF's comment for why
+   reading in chunks like this (never one INT 21h call per byte) is what
+   keeps a large file from being slow to scan. */
+void vreader_fill(void)
+{
+  g_viewReadLen = dos_read((unsigned int)g_viewHandle, g_viewReadBuf, (unsigned int)VIEW_READ_BUF);
+  if (g_viewReadLen < 0) g_viewReadLen = 0;
+  g_viewReadPos = 0;
+}
+
+/* opens path for the viewer; returns 1 on success, 0 on failure. Resets all
+   reader state (buffer + pushback), so this is always safe to call again
+   for a fresh forward pass over the same file - see view_goto_line() below,
+   the only other caller. */
+int vreader_open(char *path)
+{
+  int h;
+
+  h = dos_open(path, 0);
+  if (h < 0) return 0;
+  g_viewHandle = h;
+  g_viewReadLen = 0;
+  g_viewReadPos = 0;
+  g_viewPushbackLen = 0;
+  return 1;
+}
+
+void vreader_close(void)
+{
+  if (g_viewHandle >= 0) dos_close((unsigned int)g_viewHandle);
+  g_viewHandle = -1;
+}
+
+/* raw next byte (0-255), or -1 at end of file. Buffered - see VIEW_READ_BUF
+   and vreader_fill() above. */
+int vreader_getc(void)
+{
+  if (g_viewReadPos >= g_viewReadLen) {
+    vreader_fill();
+    if (g_viewReadLen <= 0) return -1;
+  }
+  return (unsigned char)g_viewReadBuf[g_viewReadPos++];
+}
+
+/* like vreader_getc(), but serves g_viewPushback[] first - see its
+   declaration (with g_viewPushbackLen) above for why view_read_line()
+   needs this: a look-ahead byte, or a whole zenkaku pair, that turns out
+   to belong to the *next* display line has to be handed back rather than
+   lost. */
+int vreader_getc_pb(void)
+{
+  int c;
+
+  if (g_viewPushbackLen > 0) {
+    c = g_viewPushback[0];
+    g_viewPushbackLen--;
+    if (g_viewPushbackLen > 0) g_viewPushback[0] = g_viewPushback[1];
+    return c;
+  }
+  return vreader_getc();
+}
+
+void vreader_pushback1(int c)
+{
+  if (g_viewPushbackLen == 1) g_viewPushback[1] = g_viewPushback[0];
+  g_viewPushback[0] = c;
+  g_viewPushbackLen++;
+}
+
+void vreader_pushback2(int c1, int c2)
+{
+  g_viewPushback[0] = c1;
+  g_viewPushback[1] = c2;
+  g_viewPushbackLen = 2;
+}
+
+/* reads one display line (tab-expanded, wrapped at VRAM_COLS cells without
+   ever splitting a zenkaku pair) into out[] (a NUL-terminated raw CP932
+   byte string, at most VIEW_LINE_BUF-1 bytes - every screen cell costs
+   exactly 1 byte here, whether ANK or one half of a zenkaku pair, so a
+   cap of VIEW_LINE_BUF is always enough room; every append below is still
+   checked against 'cap' anyway, the same discipline sappend() uses
+   elsewhere in this file). *outCells gets the line's on-screen width;
+   *outHadNL is 1 only if this display line ended on a real line
+   terminator (CRLF or LF) - never on a wrap, and never on the last,
+   EOF-ended line of a file with no trailing newline (both measured
+   behaviours; see docs/filer-measure-07.md). Returns 1 if a line was
+   produced, 0 if the file had nothing left at all (this call started
+   exactly at end of file). */
+int view_read_line(char *out, int cap, int *outCells, int *outHadNL)
+{
+  int cell;
+  int len;
+  int producedAny;
+  int c;
+  int c2;
+  int spaces;
+  int i;
+
+  cell = 0;
+  len = 0;
+  producedAny = 0;
+
+  for (;;) {
+    c = vreader_getc_pb();
+
+    if (c == -1) {
+      if (!producedAny) { *outCells = 0; *outHadNL = 0; return 0; }
+      out[len] = 0;
+      *outCells = cell;
+      *outHadNL = 0;
+      return 1;
+    }
+
+    if (c == 0x0d) {
+      c2 = vreader_getc_pb();
+      if (c2 != 0x0a && c2 != -1) vreader_pushback1(c2);
+      out[len] = 0;
+      *outCells = cell;
+      *outHadNL = 1;
+      return 1;
+    }
+    if (c == 0x0a) {
+      out[len] = 0;
+      *outCells = cell;
+      *outHadNL = 1;
+      return 1;
+    }
+
+    if (c == 0x09) {
+      spaces = VIEW_TAB_WIDTH - (cell % VIEW_TAB_WIDTH);
+      if (cell + spaces > VRAM_COLS) {
+        vreader_pushback1(0x09);
+        out[len] = 0;
+        *outCells = cell;
+        *outHadNL = 0;
+        return 1;
+      }
+      for (i = 0; i < spaces; i++) {
+        if (len + 1 > cap - 1) break; /* defensive; never actually hit */
+        out[len] = ' ';
+        len++;
+      }
+      cell += spaces;
+      producedAny = 1;
+      continue;
+    }
+
+    if ((c >= 0x81 && c <= 0x9f) || (c >= 0xe0 && c <= 0xfc)) {
+      c2 = vreader_getc_pb();
+      if (c2 == -1) {
+        /* truncated lead byte at EOF: 1-cell ANK fallback, same rule
+           text_width()/sappend() use elsewhere in this file. */
+        if (cell + 1 > VRAM_COLS || len + 1 > cap - 1) {
+          vreader_pushback1(c);
+          out[len] = 0; *outCells = cell; *outHadNL = 0;
+          return 1;
+        }
+        out[len] = (char)c; len++;
+        cell++;
+        producedAny = 1;
+        continue;
+      }
+      if (cell + 2 > VRAM_COLS || len + 2 > cap - 1) {
+        vreader_pushback2(c, c2);
+        out[len] = 0;
+        *outCells = cell;
+        *outHadNL = 0;
+        return 1;
+      }
+      out[len] = (char)c; len++;
+      out[len] = (char)c2; len++;
+      cell += 2;
+      producedAny = 1;
+      continue;
+    }
+
+    /* plain ANK byte */
+    if (cell + 1 > VRAM_COLS || len + 1 > cap - 1) {
+      vreader_pushback1(c);
+      out[len] = 0; *outCells = cell; *outHadNL = 0;
+      return 1;
+    }
+    out[len] = (char)c;
+    len++;
+    cell++;
+    producedAny = 1;
+  }
+}
+
+/* scans the whole file once (from the current reader position - do_view()
+   always calls this right after vreader_open(), i.e. from byte 0),
+   counting display lines without storing anything about them. This is
+   the one place a large file's full size is visited; it is a single
+   forward pass through vreader_getc()'s buffer (never one dos_read() call
+   per byte, never an array sized by the file's line count), so it always
+   terminates and never allocates memory proportional to file size. */
+int view_count_lines(void)
+{
+  char dummy[VIEW_LINE_BUF];
+  int cells;
+  int hadNL;
+  int n;
+
+  n = 0;
+  while (view_read_line(dummy, sizeof(dummy), &cells, &hadNL)) n++;
+  return n;
+}
+
+/* repositions the reader so the next view_read_line() call returns display
+   line 'target' (1-based). There is no random-access line index kept
+   anywhere - see the viewer state comment above g_viewLineNo - so this
+   always reopens the file and re-reads forward from the start, discarding
+   'target'-1 lines. That cost is proportional to how far into the file
+   'target' is, not to the file's total size, and it always terminates for
+   the same reason view_count_lines() does (a plain forward scan) - slower
+   the deeper into a very large file 'target' is, but never hanging.
+   Returns 1 on success, 0 if the file could not be reopened (should not
+   happen once do_view() has already opened it once successfully). */
+int view_goto_line(int target)
+{
+  char dummy[VIEW_LINE_BUF];
+  int cells;
+  int hadNL;
+  int i;
+
+  vreader_close();
+  if (!vreader_open(g_viewPath)) return 0;
+  for (i = 1; i < target; i++) {
+    if (!view_read_line(dummy, sizeof(dummy), &cells, &hadNL)) break; /* past EOF */
+  }
+  return 1;
+}
+
+/* row VROW_HEADER: "File name: <path>" (reversed, left) and "Line No:
+   N/M" (label cyan / ATTR_LABEL, value yellow / ATTR_TITLE - see
+   docs/filer-measure-07.md) on the right. Every cell is written by
+   exactly one of the four vram_puts_cells()/vram_ank() calls below (no
+   cell is ever written twice with two different values in the same
+   frame) - row 0 is the one row this file's own history shows really
+   does flicker when a cell's content is decided in two separate passes
+   per frame (see draw_title_row()'s milestone 7 fix comment above), so
+   the viewer's own row-0 header follows that same single-pass discipline
+   instead of the two-pass "value then relabel" style draw_path_line()/
+   draw_disk_line() use on other rows. */
+void draw_view_header(void)
+{
+  char leftBuf[VIEW_PATH_BUF + 16];
+  char labelPart[16];
+  char valuePart[24];
+  char numbuf[12];
+  int p;
+  int leftWidth;
+  int labelCells;
+  int valueCells;
+  int rightCells;
+  int rightStart;
+  int gapCol;
+
+  p = 0;
+  sappend(leftBuf, &p, MSG(MSG_VIEW_FILENAME_LABEL), sizeof(leftBuf));
+  sappend(leftBuf, &p, g_viewPath, sizeof(leftBuf));
+
+  p = 0;
+  sappend(labelPart, &p, MSG(MSG_VIEW_LINENO_LABEL), sizeof(labelPart));
+  labelCells = text_width(labelPart);
+
+  p = 0;
+  format_u32_plain(0, (unsigned int)g_viewLineNo, numbuf);
+  sappend(valuePart, &p, numbuf, sizeof(valuePart));
+  sappend(valuePart, &p, "/", sizeof(valuePart));
+  format_u32_plain(0, (unsigned int)g_viewTotalLines, numbuf);
+  sappend(valuePart, &p, numbuf, sizeof(valuePart));
+  valueCells = text_width(valuePart);
+
+  rightCells = labelCells + valueCells;
+  rightStart = VRAM_COLS - rightCells;
+  if (rightStart < 0) rightStart = 0;
+  gapCol = rightStart - 1;
+  leftWidth = (gapCol > 0) ? gapCol : 0;
+
+  vram_puts_cells(VROW_HEADER, 0, leftBuf, ATTR_REV, leftWidth);
+  if (gapCol >= 0) vram_ank(VROW_HEADER, gapCol, ' ', ATTR_BASE);
+  vram_puts_cells(VROW_HEADER, rightStart, labelPart, ATTR_LABEL, labelCells);
+  vram_puts_cells(VROW_HEADER, rightStart + labelCells, valuePart, ATTR_TITLE, valueCells);
+}
+
+/* rows VROW_CONTENT_TOP .. VROW_CONTENT_TOP+VIEW_CONTENT_ROWS-1: the file
+   content itself, one already-wrapped display line per row, in
+   ATTR_VALUE (plain white - see docs/filer-measure-07.md). The
+   end-of-line mark (VIEW_EOL_MARK_B1/B2 above) is appended to the same
+   line buffer handed to vram_puts_cells() - it is an ordinary two-byte
+   CP932 character as far as that function is concerned, exactly like any
+   other zenkaku text in this file - but only when there is room for it
+   without exceeding VRAM_COLS; a display line that happens to fill the
+   row exactly and also end on a real newline has nowhere left to put the
+   mark, and it is silently omitted there, the same defensive-truncation
+   policy sappend()/vram_puts_cells() already use everywhere else in this
+   file. */
+void draw_view_content(void)
+{
+  char buf[VIEW_LINE_BUF];
+  int cells;
+  int hadNL;
+  int row;
+  int i;
+  int got;
+
+  for (i = 0; i < VIEW_CONTENT_ROWS; i++) {
+    row = VROW_CONTENT_TOP + i;
+    got = view_read_line(buf, sizeof(buf), &cells, &hadNL);
+    if (!got) {
+      vram_puts_cells(row, 0, "", ATTR_VALUE, VRAM_COLS);
+      continue;
+    }
+    if (hadNL && cells + 2 <= VRAM_COLS) {
+      buf[cells] = (char)VIEW_EOL_MARK_B1;
+      buf[cells + 1] = (char)VIEW_EOL_MARK_B2;
+      buf[cells + 2] = 0;
+    }
+    vram_puts_cells(row, 0, buf, ATTR_VALUE, VRAM_COLS);
+  }
+}
+
+/* row VROW_CMD: same physical row as the filer's own function-key row, but
+   showing a small viewer-specific hint instead of that ten-field
+   assignment - this program has no measured "view mode" function-key
+   layout (only the original's own eXec/Copy/Delete/... row was ever
+   measured; see docs/filer-measure-05.md), so this deliberately does not
+   reuse g_fkeyLabel[]/g_fkeyCol[]/draw_cmdline(). Minimum requirement:
+   make it visually obvious that ESC returns to the list. */
+void draw_view_cmdline(void)
+{
+  int col;
+  int cells;
+
+  for (col = 0; col < VRAM_COLS; col++) {
+    vram_ank(VROW_CMD, col, ' ', ATTR_BASE);
+  }
+  cells = text_width(MSG(MSG_VIEW_CMDLINE));
+  vram_puts_cells(VROW_CMD, 0, MSG(MSG_VIEW_CMDLINE), ATTR_VALUE, cells);
+}
+
+/* draws one full viewer frame. Always repositions the reader to
+   g_viewLineNo first (see view_goto_line()'s comment - there is no
+   persistent "reader is already positioned correctly" invariant kept
+   across calls, so this is always correct regardless of what changed
+   g_viewLineNo since the last frame) and then reads exactly
+   VIEW_CONTENT_ROWS lines forward from there for the content rows. */
+void view_render(void)
+{
+  view_goto_line(g_viewLineNo);
+  draw_view_header();
+  vram_puts_cells(VROW_BLANK, 0, "", ATTR_BASE, VRAM_COLS);
+  draw_view_content();
+  draw_view_cmdline();
+}
+
+/* Enter on a non-directory, non-COM/EXE entry (milestone 8): opens the
+   file under the cursor in a read-only, full-screen viewer - see the
+   milestone 8 comment above g_fkeyHiPos[] for the overall design and
+   docs/filer-measure-07.md for what was actually measured (screen layout,
+   key behaviour, tab/wrap/EOL handling). Only Down/Up/HOME/ESC are
+   implemented - ROLL UP/ROLL DOWN's key codes have not been measured yet,
+   and this project does not guess an unmeasured key code (see README.md).
+   Returning (ESC) redraws the directory list exactly as before - this
+   never leaves the screen in a state only a full external redraw could
+   fix, matching every other modal path in this file. */
+void do_view(char *name)
+{
+  int key;
+  int viewing;
+
+  build_full_path(g_viewPath, sizeof(g_viewPath), name);
+
+  if (!vreader_open(g_viewPath)) {
+    draw_dialog(MSG(MSG_VIEW_ERR_OPEN), 0);
+    dos_getch();
+    draw_screen();
+    return;
+  }
+
+  /* one full forward pass to get the total display-line count - see
+     view_count_lines()'s comment; this is the one place a large file's
+     size is fully visited, and it goes through a buffered reader, not
+     byte by byte, specifically so it does not freeze - then start over
+     from line 1 for the actual display. */
+  g_viewTotalLines = view_count_lines();
+  vreader_close();
+
+  g_viewLineNo = 1;
+  view_goto_line(1);
+
+  viewing = 1;
+  while (viewing) {
+    view_render();
+    key = dos_getch();
+
+    if (key == KEY_ESC) {
+      viewing = 0;
+    } else if (key == KEY_DOWN) {
+      if (g_viewLineNo < g_viewTotalLines) g_viewLineNo++;
+    } else if (key == KEY_UP) {
+      if (g_viewLineNo > 1) g_viewLineNo--;
+    } else if (key == KEY_HOME) {
+      g_viewLineNo = 1;
+    }
+    /* ROLL UP/ROLL DOWN and anything else: no-op - see this function's
+       header comment above. */
+  }
+
+  vreader_close();
   draw_screen();
 }
 
@@ -3080,6 +3623,8 @@ int main(int argc, char *argv[])
 
   write_str("\x1b[>1h"); /* release the bottom function-key line */
   write_str("\x1b[>5h"); /* hide the text cursor */
+
+  g_viewHandle = -1; /* milestone 8: no viewer file open yet */
 
   vram_shadow_init();
   vram_clear_all(); /* one-time clear of whatever the boot/DOS prompt left
