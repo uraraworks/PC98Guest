@@ -74,6 +74,23 @@ Checks (all must pass, otherwise this exits non-zero):
      named check so a future change to MSG_LIMITS or to draw_status_line()
      that quietly widens what the notice area needs cannot slip through
      unnoticed the way a shared/generic check might.
+ 11. A static estimate of TSUBAKI.C's global data-segment usage (every
+     top-level `char g_x[N];` / `unsigned char g_x[N];` / `int g_x[N];` /
+     `unsigned int g_x[N];` declaration whose size is a #define expression,
+     found by regex - this covers g_text[]/g_lineStart[]/g_iobuf[]/
+     g_filename[]/g_notice[]/g_searchTerm[]/g_replaceTerm[]/g_undoBuf[]/
+     g_undoTmp[]/g_curChar[]/g_curAttr[], i.e. every sizeable buffer,
+     but NOT small fixed-initializer arrays like g_fkeyCol[]/g_fkeyHiPos[]
+     (a handful of ints each, negligible), scalar globals, pointer arrays,
+     or string-literal bytes) stays under 65536 bytes (the 16-bit
+     small-model data segment, which SmallerC also uses for the stack -
+     see docs/tsubaki-spec-01.md 2). `int`/`unsigned int` are assumed to be
+     2 bytes (the 16-bit target). This is a floor, not the true number:
+     the true data-segment usage (including the excluded items above and
+     the runtime stack) is only known from the linker's .map file after a
+     real build - see the task's build-verification step. This check exists
+     to catch a large regression (e.g. an oversized new buffer) before a
+     build is even attempted, not to replace the .map check.
 
 Usage:
   python3 check.py [path-to-TSUBAKI.C]
@@ -118,6 +135,11 @@ MSG_LIMITS = {
     "MSG_REPLACE_COUNT_PREFIX": ("notice",   18),
     "MSG_REPLACE_COUNT_SUFFIX": ("notice",   19),
     "MSG_REPLACE_LIMIT_SUFFIX": ("notice",   20),
+    # Undo addition. Both are assembled into g_notice by handle_undo_key()
+    # (via sappend_copy()), the same shared status-line field the "notice"
+    # kind already checks.
+    "MSG_UNDO_NONE":            ("notice",   21),
+    "MSG_UNDO_FAILED":          ("notice",   22),
 }
 
 # Generous fixed budget for the status line's "[...]" mode indicator (see
@@ -189,6 +211,113 @@ def extract_int_array(text, name):
         fail("could not find array %s[] in TSUBAKI.C" % name)
     body = m.group(1)
     return [int(x) for x in re.findall(r"-?\d+", body)]
+
+
+# Byte size of TSUBAKI.C's 16-bit-target scalar types, used by check 11 to
+# size global arrays declared as e.g. "unsigned int g_lineStart[MAX_LINES];".
+DATA_TYPE_SIZE = {
+    "char": 1,
+    "unsigned char": 1,
+    "int": 2,
+    "unsigned int": 2,
+}
+
+# 16-bit small-model data segment: SmallerC's small model puts the stack in
+# the same 64KB segment as global data (docs/tsubaki-spec-01.md 2), so this
+# is the hard ceiling everything (globals + stack) must fit under.
+DATA_SEGMENT_LIMIT = 65536
+
+
+def extract_all_defines(text):
+    """maps every '#define NAME <arithmetic expression>' in TSUBAKI.C to its
+    integer value, for evaluating array-size expressions like
+    'TEXT_MAX + 1' or 'VRAM_CELLS' in check 11. Object-like macros only
+    (function-like macros such as 'MSG(id)' have no space between the name
+    and '(', so '#define\\s+(\\w+)\\s+' never matches their name). A define's
+    right-hand side may itself reference earlier #defines - e.g.
+    VRAM_CELLS is '(VRAM_ROWS * VRAM_COLS)' - so this resolves everything
+    it can in dependency order (fixed-point iteration) rather than requiring
+    a single textual pass. A define whose RHS is not a plain +/-/*//()
+    arithmetic expression over integers and other defines (e.g. hex
+    constants like 0xE1, or non-arithmetic macros) is silently left
+    unresolved; nothing check 11 needs happens to require one of those."""
+    raw = {}
+    for m in re.finditer(r"#define\s+(\w+)\s+(.+)", text):
+        name, rhs = m.group(1), m.group(2)
+        # Strip a trailing comment - '.' doesn't match '\n' by default, so a
+        # comment that closes on a later line (e.g. SEARCH_MAX's) would
+        # otherwise survive as unclosed "/* ..." text; cutting at the first
+        # "/*" handles both single- and multi-line trailing comments alike.
+        rhs = rhs.split("/*", 1)[0].strip()
+        if rhs and re.match(r"^[0-9A-Za-z_+\-*/() ]+$", rhs):
+            raw[name] = rhs
+
+    resolved = {}
+    changed = True
+    while changed:
+        changed = False
+        for name, rhs in raw.items():
+            if name in resolved:
+                continue
+            tokens = re.findall(r"[A-Za-z_]\w*|\d+|[+\-*/()]", rhs)
+            out = []
+            ok = True
+            for tok in tokens:
+                if re.match(r"^[A-Za-z_]", tok):
+                    if tok in resolved:
+                        out.append(str(resolved[tok]))
+                    else:
+                        ok = False
+                        break
+                else:
+                    out.append(tok)
+            if not ok:
+                continue
+            safe = "".join(out)
+            if safe.strip() == "" or not re.match(r"^[0-9+\-*/() ]+$", safe):
+                continue
+            resolved[name] = eval(safe)  # noqa: S307 - whitelisted chars only
+            changed = True
+    return resolved
+
+
+def eval_size_expr(expr, defines):
+    """evaluates a '+'/'-'-only array-size expression (e.g. 'TEXT_MAX + 1')
+    against the #define values extracted by extract_all_defines(), for
+    check 11. Every identifier must resolve to a known #define; the result
+    is restricted to a whitelist of characters before eval() ever sees it."""
+    tokens = re.findall(r"[A-Za-z_]\w*|\d+|[+\-*/()]", expr)
+    resolved = []
+    for tok in tokens:
+        if re.match(r"^[A-Za-z_]", tok):
+            if tok not in defines:
+                fail("array size expression %r uses %r, which is not a "
+                     "plain-integer #define in TSUBAKI.C (check.py's "
+                     "extract_all_defines() cannot resolve it - update "
+                     "check 11 if this is intentional)" % (expr, tok))
+            resolved.append(str(defines[tok]))
+        else:
+            resolved.append(tok)
+    safe = "".join(resolved)
+    if not re.match(r"^[0-9+\-*/() ]+$", safe):
+        fail("array size expression %r resolved to %r, which contains "
+             "unexpected characters" % (expr, safe))
+    return eval(safe)  # noqa: S307 - input is whitelisted to digits/+-*/() above
+
+
+def extract_global_data_arrays(text):
+    """finds every top-level 'TYPE g_name[SIZE-EXPR];' global array
+    declaration (TYPE in DATA_TYPE_SIZE) in TSUBAKI.C, for check 11. This
+    intentionally does not match declarations with an inline initializer
+    (e.g. 'int g_fkeyCol[] = { ... };') since the closing '];' right after
+    the bracket excludes them - those are small, fixed-count arrays where
+    counting bytes isn't worth the extra parsing (see check 11's docstring
+    entry)."""
+    pattern = re.compile(
+        r"^(unsigned\s+char|unsigned\s+int|int|char)\s+(g_\w+)\[([^\]]+)\]\s*;",
+        re.M)
+    return [(m.group(2), re.sub(r"\s+", " ", m.group(1)), m.group(3))
+            for m in pattern.finditer(text)]
 
 
 def main():
@@ -384,6 +513,40 @@ def main():
     print("PASS: 10) every notice message fits STATUS_SHARED_WIDTH (%d "
           "cells) in both languages" % status_shared_width)
     for line in notice_report:
+        print(line)
+
+    # ---- check 11: static estimate of global data-segment usage ---------
+    defines = extract_all_defines(text)
+    arrays = extract_global_data_arrays(text)
+    if not arrays:
+        fail("extract_global_data_arrays() found no g_*[] arrays in "
+             "TSUBAKI.C - regex likely broken (this should always find "
+             "g_text[] at minimum)")
+
+    total = 0
+    data_report = []
+    for name, typ, size_expr in arrays:
+        if typ not in DATA_TYPE_SIZE:
+            fail("g_%s has type %r, which check 11's DATA_TYPE_SIZE does "
+                 "not know the size of - update check.py" % (name, typ))
+        count = eval_size_expr(size_expr, defines)
+        nbytes = DATA_TYPE_SIZE[typ] * count
+        total += nbytes
+        data_report.append("  %-14s %-14s [%s] = %d elements x %d bytes = %d bytes" %
+                            (name, typ, size_expr, count, DATA_TYPE_SIZE[typ], nbytes))
+
+    if total > DATA_SEGMENT_LIMIT:
+        fail("estimated global data usage is %d bytes, exceeds the 64KB "
+             "small-model data segment (%d bytes) - this is only a floor "
+             "(excludes scalars, pointers, string-literal bytes, and the "
+             "stack), so the real overage is at least this large" %
+             (total, DATA_SEGMENT_LIMIT))
+    print("PASS: 11) estimated global data usage (%d fixed-size g_*[] "
+          "arrays, floor only - see this check's docstring entry) is "
+          "%d bytes, within the %d-byte data segment (%d bytes to spare "
+          "for scalars/pointers/string literals/stack)" %
+          (len(arrays), total, DATA_SEGMENT_LIMIT, DATA_SEGMENT_LIMIT - total))
+    for line in data_report:
         print(line)
 
     print("ALL CHECKS PASSED")

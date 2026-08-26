@@ -20,7 +20,16 @@
  * 途中には一致させない（line_find()参照）。検索語・置換語の入力は
  * 既存のinput_dialog()をそのまま使うため、v1でも半角のみ（全角の検索語は
  * まだ打てない。FEP経由で入るかどうかは未確認）。
- * まだ入れないもの：Undo、ブロック編集／クリップボード、ウィンドウ
+ *
+ * さらにUndo（取り消し。^U、別名^Z）を追加した。バッファが
+ * buffer_insert()/buffer_delete()を通じてのみ編集される単一の平文
+ * バッファ＋行表であることを利用し、「どこに何バイト挿入した／どこから
+ * 何バイト削除した」を固定サイズ（2KB）のリングバッファへ「1操作＝
+ * 1記録」の粒度で積む（打鍵をまとめない。単純さを優先した自作の判断）。
+ * リングが満杯になったら最古の記録から捨てる。詳細な設計はg_undoBuf[]
+ * 直前のコメントを参照。Redo・打鍵のまとめ・カーソル移動だけの取消しは
+ * 作っていない（README.md参照）。
+ * まだ入れないもの：ブロック編集／クリップボード、ウィンドウ
  * 分割、引数なし起動時のファイル選択、BAK、XMS/EMS退避、オート
  * インデント、CFG。
  *
@@ -153,8 +162,10 @@
 #define KEY_CTRL_Q   0x11  /* 終了 */
 #define KEY_CTRL_R   0x12  /* 逐次置換（v1） */
 #define KEY_CTRL_T   0x14  /* 文頭 */
+#define KEY_CTRL_U   0x15  /* Undo（取り消し） */
 #define KEY_CTRL_V   0x16  /* 挿入／上書き切替 */
 #define KEY_CTRL_Y   0x19  /* カーソル行削除 */
+#define KEY_CTRL_Z   0x1a  /* Undo（取り消し。^Uの別名） */
 
 /* ---- VRAM属性（すみれで実機実測。docs/tvram-measure-01.md / filer-measure-06.md参照） -- */
 #define ATTR_BASE   0xE1
@@ -616,6 +627,8 @@ void ansi_goto(int row, int col)
 #define MSG_REPLACE_COUNT_PREFIX 18 /* ^P：ステータス行の通知に置換件数を組み立てる前半部分 */
 #define MSG_REPLACE_COUNT_SUFFIX 19 /* ^P：件数の後に続ける後半部分（上限に達しなかった場合） */
 #define MSG_REPLACE_LIMIT_SUFFIX 20 /* ^P：件数の後に続ける後半部分（容量上限で途中打ち切りの場合） */
+#define MSG_UNDO_NONE     21 /* ^U/^Z：戻せる記録が無いときのステータス行通知 */
+#define MSG_UNDO_FAILED   22 /* ^U/^Z：容量不足で削除の取り消し（再挿入）に失敗したときのステータス行通知 */
 
 const char *g_msgJA[] = {
   "無題",
@@ -638,7 +651,9 @@ const char *g_msgJA[] = {
   "上限のため置換を中止しました（何かキーを押してください）",
   "置換しました: ",
   "件",
-  "件（上限のため中断）"
+  "件（上限のため中断）",
+  "取り消せる変更がありません",
+  "容量不足のため取り消せませんでした"
 };
 
 const char *g_msgEN[] = {
@@ -662,7 +677,9 @@ const char *g_msgEN[] = {
   "Replace stopped: limit reached (press any key)",
   "Replaced: ",
   " times",
-  " times (stopped: limit)"
+  " times (stopped: limit)",
+  "Nothing to undo",
+  "Undo failed: not enough space"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -798,6 +815,67 @@ int g_lineOverflow; /* rebuild_lines()が最後に数えた行数がMAX_LINESを
                         超えていたら1。g_lineCount自体はMAX_LINESで
                         丸めてしまうため、超過の有無はこのフラグでしか
                         分からない（load_file()参照）。 */
+
+/* ---- Undo ログ -------------------------------------------------------
+ * つばきのバッファは単一の平文g_text[]＋行表なので、編集を「どこに
+ * 何バイト挿入した／どこから何バイト削除した」の記録として残せる。
+ * 挿入の取り消しはその範囲を削除するだけでよく、バイト列を保存する
+ * 必要が無い。削除の取り消しは削除したバイト列を戻す必要があるので、
+ * そのときだけバイト列を保存する（本タスクの指示に基づく設計。
+ * docs/tsubaki-spec-01.mdにUndo専用の章はまだ無い）。
+ *
+ * 固定サイズのリングバッファ（UNDO_BUF_SIZE=2KB。目安どおり。ビルド後
+ * の.mapで見たデータ使用量に対して十分な余裕がある）へ、可変長の
+ * レコードを「ヘッダ→（削除のときだけ）バイト列→フッタ」の順で
+ * 詰めていく自己記述形式で格納する。フッタにレコード全長を持たせて
+ * おくことで、直近の書き込み位置から逆向きに1件だけ読み戻せる
+ * （＝Undoスタックの先頭を、別の索引表を持たずに求められる）。
+ *
+ * レコード粒度は「1操作＝1記録」で固定する（打鍵をまとめない）。
+ * まとめる実装（例：連続する文字入力を1件に合成する）は行のまたがりや
+ * 上書きモードとの組合せで境界判定を誤りやすく、今回は単純さを優先して
+ * すべてのbuffer_insert()/buffer_delete()呼び出しを1件ずつ記録する
+ * （一括置換^Pの1回は複数回のbuffer_delete()/buffer_insert()になるが、
+ * それぞれ独立した記録になる＝1回の^Pを1回の^Uで戻せる必要はない。
+ * README.md参照）。
+ *
+ * リングが満杯のときは、新しい記録を書く前に末尾（最古）から記録を
+ * 捨てて空きを作る。1件のレコードが空のリング全体よりも大きい場合
+ * （非常に長い行を^Yで削除した場合など）はそもそも収まらないので、
+ * その操作だけ記録をあきらめる（記録しないだけで構造は壊れない）。
+ *
+ * UNDO_BUF_SIZE(2048)を2の冪にしてあるのは、環状インデックスの計算を
+ * 剰余ではなく&でのマスクにできるから（2048は65536の約数なので、
+ * 16bit unsigned のまま引き算しても & (UNDO_BUF_SIZE-1) だけで正しく
+ * 2048を法とした結果になる。SmallerCの16bit演算でも安全）。 */
+#define UNDO_BUF_SIZE    2048             /* 2KB。目安どおり */
+#define UNDO_MASK        (UNDO_BUF_SIZE - 1)
+#define UNDO_TYPE_INSERT 1
+#define UNDO_TYPE_DELETE 2
+#define UNDO_HDR_SIZE    5   /* type(1) + absOffset(2) + len(2) */
+#define UNDO_FOOTER_SIZE 2   /* レコード全長（自分自身込み）。逆向き読み出し用 */
+
+#define UNDO_RESULT_EMPTY  0 /* 戻す記録が無い */
+#define UNDO_RESULT_OK     1 /* 1件取り消した */
+#define UNDO_RESULT_FAILED 2 /* 容量不足で戻せなかった（記録は保持するので、
+                                 容量を空ければ再度^U/^Zで試せる） */
+
+unsigned char g_undoBuf[UNDO_BUF_SIZE];
+unsigned int g_undoWrite;   /* 次に書き込むバイト位置（環状） */
+unsigned int g_undoUsed;    /* リングが現在使っているバイト数 */
+int g_undoApplying;         /* 1のとき、buffer_insert()/buffer_delete()は
+                                Undoログを取らない（undo_perform()自身が
+                                内部でbuffer_insert()/buffer_delete()を
+                                呼ぶ際の再帰記録を防ぐ。取ってしまうと
+                                直後にRedoができてしまうが、今回はRedoを
+                                作らない方針のため：意図的な抑制） */
+
+/* undo_perform()が削除の取り消し（バイト列の再挿入）をするとき、環状
+   バッファ上の（物理末尾をまたぎ得る）バイト列を一旦ここへ直線的に
+   並べ直してからbuffer_insert()へ渡す。1レコードのpayload長は
+   UNDO_BUF_SIZE-UNDO_HDR_SIZE-UNDO_FOOTER_SIZE未満までしか記録され
+   得ないが、簡潔さのためUNDO_BUF_SIZEぶんを確保しておく。 */
+char g_undoTmp[UNDO_BUF_SIZE];
 
 /* ---- 行表・バッファ操作 -------------------------------------------- */
 
@@ -975,6 +1053,72 @@ void ensure_visible(void)
   if (g_leftCol < 0) g_leftCol = 0;
 }
 
+/* 空きが足りないとき、末尾（最古）のレコードから捨てて場所を作る。
+   呼び出し元はneededがUNDO_BUF_SIZE以下であることを保証すること。 */
+void undo_evict_for(unsigned int needed)
+{
+  unsigned int tail;
+  unsigned char t;
+  unsigned int len;
+  unsigned int recTotal;
+
+  while (g_undoUsed > 0 && g_undoUsed + needed > UNDO_BUF_SIZE) {
+    tail = (g_undoWrite - g_undoUsed) & UNDO_MASK;
+    t = g_undoBuf[tail];
+    len = (unsigned int)g_undoBuf[(tail + 3) & UNDO_MASK];
+    len |= (unsigned int)g_undoBuf[(tail + 4) & UNDO_MASK] << 8;
+    recTotal = UNDO_HDR_SIZE + UNDO_FOOTER_SIZE;
+    if (t == UNDO_TYPE_DELETE) recTotal += len;
+    g_undoUsed -= recTotal;
+  }
+}
+
+/* type(UNDO_TYPE_INSERT/UNDO_TYPE_DELETE)・absOffset・len・（削除のときだけ）
+   payload[0..len)を1レコードとしてリングへ積む。g_undoApplying中
+   （Undo自身の適用中）は何もしない（g_undoApplyingのコメント参照）。
+   1レコードが空のリング全体よりも大きい場合は記録をあきらめる
+   （その操作だけがUndo対象から外れる。UNDO_BUF_SIZE直前のコメント
+   参照）。 */
+void undo_push(int type, int absOffset, int len, char *payload)
+{
+  unsigned int recTotal;
+  unsigned int p;
+  int i;
+
+  if (g_undoApplying) return;
+
+  recTotal = UNDO_HDR_SIZE + UNDO_FOOTER_SIZE;
+  if (type == UNDO_TYPE_DELETE) recTotal += (unsigned int)len;
+  if (recTotal > UNDO_BUF_SIZE) return;
+
+  undo_evict_for(recTotal);
+
+  p = g_undoWrite;
+  g_undoBuf[p] = (unsigned char)type;
+  p = (p + 1) & UNDO_MASK;
+  g_undoBuf[p] = (unsigned char)(absOffset & 0xff);
+  p = (p + 1) & UNDO_MASK;
+  g_undoBuf[p] = (unsigned char)((absOffset >> 8) & 0xff);
+  p = (p + 1) & UNDO_MASK;
+  g_undoBuf[p] = (unsigned char)(len & 0xff);
+  p = (p + 1) & UNDO_MASK;
+  g_undoBuf[p] = (unsigned char)((len >> 8) & 0xff);
+  p = (p + 1) & UNDO_MASK;
+  if (type == UNDO_TYPE_DELETE) {
+    for (i = 0; i < len; i++) {
+      g_undoBuf[p] = (unsigned char)payload[i];
+      p = (p + 1) & UNDO_MASK;
+    }
+  }
+  g_undoBuf[p] = (unsigned char)(recTotal & 0xff);
+  p = (p + 1) & UNDO_MASK;
+  g_undoBuf[p] = (unsigned char)((recTotal >> 8) & 0xff);
+  p = (p + 1) & UNDO_MASK;
+
+  g_undoWrite = p;
+  g_undoUsed += recTotal;
+}
+
 /* atOffsetAbsの位置にbytes[0..nBytes)を挿入する。newlineCountは挿入する
    '\n'の個数（呼び出し元が事前に数える）で、行数の上限チェックに使う。
    容量／行数どちらかの上限を超える場合は何もせず0を返す（設計書2章：
@@ -989,16 +1133,138 @@ int buffer_insert(int atOffsetAbs, char *bytes, int nBytes, int newlineCount)
   g_textLen += nBytes;
   rebuild_lines();
   g_modified = 1;
+  /* Undoログ：この挿入の取り消しは[atOffsetAbs, atOffsetAbs+nBytes)を
+     削除するだけでよいので、バイト列そのものは保存しない。 */
+  undo_push(UNDO_TYPE_INSERT, atOffsetAbs, nBytes, 0);
   return 1;
 }
 
 void buffer_delete(int atOffsetAbs, int nBytes)
 {
   if (nBytes <= 0) return;
+  /* Undoログ：削除の取り消しには消えるバイト列そのものが要るので、
+     memmove()で上書きされる前にここで記録する。 */
+  undo_push(UNDO_TYPE_DELETE, atOffsetAbs, nBytes, g_text + atOffsetAbs);
   memmove(g_text + atOffsetAbs, g_text + atOffsetAbs + nBytes, (unsigned)(g_textLen - atOffsetAbs - nBytes));
   g_textLen -= nBytes;
   rebuild_lines();
   g_modified = 1;
+}
+
+/* absOffset（絶対バイト位置）が属する行と、その行内でのバイトオフセット
+   を求める。呼び出し時点でg_lineStart[]/g_lineCountが最新であることが
+   前提（buffer_insert()/buffer_delete()は必ずrebuild_lines()を通した
+   後に戻ってくるので、undo_perform()から呼ぶ時点では常に満たされる）。
+   他のバッファ走査と同様、正しさを優先して線形探索する（設計書2章と
+   同じ方針）。 */
+void locate_offset(int absOffset, int *outLine, int *outByte)
+{
+  int i;
+
+  for (i = 0; i + 1 < g_lineCount; i++) {
+    if (absOffset < (int)g_lineStart[i + 1]) break;
+  }
+  *outLine = i;
+  *outByte = absOffset - (int)g_lineStart[i];
+}
+
+/* Undoログの先頭（もっとも新しい記録）を1件取り消す。
+   戻り値はUNDO_RESULT_*（EMPTY＝戻す記録が無い、OK＝1件取り消した、
+   FAILED＝容量不足で削除の取り消し・再挿入に失敗した。記録は保持され
+   ポップされないので、容量を空ければ再試行できる）。
+   取り消したあと、カーソルは取り消した編集の位置（戻した内容が見える
+   位置）へ移動する。
+   g_modifiedは0に戻さない：すべての記録を取り消しても、それが最初に
+   ファイルを開いたときの内容と一致するかを判定する仕組みが無いため
+   （単純さを優先した判断。README.md参照）。 */
+int undo_perform(void)
+{
+  unsigned int p;
+  unsigned int recTotal;
+  unsigned int recStart;
+  unsigned char type;
+  unsigned int absOffset;
+  unsigned int len;
+  unsigned int i;
+  unsigned int src;
+  int line;
+  int byteOff;
+
+  if (g_undoUsed == 0) return UNDO_RESULT_EMPTY;
+
+  /* 直前に書いたフッタ2バイト（レコード全長）を読み、そこから
+     レコード先頭まで逆向きに飛ぶ。 */
+  p = (g_undoWrite - UNDO_FOOTER_SIZE) & UNDO_MASK;
+  recTotal = (unsigned int)g_undoBuf[p];
+  recTotal |= (unsigned int)g_undoBuf[(p + 1) & UNDO_MASK] << 8;
+
+  recStart = (g_undoWrite - recTotal) & UNDO_MASK;
+
+  p = recStart;
+  type = g_undoBuf[p];
+  p = (p + 1) & UNDO_MASK;
+  absOffset = (unsigned int)g_undoBuf[p];
+  p = (p + 1) & UNDO_MASK;
+  absOffset |= (unsigned int)g_undoBuf[p] << 8;
+  p = (p + 1) & UNDO_MASK;
+  len = (unsigned int)g_undoBuf[p];
+  p = (p + 1) & UNDO_MASK;
+  len |= (unsigned int)g_undoBuf[p] << 8;
+  p = (p + 1) & UNDO_MASK;
+
+  g_undoApplying = 1;
+  if (type == UNDO_TYPE_INSERT) {
+    /* 挿入の取り消し＝その範囲を削除するだけ。 */
+    buffer_delete((int)absOffset, (int)len);
+  } else {
+    /* 削除の取り消し＝保存したバイト列を戻す。環状バッファ上では物理
+       末尾をまたいでいる可能性があるので、一旦g_undoTmp[]へ直線的に
+       並べ直してからbuffer_insert()へ渡す。 */
+    src = p;
+    for (i = 0; i < len; i++) {
+      g_undoTmp[i] = (char)g_undoBuf[src];
+      src = (src + 1) & UNDO_MASK;
+    }
+    if (!buffer_insert((int)absOffset, g_undoTmp, (int)len, 0)) {
+      g_undoApplying = 0;
+      return UNDO_RESULT_FAILED;
+    }
+  }
+  g_undoApplying = 0;
+
+  /* このレコードぶんをリングから取り除く（Undoは一度きりのスタック
+     操作。Redoは作らない方針のため、取り消した記録は戻ってこない）。 */
+  g_undoWrite = recStart;
+  g_undoUsed -= recTotal;
+
+  /* カーソルを取り消した編集の位置へ（戻した内容が見える位置）。 */
+  locate_offset((int)absOffset, &line, &byteOff);
+  g_curLine = line;
+  g_curByte = byteOff;
+  g_goalCol = col_at_byte(g_curLine, g_curByte);
+  ensure_visible();
+
+  return UNDO_RESULT_OK;
+}
+
+/* ^U / ^Z をUndoに割り当てる。main()の分岐チェーンへ直接足すと
+   30個規律に触れる（docs/smallerc-pitfalls.md：29個までは通り30個で
+   壊れる）ため、handle_search_replace_key()と同じやり方でこの関数へ
+   まとめ、main()側は1分岐の増加に抑える。戻り値は「処理した(1)／
+   対象のキーではなかった(0)」。 */
+int handle_undo_key(int key)
+{
+  int r;
+
+  if (key != KEY_CTRL_U && key != KEY_CTRL_Z) return 0;
+
+  r = undo_perform();
+  if (r == UNDO_RESULT_EMPTY) {
+    sappend_copy(g_notice, sizeof(g_notice), MSG(MSG_UNDO_NONE));
+  } else if (r == UNDO_RESULT_FAILED) {
+    sappend_copy(g_notice, sizeof(g_notice), MSG(MSG_UNDO_FAILED));
+  }
+  return 1;
 }
 
 /* ---- カーソル移動（設計書3章：文字単位。行末には止まれる。
@@ -1400,7 +1666,10 @@ void search_next_command(void)
    結果4）はY/Nの2択しか提示しないが、この自作実装ではESCで置換
    ループそのものを中止できる経路を追加した（Y/Nしか無いと押し
    間違えたときに抜け出せず不便なため。すでに置換した分はそのまま
-   残る＝Undoが無いv1では取り消せない）。 */
+   残る＝ループの途中でESCしても一括では戻せない。ただし各置換は
+   replace_at()内でbuffer_delete()＋buffer_insert()の2回に分かれて
+   Undoログへ記録されるので、押し間違えた置換は^U/^Zを2回で1件ずつ
+   戻せる）。 */
 void replace_command(void)
 {
   int ok;
@@ -2208,6 +2477,9 @@ int main(int argc, char *argv[])
   g_notice[0] = 0;
   g_searchTerm[0] = 0;
   g_replaceTerm[0] = 0;
+  g_undoWrite = 0;
+  g_undoUsed = 0;
+  g_undoApplying = 0;
 
   if (g_argFile != 0) {
     strncpy(g_filename, g_argFile, FILENAME_MAX);
@@ -2261,6 +2533,7 @@ int main(int argc, char *argv[])
     else if (key == KEY_CTRL_B) { cursor_doc_end(); }
     else if (key == KEY_CTRL_G) { goto_line_dialog(); }
     else if (handle_search_replace_key(key)) { /* ^F/^N・^L/^R/^P（下のコメント参照） */ }
+    else if (handle_undo_key(key)) { /* ^U/^Z：Undo（下のコメント参照） */ }
     else if (key == KEY_CTRL_Y) { delete_current_line(); }
     else if (key == KEY_CTRL_V) { g_insertMode = !g_insertMode; }
     else if (key == KEY_BS) { delete_before_cursor(); }
