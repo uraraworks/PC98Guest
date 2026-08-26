@@ -126,9 +126,11 @@
  *     of the plain values below (BS/TAB/ENTER/SPACE/ESC/^E/^X), since
  *     INT 18h's AL for those keys is numerically the same byte DOS's
  *     AH=08h used to return for them (also measured).
- *   - one of KEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT/KEY_HOME/KEY_F1..KEY_F10
- *     below, translated from the scan code, when AL is 0 (no character).
- *   - 0 for any other no-character key (unassigned in this program).
+ *   - one of KEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT/KEY_HOME/KEY_F1..KEY_F10/
+ *     KEY_ROLLUP/KEY_ROLLDOWN below, translated from the scan code, when
+ *     AL is 0 (no character).
+ *   - 0 for any other no-character key (unassigned in this program;
+ *     e.g. HELP/INS/DEL - not yet given a use, see README.md's TODO).
  * ------------------------------------------------------------------- */
 #define KEY_UP     0x0b
 #define KEY_DOWN   0x0a
@@ -169,6 +171,17 @@
 #define KEY_F8  0x107
 #define KEY_F9  0x108
 #define KEY_F10 0x109
+
+/* ROLL UP/ROLL DOWN: scan codes measured against real INT 18h
+ * (docs/bios-key-measure-01.md: ROLL UP=0x36, ROLL DOWN=0x37, AL=0 for
+ * both). Assigned only inside the built-in viewer (do_view()), which is
+ * the one place their behaviour has also been measured off real hardware
+ * (docs/filer-measure-07.md: ROLL UP advances VIEW_CONTENT_ROWS lines,
+ * ROLL DOWN goes back the same amount and stops at the first line) - the
+ * filer's own list view does not use these codes (its own paging is not
+ * implemented yet; see README.md's TODO). */
+#define KEY_ROLLUP   0x10a
+#define KEY_ROLLDOWN 0x10b
 
 #define ATTR_RDONLY   0x01
 #define ATTR_HIDDEN   0x02
@@ -257,9 +270,11 @@
  * original - see draw_title_row(); the original's own title is centered
  * inside this bracket pair, with dash-fill runs padding both sides out
  * to the row's fixed width, one more blank cell separating each dash
- * run from the bracket pair). check.py derives MSG_TITLE's cell-width
+ * run from the bracket pair). check.py derives g_title's cell-width
  * limit from these plus BOX_WIDTH instead of hardcoding it, so changing
- * any of them changes the enforced limit too. */
+ * any of them changes the enforced limit too. g_title itself is a fixed
+ * English string, not part of g_msgJA/g_msgEN - see its own comment
+ * near g_fkeyLabel[] below for why. */
 #define DATETIME_WIDTH      17
 #define TITLE_DATETIME_GAP  1
 #define TITLE_DECOR_WIDTH   6
@@ -278,55 +293,56 @@
 #define LANG_JA 0
 #define LANG_EN 1
 
-#define MSG_TITLE         0
-#define MSG_PATH_PREFIX   1
-#define MSG_TRUNC_PREFIX  2
-#define MSG_TRUNC_SUFFIX  3
-#define MSG_INFO_PREFIX   4
-#define MSG_INFO_EMPTY    5
-#define MSG_DISK_UNAVAIL  6
-#define MSG_DISK_TOTAL    7
-#define MSG_DISK_USED     8
-#define MSG_DISK_FREE     9
-#define MSG_BYTES_SUFFIX  10
-#define MSG_ATTR_LABEL    11
-#define MSG_MARKED_LABEL       12
-#define MSG_DEL_CONFIRM_ONE_PRE   13
-#define MSG_DEL_CONFIRM_ONE_SUF   14
-#define MSG_DEL_CONFIRM_MARK_PRE  15
-#define MSG_DEL_CONFIRM_MARK_SUF  16
-#define MSG_DEL_ERR_ISDIR      17
-#define MSG_DEL_ERR_FAILED     18
-#define MSG_RENAME_PROMPT       19
-#define MSG_RENAME_ERR_EMPTY    20
-#define MSG_RENAME_ERR_FAILED   21
-#define MSG_MKDIR_PROMPT        22
-#define MSG_MKDIR_ERR_EMPTY     23
-#define MSG_MKDIR_ERR_FAILED    24
-#define MSG_CM_ERR_HASDIR       25
-#define MSG_COPY_PROMPT         26
-#define MSG_MOVE_PROMPT         27
-#define MSG_CM_ERR_EMPTY        28
-#define MSG_COPY_ERR_PRE        29
-#define MSG_MOVE_ERR_PRE        30
-#define MSG_OVERWRITE_PRE       31
-#define MSG_OVERWRITE_SUF       32
-#define MSG_COPY_DONE_PRE       33
-#define MSG_COPY_DONE_SUF       34
-#define MSG_MOVE_DONE_PRE       35
-#define MSG_MOVE_DONE_SUF       36
-#define MSG_EXEC_ERR_NOTEXE     37
-#define MSG_EXEC_ERR_FAILED     38
-#define MSG_EXEC_PRESS_KEY      39
+/* 第11マイルストーンでタイトルは g_title（言語非依存の固定英語文字列、
+ * g_fkeyLabel[] と同じ扱い）へ切り出したため、MSG_TITLE は無くなった。
+ * 以降の MSG_* は0番から詰め直している。 */
+#define MSG_PATH_PREFIX   0
+#define MSG_TRUNC_PREFIX  1
+#define MSG_TRUNC_SUFFIX  2
+#define MSG_INFO_PREFIX   3
+#define MSG_INFO_EMPTY    4
+#define MSG_DISK_UNAVAIL  5
+#define MSG_DISK_TOTAL    6
+#define MSG_DISK_USED     7
+#define MSG_DISK_FREE     8
+#define MSG_BYTES_SUFFIX  9
+#define MSG_ATTR_LABEL    10
+#define MSG_MARKED_LABEL       11
+#define MSG_DEL_CONFIRM_ONE_PRE   12
+#define MSG_DEL_CONFIRM_ONE_SUF   13
+#define MSG_DEL_CONFIRM_MARK_PRE  14
+#define MSG_DEL_CONFIRM_MARK_SUF  15
+#define MSG_DEL_ERR_ISDIR      16
+#define MSG_DEL_ERR_FAILED     17
+#define MSG_RENAME_PROMPT       18
+#define MSG_RENAME_ERR_EMPTY    19
+#define MSG_RENAME_ERR_FAILED   20
+#define MSG_MKDIR_PROMPT        21
+#define MSG_MKDIR_ERR_EMPTY     22
+#define MSG_MKDIR_ERR_FAILED    23
+#define MSG_CM_ERR_HASDIR       24
+#define MSG_COPY_PROMPT         25
+#define MSG_MOVE_PROMPT         26
+#define MSG_CM_ERR_EMPTY        27
+#define MSG_COPY_ERR_PRE        28
+#define MSG_MOVE_ERR_PRE        29
+#define MSG_OVERWRITE_PRE       30
+#define MSG_OVERWRITE_SUF       31
+#define MSG_COPY_DONE_PRE       32
+#define MSG_COPY_DONE_SUF       33
+#define MSG_MOVE_DONE_PRE       34
+#define MSG_MOVE_DONE_SUF       35
+#define MSG_EXEC_ERR_NOTEXE     36
+#define MSG_EXEC_ERR_FAILED     37
+#define MSG_EXEC_PRESS_KEY      38
 
 /* Milestone 8 (built-in viewer, Enter on a non-COM/EXE file) messages */
-#define MSG_VIEW_FILENAME_LABEL 40
-#define MSG_VIEW_LINENO_LABEL   41
-#define MSG_VIEW_ERR_OPEN       42
-#define MSG_VIEW_CMDLINE        43
+#define MSG_VIEW_FILENAME_LABEL 39
+#define MSG_VIEW_LINENO_LABEL   40
+#define MSG_VIEW_ERR_OPEN       41
+#define MSG_VIEW_CMDLINE        42
 
 const char *g_msgJA[] = {
-  "すみれ - ディレクトリビューア",
   "パス=",
   "　（※上限",
   "件を超えたため一覧を打ち切りました ※）",
@@ -373,7 +389,6 @@ const char *g_msgJA[] = {
 };
 
 const char *g_msgEN[] = {
-  "Sumire - Directory viewer",
   "Path=",
   "   (** over ",
   " entries, list truncated **)",
@@ -444,6 +459,19 @@ int msg_selftest(void)
   return 1;
 }
 
+/* ---- header row 0 (title): fixed English text, language-independent ---
+ * 利用者指定（第11マイルストーン）：画面上部のタイトルは日英切替の対象
+ * から外し、常に英語表記に固定する。それ以外の文言（パス表示・情報・
+ * 合計・各種ダイアログ/エラー等）は引き続き g_msgJA/g_msgEN の日英切替
+ * のままで、変更しない。タイトルだけを言語表から切り離すため、置き場も
+ * g_msgJA/g_msgEN ではなく、この下の g_fkeyLabel[]（最下行のファンクション
+ * キー表示。あちらも「言語に依らない固定の C データ」として言語表の外に
+ * 置かれている）と同じ扱いにした。draw_title_row() 自身の組み立て方
+ * （"<< " + タイトル + " >>" をダッシュで埋めた枠の中央に置く処理）は
+ * 変更していない。check.py のセル幅検査も、g_msgJA/g_msgEN の一部としてで
+ * はなく、この文字列単独に対して行うよう追従させてある。 */
+char *g_title = "Sumire - Directory viewer";
+
 /* ---- bottom row: PC-98 function-key assignment (language-independent) --
  * Milestone 6 replaces the milestone-4 "key:description" command line
  * with the original's own bottom-row convention, measured directly off a
@@ -484,15 +512,18 @@ char *g_fkeyLabel[] = {
 };
 int g_fkeyHiPos[] = { -1, 1, 0, 0, 0, 0, 1, -1, -1, 0 };
 
-/* ---- built-in viewer (milestone 8) -------------------------------------
+/* ---- built-in viewer (milestone 8, ROLL UP/ROLL DOWN added in milestone 11)
  * Enter on a non-directory entry whose extension is not COM/EXE opens a
  * read-only, full-screen text viewer instead of doing nothing - real
  * program launch stays on F2/X (do_exec()), unchanged. Screen layout and
  * key behaviour below are measured off real hardware; see
- * docs/filer-measure-07.md. ROLL UP/ROLL DOWN are NOT implemented here:
- * their key codes have not been measured yet (only up/down arrow, HOME and
- * ESC were), and this project does not guess an unmeasured key code - see
- * README.md.
+ * docs/filer-measure-07.md. ROLL UP advances VIEW_CONTENT_ROWS (22) lines
+ * (measured: no overlap with the previous page, since the content area is
+ * exactly 22 lines), ROLL DOWN goes back the same amount and stops at the
+ * first line - see do_view() below. The filer's own list view does not
+ * get these keys in this milestone: its own paging is not implemented and
+ * the original's behaviour there has not been measured (see README.md's
+ * TODO).
  * The file is never read into memory as a whole (small-model 64KB data
  * segment already holds the directory listing and the VRAM shadow
  * buffers); it is read forward, through a small buffer, one display line
@@ -610,10 +641,10 @@ int bios_getch_raw(int *scan)
    for why that already matches every plain code this program compares
    against. A key with no character (AL == 0) is translated from its
    scan code into one of the KEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT/KEY_HOME/
-   KEY_F1..KEY_F10 pseudo-codes above, or 0 if this program does not
-   assign that key (e.g. ROLL UP/ROLL DOWN/HELP/INS/DEL - not measured
-   with real scan-code values against this program's own build, see
-   README's TODO). */
+   KEY_F1..KEY_F10/KEY_ROLLUP/KEY_ROLLDOWN pseudo-codes above, or 0 if
+   this program does not assign that key (e.g. HELP/INS/DEL - the scan
+   codes are known, docs/bios-key-measure-01.md, but no use is assigned
+   yet, see README's TODO). */
 int dos_getch(void)
 {
   int c;
@@ -627,6 +658,8 @@ int dos_getch(void)
   if (scan == 0x3b) return KEY_LEFT;
   if (scan == 0x3c) return KEY_RIGHT;
   if (scan == 0x3e) return KEY_HOME;
+  if (scan == 0x36) return KEY_ROLLUP;
+  if (scan == 0x37) return KEY_ROLLDOWN;
   if (scan == 0x62) return KEY_F1;
   if (scan == 0x63) return KEY_F2;
   if (scan == 0x64) return KEY_F3;
@@ -1696,7 +1729,7 @@ void draw_title_row(void)
   vram_ank(ROW_TITLE, 0, BOXCH_TL, ATTR_BORDER);
   vram_ank(ROW_TITLE, 1 + BOX_WIDTH, BOXCH_TR, ATTR_BORDER);
 
-  title = MSG(MSG_TITLE);
+  title = g_title;
   titleCells = text_width(title);
   /* dash-fill, then a blank cell, then "<< title >>" (measured on the
      original: the title is centered inside a bracket pair, not left-
@@ -2820,12 +2853,12 @@ void view_render(void)
    file under the cursor in a read-only, full-screen viewer - see the
    milestone 8 comment above g_fkeyHiPos[] for the overall design and
    docs/filer-measure-07.md for what was actually measured (screen layout,
-   key behaviour, tab/wrap/EOL handling). Only Down/Up/HOME/ESC are
-   implemented - ROLL UP/ROLL DOWN's key codes have not been measured yet,
-   and this project does not guess an unmeasured key code (see README.md).
-   Returning (ESC) redraws the directory list exactly as before - this
-   never leaves the screen in a state only a full external redraw could
-   fix, matching every other modal path in this file. */
+   key behaviour, tab/wrap/EOL handling). Down/Up/HOME/ESC plus, since
+   milestone 11, ROLL UP/ROLL DOWN (see the KEY_ROLLUP/KEY_ROLLDOWN
+   comment above and docs/bios-key-measure-01.md for the scan codes) are
+   implemented. Returning (ESC) redraws the directory list exactly as
+   before - this never leaves the screen in a state only a full external
+   redraw could fix, matching every other modal path in this file. */
 void do_view(char *name)
 {
   int key;
@@ -2864,9 +2897,17 @@ void do_view(char *name)
       if (g_viewLineNo > 1) g_viewLineNo--;
     } else if (key == KEY_HOME) {
       g_viewLineNo = 1;
+    } else if (key == KEY_ROLLUP) {
+      /* 22行(VIEW_CONTENT_ROWS)先へ進む。実測どおり総行数を超えない
+         （filer-measure-07.md：内容が22行なので重なりは無い） */
+      g_viewLineNo += VIEW_CONTENT_ROWS;
+      if (g_viewLineNo > g_viewTotalLines) g_viewLineNo = g_viewTotalLines;
+    } else if (key == KEY_ROLLDOWN) {
+      /* 22行戻る。先頭(1行目)より前には行かない（実測どおり） */
+      g_viewLineNo -= VIEW_CONTENT_ROWS;
+      if (g_viewLineNo < 1) g_viewLineNo = 1;
     }
-    /* ROLL UP/ROLL DOWN and anything else: no-op - see this function's
-       header comment above. */
+    /* 上記以外のキー：何もしない */
   }
 
   vreader_close();

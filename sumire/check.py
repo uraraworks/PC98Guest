@@ -14,7 +14,12 @@ Checks (all must pass, otherwise this exits non-zero):
      does not appear anywhere in the file.
   3. g_msgJA and g_msgEN have the same number of entries.
   4. Neither message table contains an empty string.
-  5. Every message in g_msgJA/g_msgEN is checked against the screen-cell
+  5. g_title (milestone 11: the header-row title, fixed English text kept
+     out of g_msgJA/g_msgEN - see its comment in SUMIRE.C, right above
+     g_fkeyLabel[]) is checked against the same "box_title" cell limit
+     that MSG_TITLE used to be checked against, before it existed as a
+     separate string.
+  6. Every message in g_msgJA/g_msgEN is checked against the screen-cell
      limit that applies to how SUMIRE.C actually uses it, in both languages.
      Screen-cell width follows the same rule as SUMIRE.C's own text_width():
      a lead byte in 0x81-0x9F or 0xE0-0xFC (and the byte after it) counts as
@@ -39,17 +44,17 @@ Checks (all must pass, otherwise this exits non-zero):
                     rather than silent.
      BOX_WIDTH and DIALOG_WIDTH are both read out of SUMIRE.C's #define
      lines, never hard-coded here.
-  6. The bottom row (g_fkeyLabel[]/g_fkeyCol[] - since milestone 6 this is
+  7. The bottom row (g_fkeyLabel[]/g_fkeyCol[] - since milestone 6 this is
      the measured PC-98 function-key assignment, no longer a sentence-like
      command line at all, see the module note below):
        - g_fkeyLabel[], g_fkeyCol[] and g_fkeyHiPos[] all have FKEY_COUNT
          entries (FKEY_COUNT is read out of SUMIRE.C's #define, never
          hard-coded here).
        - every g_fkeyLabel[i] fits within FKEY_FIELD_WIDTH screen cells
-         (same text_width()-style rule as check 5; these labels happen to
-         be plain ASCII so the 2-cells-per-SJIS-char rule never actually
-         triggers, but the same measurement code is reused rather than
-         assuming that).
+         (same text_width()-style rule as check 5/6; these labels happen
+         to be plain ASCII so the 2-cells-per-SJIS-char rule never
+         actually triggers, but the same measurement code is reused
+         rather than assuming that).
        - every field (g_fkeyCol[i] .. g_fkeyCol[i]+FKEY_FIELD_WIDTH-1)
          stays inside the 80-column screen and does not overlap the next
          field.
@@ -62,8 +67,15 @@ English command words) has been replaced by g_fkeyLabel[]/g_fkeyCol[]/
 g_fkeyHiPos[] - ten fixed-position fields matching the real product's
 function-key row, measured off real hardware (see
 docs/filer-measure-05.md). It is plain C data, not part of g_msgJA/
-g_msgEN, so it is checked separately (check 6) rather than through
+g_msgEN, so it is checked separately (check 7) rather than through
 MSG_LIMITS/extract_array.
+
+Milestone 11 note: the title (row 0) was pulled out of g_msgJA/g_msgEN
+the same way, for a different reason - the user wants it fixed in
+English regardless of language setting, while every other on-screen
+string keeps switching between g_msgJA/g_msgEN. It is now g_title, a
+single language-independent C string (see check 5 above and its
+extraction below), not part of MSG_LIMITS/extract_array either.
 
 Usage:
   python3 check.py [path-to-SUMIRE.C]
@@ -82,51 +94,56 @@ import os
 #   "dialog"   -> checked against DIALOG_WIDTH
 #   "fragment" -> not length-checked (see module docstring); listed only
 MSG_LIMITS = {
-    "MSG_TITLE":                ("box_title", 0),
-    "MSG_PATH_PREFIX":          ("fragment", 1),
-    "MSG_TRUNC_PREFIX":         ("fragment", 2),
-    "MSG_TRUNC_SUFFIX":         ("fragment", 3),
-    "MSG_INFO_PREFIX":          ("fragment", 4),
-    "MSG_INFO_EMPTY":           ("fragment", 5),
-    "MSG_DISK_UNAVAIL":         ("box",      6),
-    "MSG_DISK_TOTAL":           ("fragment", 7),
-    "MSG_DISK_USED":            ("fragment", 8),
-    "MSG_DISK_FREE":            ("fragment", 9),
-    "MSG_BYTES_SUFFIX":         ("fragment", 10),
-    "MSG_ATTR_LABEL":           ("fragment", 11),
-    "MSG_MARKED_LABEL":         ("fragment", 12),
-    "MSG_DEL_CONFIRM_ONE_PRE":  ("fragment", 13),
-    "MSG_DEL_CONFIRM_ONE_SUF":  ("fragment", 14),
-    "MSG_DEL_CONFIRM_MARK_PRE": ("fragment", 15),
-    "MSG_DEL_CONFIRM_MARK_SUF": ("fragment", 16),
-    "MSG_DEL_ERR_ISDIR":        ("dialog",   17),
-    "MSG_DEL_ERR_FAILED":       ("dialog",   18),
-    "MSG_RENAME_PROMPT":        ("fragment", 19),
-    "MSG_RENAME_ERR_EMPTY":     ("dialog",   20),
-    "MSG_RENAME_ERR_FAILED":    ("dialog",   21),
-    "MSG_MKDIR_PROMPT":         ("fragment", 22),
-    "MSG_MKDIR_ERR_EMPTY":      ("dialog",   23),
-    "MSG_MKDIR_ERR_FAILED":     ("dialog",   24),
-    "MSG_CM_ERR_HASDIR":        ("dialog",   25),
-    "MSG_COPY_PROMPT":          ("fragment", 26),
-    "MSG_MOVE_PROMPT":          ("fragment", 27),
-    "MSG_CM_ERR_EMPTY":         ("dialog",   28),
-    "MSG_COPY_ERR_PRE":         ("fragment", 29),
-    "MSG_MOVE_ERR_PRE":         ("fragment", 30),
-    "MSG_OVERWRITE_PRE":        ("fragment", 31),
-    "MSG_OVERWRITE_SUF":        ("fragment", 32),
-    "MSG_COPY_DONE_PRE":        ("fragment", 33),
-    "MSG_COPY_DONE_SUF":        ("fragment", 34),
-    "MSG_MOVE_DONE_PRE":        ("fragment", 35),
-    "MSG_MOVE_DONE_SUF":        ("fragment", 36),
-    "MSG_EXEC_ERR_NOTEXE":      ("dialog",   37),
-    "MSG_EXEC_ERR_FAILED":      ("dialog",   38),
-    "MSG_EXEC_PRESS_KEY":       ("dialog",   39),
+    # milestone 11: MSG_TITLE was removed from here - the title is now
+    # g_title, a fixed English C string outside g_msgJA/g_msgEN (see its
+    # comment in SUMIRE.C, right above g_fkeyLabel[]). It is still checked
+    # against the same "box_title" cell limit, just separately - see the
+    # g_title check right after this table's sync check below. Every
+    # remaining index has been renumbered down by 1 to stay contiguous.
+    "MSG_PATH_PREFIX":          ("fragment", 0),
+    "MSG_TRUNC_PREFIX":         ("fragment", 1),
+    "MSG_TRUNC_SUFFIX":         ("fragment", 2),
+    "MSG_INFO_PREFIX":          ("fragment", 3),
+    "MSG_INFO_EMPTY":           ("fragment", 4),
+    "MSG_DISK_UNAVAIL":         ("box",      5),
+    "MSG_DISK_TOTAL":           ("fragment", 6),
+    "MSG_DISK_USED":            ("fragment", 7),
+    "MSG_DISK_FREE":            ("fragment", 8),
+    "MSG_BYTES_SUFFIX":         ("fragment", 9),
+    "MSG_ATTR_LABEL":           ("fragment", 10),
+    "MSG_MARKED_LABEL":         ("fragment", 11),
+    "MSG_DEL_CONFIRM_ONE_PRE":  ("fragment", 12),
+    "MSG_DEL_CONFIRM_ONE_SUF":  ("fragment", 13),
+    "MSG_DEL_CONFIRM_MARK_PRE": ("fragment", 14),
+    "MSG_DEL_CONFIRM_MARK_SUF": ("fragment", 15),
+    "MSG_DEL_ERR_ISDIR":        ("dialog",   16),
+    "MSG_DEL_ERR_FAILED":       ("dialog",   17),
+    "MSG_RENAME_PROMPT":        ("fragment", 18),
+    "MSG_RENAME_ERR_EMPTY":     ("dialog",   19),
+    "MSG_RENAME_ERR_FAILED":    ("dialog",   20),
+    "MSG_MKDIR_PROMPT":         ("fragment", 21),
+    "MSG_MKDIR_ERR_EMPTY":      ("dialog",   22),
+    "MSG_MKDIR_ERR_FAILED":     ("dialog",   23),
+    "MSG_CM_ERR_HASDIR":        ("dialog",   24),
+    "MSG_COPY_PROMPT":          ("fragment", 25),
+    "MSG_MOVE_PROMPT":          ("fragment", 26),
+    "MSG_CM_ERR_EMPTY":         ("dialog",   27),
+    "MSG_COPY_ERR_PRE":         ("fragment", 28),
+    "MSG_MOVE_ERR_PRE":         ("fragment", 29),
+    "MSG_OVERWRITE_PRE":        ("fragment", 30),
+    "MSG_OVERWRITE_SUF":        ("fragment", 31),
+    "MSG_COPY_DONE_PRE":        ("fragment", 32),
+    "MSG_COPY_DONE_SUF":        ("fragment", 33),
+    "MSG_MOVE_DONE_PRE":        ("fragment", 34),
+    "MSG_MOVE_DONE_SUF":        ("fragment", 35),
+    "MSG_EXEC_ERR_NOTEXE":      ("dialog",   36),
+    "MSG_EXEC_ERR_FAILED":      ("dialog",   37),
+    "MSG_EXEC_PRESS_KEY":       ("dialog",   38),
     # milestone 8: built-in viewer (Enter on a non-COM/EXE file)
-    "MSG_VIEW_FILENAME_LABEL":  ("fragment", 40),
-    "MSG_VIEW_LINENO_LABEL":    ("fragment", 41),
-    "MSG_VIEW_ERR_OPEN":        ("dialog",   42),
-    "MSG_VIEW_CMDLINE":         ("row",      43),
+    "MSG_VIEW_FILENAME_LABEL":  ("fragment", 39),
+    "MSG_VIEW_LINENO_LABEL":    ("fragment", 40),
+    "MSG_VIEW_ERR_OPEN":        ("dialog",   41),
+    "MSG_VIEW_CMDLINE":         ("row",      42),
 }
 
 
@@ -172,6 +189,16 @@ def extract_define_int(text, name):
     return int(m.group(1))
 
 
+def extract_char_var(text, name):
+    """pulls the double-quoted string literal out of
+    'char *name = "...";' - used for g_title (milestone 11), a single
+    language-independent string, unlike g_msgJA/g_msgEN's arrays."""
+    m = re.search(r"char \*" + re.escape(name) + r'\s*=\s*"((?:[^"\\]|\\.)*)"\s*;', text)
+    if m is None:
+        fail("could not find variable %s in SUMIRE.C" % name)
+    return m.group(1)
+
+
 def extract_int_array(text, name):
     """pulls the (bare, non-negative-or-negative decimal) integer literals
     out of 'int name[...][] = { ... };' - used for g_fkeyCol[]/
@@ -211,18 +238,19 @@ def main():
     dialog_width = extract_define_int(text, "DIALOG_WIDTH")
     # milestone 8: VRAM_COLS is also the cell limit for a "row"-kind message
     # (draw_view_cmdline()'s full-width, unbordered hint row); extracted
-    # here (rather than only down in check 6, as before) so check 5 can use
+    # here (rather than only down in check 7, as before) so check 6 can use
     # it too.
     screen_cols = extract_define_int(text, "VRAM_COLS")
-    # MSG_TITLE (row 0) shares its row with a right-hand clock field
-    # ("YY-MM-DD HH:MM:SS", see draw_title_row() in SUMIRE.C), so its real
-    # on-screen budget is BOX_WIDTH minus that field, its gap, the 2-cell
-    # tail (space + border-line cell) between the clock and the top-right
-    # corner, and the title's own "--"/" "/" " decoration - all read out
-    # of SUMIRE.C's #defines, never hardcoded here, so this tracks
-    # draw_title_row()'s own arithmetic (used = TITLE_DECOR_WIDTH +
-    # titleCells; fillCells = BOX_WIDTH - used - TITLE_DATETIME_GAP -
-    # DATETIME_WIDTH - TITLE_TAIL_WIDTH) automatically.
+    # g_title (row 0, milestone 11 - see its comment in SUMIRE.C) shares its
+    # row with a right-hand clock field ("YY-MM-DD HH:MM:SS", see
+    # draw_title_row() in SUMIRE.C), so its real on-screen budget is
+    # BOX_WIDTH minus that field, its gap, the 2-cell tail (space +
+    # border-line cell) between the clock and the top-right corner, and the
+    # title's own "--"/" "/" " decoration - all read out of SUMIRE.C's
+    # #defines, never hardcoded here, so this tracks draw_title_row()'s own
+    # arithmetic (used = TITLE_DECOR_WIDTH + titleCells; fillCells =
+    # BOX_WIDTH - used - TITLE_DATETIME_GAP - DATETIME_WIDTH -
+    # TITLE_TAIL_WIDTH) automatically.
     datetime_width = extract_define_int(text, "DATETIME_WIDTH")
     title_datetime_gap = extract_define_int(text, "TITLE_DATETIME_GAP")
     title_decor_width = extract_define_int(text, "TITLE_DECOR_WIDTH")
@@ -231,6 +259,10 @@ def main():
                    - title_decor_width - title_tail_width)
     ja = extract_array(text, "g_msgJA")
     en = extract_array(text, "g_msgEN")
+    # milestone 11: the title is g_title, a fixed English string outside
+    # g_msgJA/g_msgEN - see its comment in SUMIRE.C, right above
+    # g_fkeyLabel[].
+    title = extract_char_var(text, "g_title")
 
     # ---- check 3: same element count ----------------------------------
     if len(ja) != len(en):
@@ -246,7 +278,19 @@ def main():
             fail("g_msgEN[%d] is an empty string" % i)
     print("PASS: 4) no empty strings in g_msgJA or g_msgEN")
 
-    # ---- check 5: every message fits the cell limit its use site implies --
+    # ---- check 5: g_title (fixed English title) fits box_title's limit ---
+    if title == "":
+        fail("g_title is an empty string")
+    title_w = cell_width(title.encode("cp932"))
+    if title_w > title_width:
+        fail("g_title is %d cells wide, exceeds the title's clock-adjusted "
+             "width (BOX_WIDTH - DATETIME_WIDTH - TITLE_DATETIME_GAP - "
+             "TITLE_DECOR_WIDTH - TITLE_TAIL_WIDTH) limit (%d cells) - %r" %
+             (title_w, title_width, title))
+    print("PASS: 5) g_title (%r) fits the title's clock-adjusted width "
+          "(limit=%d cells, actual=%d cells)" % (title, title_width, title_w))
+
+    # ---- check 6: every message fits the cell limit its use site implies --
     limits = {
         "box": box_width,
         "box_title": title_width,
@@ -291,14 +335,14 @@ def main():
         report.append("  [%2d] %-26s %-8s limit=%3d  JA=%3d  EN=%3d" %
                        (idx, name, kind, limit, ja_w, en_w))
 
-    print("PASS: 5) every message fits the cell limit implied by its use "
+    print("PASS: 6) every message fits the cell limit implied by its use "
           "site, in both languages")
     print("     (box=%d box_title=%d dialog=%d row=%d cells)" %
           (box_width, title_width, dialog_width, screen_cols))
     for line in report:
         print(line)
 
-    # ---- check 6: bottom row (g_fkeyLabel[]/g_fkeyCol[]/g_fkeyHiPos[]) ---
+    # ---- check 7: bottom row (g_fkeyLabel[]/g_fkeyCol[]/g_fkeyHiPos[]) ---
     # ten fixed-position function-key fields, measured off real hardware
     # (see docs/filer-measure-05.md) - not a sentence-like line any more,
     # so this checks field placement/width instead of an assembled string.
@@ -314,7 +358,7 @@ def main():
             fail("%s[] has %d entries, expected FKEY_COUNT (%d)" %
                  (name, len(arr), fkey_count))
 
-    # screen_cols (VRAM_COLS) was already extracted above, for check 5's
+    # screen_cols (VRAM_COLS) was already extracted above, for check 6's
     # "row" message kind.
 
     report = []
@@ -347,7 +391,7 @@ def main():
         report.append("  F%-2d col=%2d width<=%d  %r" %
                        (i + 1, col, fkey_field_width, label))
 
-    print("PASS: 6) all %d function-key fields fit FKEY_FIELD_WIDTH (%d) "
+    print("PASS: 7) all %d function-key fields fit FKEY_FIELD_WIDTH (%d) "
           "cells and stay inside the %d-column screen without overlapping" %
           (fkey_count, fkey_field_width, screen_cols))
     for line in report:
