@@ -29,3 +29,9 @@ JED.EXE
 JED.DOC
 JEDMAC.DOC
 JED.CFG
+
+# テストの生成物。gen_*.py が TSUBAKI.C から抽出して作るので、正典は生成スクリプト側。
+# 追跡すると、TSUBAKI.C を直したあと再生成を忘れたときに
+# 「古いテストが通って安心する」事故が起きる。
+tsubaki/tools/search_core_test.c
+tsubaki/tools/undo_core_test.c
