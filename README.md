@@ -2,8 +2,10 @@
 
 Software that runs *inside* the PC-98 guest (under DOS), developed alongside
 the WebNP2 PC-98 emulator project. It includes **つくし (Tsukushi)**, a
-resident kana-kanji conversion FEP for FreeDOS(98), and **probes**, a set of
-small measurement programs used to determine undocumented PC-98 behavior.
+resident kana-kanji conversion FEP for FreeDOS(98), **すみれ (Sumire)**, a
+file manager for FreeDOS(98), **つばき (Tsubaki)**, a text editor for
+FreeDOS(98), and **probes**, a set of small measurement programs used to
+determine undocumented PC-98 behavior.
 See [LICENSE](LICENSE) (MIT) and the "Contribution policy" section below
 before sending anything.
 
@@ -24,6 +26,21 @@ INT 18h(キーボードBIOS)をフックして常駐し、ローマ字入力を�
 詳細な使い方・キー操作・仕組みは [`tsukushi/README.md`](tsukushi/README.md)
 を参照してください。
 
+### すみれ (SUMIRE) — `sumire/`
+
+PC-98 / FreeDOS(98) 用のファイラです。テキストVRAM直書き＋キーボードBIOS
+直読みを土台に、一覧表示・マーク・ディレクトリ移動・コピー/移動/削除/
+リネーム/mkdir・プログラム実行(eXec)・内蔵ビューアができます。
+詳細は [`sumire/README.md`](sumire/README.md) を参照してください。
+
+### つばき (TSUBAKI) — `tsubaki/`
+
+PC-98 / FreeDOS(98) 用のテキストエディタです。すみれと同じ土台
+(テキストVRAM直書き＋INT 18h 直読み)の上に作られています。Shift_JIS を
+文字単位で扱い、カーソル移動・編集・保存・検索・置換・Undo ができます。
+かな漢字変換は同梱のつくしと併用できることを実機で確認しています。
+詳細は [`tsubaki/README.md`](tsubaki/README.md) を参照してください。
+
 ### probes — `probes/`
 
 PC-98 の挙動を実測するために書いた小さなプログラム群です。
@@ -39,6 +56,7 @@ PC-98 の挙動を実測するために書いた小さなプログラム群で�
   行っています
 - **NEC MS-DOS では動作を保証しません**(FreeDOS(98) 前提で作られています。
   部分的に動く可能性はありますが未検証です)
+- すみれ・つばきも同じく FreeDOS(98) 前提です
 - 辞書の置き場は**フロッピーディスク**または **SASI ハードディスク**です。
   **SCSI ハードディスクは対象外**です(エミュレータ側に SCSI を指定する経路が
   無く、動作を確認できないため)
@@ -50,6 +68,8 @@ PC-98 の挙動を実測するために書いた小さなプログラム群で�
 ```
 guest/
   tsukushi/     つくし本体(FEP)。ソース・辞書生成ツール・辞書ソース
+  sumire/       すみれ本体(ファイラ)。ソース・整合性検査スクリプト
+  tsubaki/      つばき本体(テキストエディタ)。ソース・整合性検査スクリプト
   probes/       測定用プログラム群
   common/       ディスク/HDDイメージの組み立て・検証スクリプト
   out/          生成物(gitignore対象。リポジトリには含めない)
@@ -72,7 +92,30 @@ node common/build-disk.mjs
 
 各 probe(`probes/*.ASM`)も同様に `nasm -f bin` で個別にアセンブルできます。
 
+すみれ・つばきは C 実装で、`WorkbenchNP2` リポジトリのツールチェーン
+(SmallerC ベース、16-bit small-model MZ EXE を生成)を使ってビルドします。
+パスはリポジトリの配置に合わせて読み替えてください。
+
+```sh
+# すみれ本体のビルド
+cd ../WorkbenchNP2 && node toolchain/compile.mjs ../guest/sumire/SUMIRE.C -o <出力先>.xdf
+
+# つばき本体のビルド
+cd ../WorkbenchNP2 && node toolchain/compile.mjs ../guest/tsubaki/TSUBAKI.C -o <出力先>.xdf
+```
+
+どちらも整合性検査スクリプトがあり、ビルド前後に実行できます。
+
+```sh
+python3 sumire/check.py
+python3 tsubaki/check.py
+```
+
 ## リリース物の作り方
+
+`make_release.py` は**つくし専用**のリリーススクリプトです。すみれ・
+つばきはこのリポジトリではソースのみを収録しており、このスクリプトの
+対象には含まれません。
 
 配布用の FD イメージ(`.xdf`)と zip をまとめて作るには次を実行します
 (SKK-JISYO.L と SKK-JISYO.ML が `tsukushi/dic/upstream/` にある場合):
