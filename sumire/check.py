@@ -149,6 +149,10 @@ MSG_LIMITS = {
     "MSG_LOGDSK_PROMPT":        ("fragment", 43),
     "MSG_LOGDSK_ERR_EMPTY":     ("dialog",   44),
     "MSG_LOGDSK_ERR_INVALID":   ("dialog",   45),
+
+    # milestone 13: F2/eXec argument dialog
+    "MSG_EXEC_PROMPT":          ("fragment", 46),
+    "MSG_EXEC_ERR_CMD":         ("dialog",   47),
 }
 
 

@@ -102,6 +102,11 @@
 #define INPUT_MAXLEN  12     /* input_dialog() で入力できる最大文字数（NULを含まない）：
                                  8.3形式の名前で、NAME_LEN-1 と同じ上限。
                                  do_rename()/do_mkdir() 参照 */
+#define EXEC_MAXLEN   48     /* F2/eXec の実行コマンドライン（プログラム名＋引数）として
+                                 入力できる最大文字数。8.3名だけでは足りないので
+                                 INPUT_MAXLEN とは別の（より長い）上限にしてある。
+                                 プロンプト（MSG_EXEC_PROMPT、6セル）と合わせても
+                                 DIALOG_WIDTH（60セル）に収まる。do_exec() 参照 */
 #define DEST_MAXLEN   40     /* Copy/Move の移動先ディレクトリ（例 "B:\SUBDIR"）として入力できる
                                  最大文字数。これはパスであって8.3名では
                                  ないため、INPUT_MAXLENとは異なる（より長い）
@@ -358,6 +363,11 @@
 #define MSG_LOGDSK_ERR_EMPTY    44
 #define MSG_LOGDSK_ERR_INVALID  45
 
+/* 第13マイルストーン（F2/eXec の引数入力ダイアログ）のメッセージ。
+   末尾に足すこと――既存の MSG_* の番号は動かさない。 */
+#define MSG_EXEC_PROMPT         46
+#define MSG_EXEC_ERR_CMD        47
+
 const char *g_msgJA[] = {
   "パス=",
   "　（※上限",
@@ -404,7 +414,9 @@ const char *g_msgJA[] = {
   "ESC:一覧へ戻る",
   "ドライブ: ",
   "ドライブ名を入力してください",
-  "そのドライブは使えません"
+  "そのドライブは使えません",
+  "実行: ",
+  "COM/EXE の名前を入力してください"
 };
 
 const char *g_msgEN[] = {
@@ -453,7 +465,9 @@ const char *g_msgEN[] = {
   "ESC: back to list",
   "Drive: ",
   "Enter a drive letter",
-  "That drive is not available"
+  "That drive is not available",
+  "Exec: ",
+  "Enter a COM/EXE file name"
 };
 
 const char **g_msgTables[2] = { g_msgJA, g_msgEN };
@@ -2556,6 +2570,11 @@ void do_logdsk(void)
    ファイルのみ。それ以外（ディレクトリ、拡張子が無いファイル、
    別の拡張子）は、何もせず黙って終わるのではなく、明示的な
    エラーダイアログで拒否する（do_exec()タスクの要件参照）。
+   拡張子の確認を通ったら、そのファイル名を入れた状態で引数入力
+   ダイアログを開く：引数が要らなければそのままEnterでよく、
+   必要なら名前の後ろに続けて打つ。入力行は「最初の語＝プログラム
+   名／残り＝引数」に分けられ、引数はコマンドテール（PSP:80h）
+   として子プロセスへ渡る。ESCで実行を取りやめられる。
    子プロセスはINT 21h AH=4Bh（上のdos_exec()）で実行する：この
    プログラムのMZヘッダはminalloc == maxallocに設定されており
    （ここで決め打ちにせず実測で確認済み）、ロード時にコンベンショナル
@@ -2569,6 +2588,10 @@ void do_logdsk(void)
    無効化し、実態と一致しなくなった古びた「既に画面にあるもの」
    状態を信用するのではなく、次の再描画のすべてのセルを実際に
    書き込ませる。
+   子プロセスへ渡す前には画面を空白で塗り、DOSのテキストカーソルを
+   ホームへ戻して表示する（DOSプロンプトから起動したときと同じ画面
+   状態）。戻ってきたらテキストカーソルは必ず隠し直す――関数本体の
+   該当箇所のコメント参照。
    「何かキーを押してください」ダイアログを（成功・失敗いずれの
    場合も）まず表示するので、このプログラム自身のフルスクリーン
    再描画が上書きしてしまう前に、ユーザーは子プロセスが何を
@@ -2576,20 +2599,22 @@ void do_logdsk(void)
 void do_exec(void)
 {
   char *name;
+  char *err;
+  char cmdline[EXEC_MAXLEN + 1];
+  char prog[EXEC_MAXLEN + 1];
   char path[96];
-  char ext[4];
-  char cmdTail[2];
+  char cmdTail[EXEC_MAXLEN + 3];
   char fcb1[16];
   char fcb2[16];
   char param[14];
   unsigned int ds;
   unsigned int off;
   int i;
-  int len;
-  int dotpos;
-  int extlen;
+  int p;
+  int argStart;
+  int argLen;
   int rc;
-  char c;
+  int confirmed;
 
   if (g_count == 0) return;
 
@@ -2601,38 +2626,75 @@ void do_exec(void)
   }
 
   name = &g_name[g_cursor * NAME_LEN];
-  len = strlen(name);
-  dotpos = -1;
-  for (i = 0; i < len; i++) {
-    if (name[i] == '.') dotpos = i;
-  }
-  extlen = (dotpos >= 0) ? (len - dotpos - 1) : 0;
-  if (dotpos < 0 || extlen != 3) {
-    draw_dialog(MSG(MSG_EXEC_ERR_NOTEXE), 0);
-    dos_getch();
-    draw_screen();
-    return;
-  }
-  for (i = 0; i < 3; i++) {
-    c = name[dotpos + 1 + i];
-    if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-    ext[i] = c;
-  }
-  ext[3] = 0;
-  if (strcmp(ext, "COM") != 0 && strcmp(ext, "EXE") != 0) {
+  if (!is_exec_ext(name)) {
     draw_dialog(MSG(MSG_EXEC_ERR_NOTEXE), 0);
     dos_getch();
     draw_screen();
     return;
   }
 
-  build_full_path(path, sizeof(path), name);
+  /* 引数入力ダイアログ：カーソル位置のファイル名を入れた状態で
+     開く。引数が要らなければそのままEnterを押せばよい（本家の
+     実行コマンドと同じ操作感）。 */
+  strcpy(cmdline, name); /* 名前は最大でNAME_LEN-1文字。EXEC_MAXLENに収まる */
+
+  err = 0;
+  for (;;) {
+    confirmed = input_dialog(MSG(MSG_EXEC_PROMPT), cmdline, EXEC_MAXLEN, err);
+    if (!confirmed) {
+      draw_screen();
+      return;
+    }
+    /* 入力行を「最初の語＝プログラム名」と「残り＝引数」に分ける。
+       DOSプロンプトに打ったのと同じ分け方であり、ここで名前を
+       書き換えられていれば、カーソル位置のエントリではなく
+       打たれたほうを実行する（打った通りに動くほうが、黙って
+       別のファイルを実行するより読み解きやすいため）。 */
+    i = 0;
+    while (cmdline[i] == ' ') i++;
+    p = 0;
+    while (cmdline[i] != 0 && cmdline[i] != ' ') {
+      prog[p] = cmdline[i];
+      p++;
+      i++;
+    }
+    prog[p] = 0;
+    while (cmdline[i] == ' ') i++;
+    argStart = i;
+
+    /* 空、あるいはCOM/EXEでない名前は、黙って失敗させるのではなく
+       ダイアログの中にエラーを出して入力を続けさせる（do_rename()/
+       do_logdsk()と同じ作法）。 */
+    if (p == 0 || !is_exec_ext(prog)) {
+      err = MSG(MSG_EXEC_ERR_CMD);
+      continue;
+    }
+    break;
+  }
+
+  /* プログラム名はカレントディレクトリからの相対として解決する
+     （このプログラムの他のすべてのファイル操作と同じ）。ドライブや
+     '\\'を含む名前を打った場合はここでg_pathが前置されてパスが
+     成立せず、下のdos_exec()が失敗してエラーダイアログになる――
+     黙って別の何かを実行することは無い。 */
+  build_full_path(path, sizeof(path), prog);
 
   /* コマンドテール：長さ接頭辞付きの文字列（カウントバイト、続けて
-     その文字数ぶんの文字、末尾にCR）――ここでは空（カウント0）で、
-     DOSプロンプトで引数を何も打たずにEnterを押した場合と同じ。 */
-  cmdTail[0] = 0;
-  cmdTail[1] = 0x0d;
+     その文字数ぶんの文字、末尾にCR）。引数があるときは、DOSプロンプト
+     から起動した場合と同じく、プログラム名と引数を区切っていた空白1つを
+     先頭に含める（PSP:81hを自分で解析するプログラムの多くがこれを
+     前提にしている）。引数が無ければカウント0――引数を何も打たずに
+     Enterを押した場合と同じ。 */
+  argLen = strlen(&cmdline[argStart]);
+  if (argLen > 0) {
+    cmdTail[0] = (char)(argLen + 1);
+    cmdTail[1] = ' ';
+    for (i = 0; i < argLen; i++) cmdTail[2 + i] = cmdline[argStart + i];
+    cmdTail[2 + argLen] = 0x0d;
+  } else {
+    cmdTail[0] = 0;
+    cmdTail[1] = 0x0d;
+  }
   for (i = 0; i < 16; i++) { fcb1[i] = 0; fcb2[i] = 0; }
   for (i = 0; i < 14; i++) param[i] = 0;
 
@@ -2642,7 +2704,12 @@ void do_exec(void)
      farポインタ3つ（コマンドテール、FCB1、FCB2）。ここでの
      ポインタはすべてこの同じスモールモデルのデータセグメント
      内のバッファを指すので、それぞれのセグメント側は単に
-     get_ds()を繰り返し呼んでいるだけである。 */
+     get_ds()を繰り返し呼んでいるだけである。FCB1/FCB2は
+     COMMAND.COMなら最初の2引数を解析して埋めるところだが、
+     ここでは両方とも空のままにしてある――引数をFCBで受け取る
+     プログラムは今どき少なく、正しく埋めるにはDOSの解析規則を
+     こちら側で再現する必要があるため。引数はコマンドテール
+     （PSP:80h）で渡している。 */
   ds = get_ds();
   off = (unsigned int)cmdTail;
   param[2] = (char)(off & 0xff);
@@ -2660,7 +2727,39 @@ void do_exec(void)
   param[12] = (char)(ds & 0xff);
   param[13] = (char)(ds >> 8);
 
+  /* 子プロセスへ画面を渡す前の後始末――ここを省くと、実測した
+     次の2つの残骸が出る：
+     (1) この一覧のカーソル行（反転属性）が子プロセスの実行中も
+         画面に残り、子プロセスの出力と混ざったまま見える。
+     (2) DOSのテキストカーソル位置がこのプログラムの起動時から
+         そのままなので、出力の短い子プロセス（つくしのような
+         常駐プログラムは2行しか出さない）を実行するたびに、
+         その出力が前回より下から始まり、実行のたびに2行ずつ
+         下へずれていく。
+     そこで、25×80セルを空白で塗り、カーソルをホームへ戻してから
+     渡す。DOSプロンプトから起動したときと同じ画面状態である。
+     覆い（オーバーレイ）は通常main()のキー処理の末尾でしか閉じない
+     が、ここは「画面を他人に明け渡す」場所であり、上の入力ダイアログ
+     の矩形が覆いとして残っているとこのクリアがその内側に届かない
+     （ダイアログの枠が子プロセスの画面に残る）。この1か所だけは
+     明示的に閉じる――閉じ忘れは起きない：main()は後でもう一度
+     閉じるし、下のdraw_dialog()は自分で覆いを開き直す。
+     テキストカーソルは、このプログラムでは普段隠してある
+     （main()の"\x1b[>5h"）が、子プロセスから見えるほうが自然
+     （DOSプロンプトと同じ）なので、渡す直前に表示しておく。 */
+  overlay_hide();
+  vram_clear_all();
+  ansi_goto(0, 0);
+  write_str("\x1b[>5l");
+
   rc = dos_exec(path, (unsigned char *)param);
+
+  /* テキストカーソルを再び隠す。子プロセスが表示したまま返してくる
+     （あるいは上でこちらが表示したまま渡している）と、PC-98の
+     ハードウェアカーソルは反転した1セルとして画面に残り続け、
+     VRAMへ何を書いても消せない――再描画で消えない「反転したセル」
+     の正体はこれである。 */
+  write_str("\x1b[>5h");
 
   /* 子プロセスは画面に何を書いていてもおかしくない（あるいは、
      dos_exec()自体がロードする前に失敗していれば何も書いて
