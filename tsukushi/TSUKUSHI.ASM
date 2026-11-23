@@ -178,8 +178,8 @@ dic_kind:           db   0
 ; 各区間は { 開始セクタ(dic_run_start), セクタ数(dic_run_sectors) } の組。
 ; 単位は dic_kind によって違う(旧 dic_start_lba と同じ考え方):
 ;   FD  : BPBの論理セクタ番号(BPBのbps単位)。従来どおり0〜65535に収まる前提。
-;   HDD : ディスク先頭からの物理256バイトセクタの線形番号。
-;         hidden(BPBのhidden sectors、物理セクタ単位) + 論理セクタ番号×(BPBのbps/256)。
+;   HDD : ディスク先頭からの物理セクタの線形番号。
+;         hidden(BPBのhidden sectors、物理セクタ単位) + 論理セクタ番号×(BPBのbps/物理セクタ長)。
 ;         実測した33MB級HDDイメージで既に65536を超えるため32bitにした。
 ; 区間はファイル内の出現順(FATチェーンを辿った順)に並んでいる。
 ; 連続配置のファイルは区間が1個になるだけで、従来の動作と同じになる。
@@ -189,7 +189,7 @@ dic_run_start:      times MAXRUNS dd 0
 dic_run_sectors:    times MAXRUNS dd 0
 dic_da_ua:          db   0      ; INT 1Bh の DA/UA。FDなら 0x90+ドライブ番号、
                                  ; HDD(SASI相対)なら 0x00〜0x03(候補ごと)
-dic_bps:            dw   0      ; 転送に使う物理セクタ長。FDはBPBのbps、HDDは256固定
+dic_bps:            dw   0      ; 転送に使う物理セクタ長。FDはBPBのbps、HDDは新センスで取得
 dic_spt:            dw   0      ; BPBのセクタ/トラック(FD候補のCHS計算専用)
 dic_heads:          dw   0      ; BPBのヘッド数(同上)
 dic_sector_n:       db   0      ; FD専用: INT 1BhのCH用セクタ長コード(1024→3/512→2/256→1)
@@ -2691,8 +2691,8 @@ install:
         ; ---- 8) 候補を順に試す。実際に読んで辞書のマジック(FEPDIC02)が
         ; 出た候補を採用する。決め打ちしない(環境で変わりうるため)。
         ;   候補1: FD (dic_da_ua=0x90+ドライブ番号。現行実装そのまま)
-        ;   候補2〜5: HDD SASI相対 (dic_da_ua=0x00〜0x03、物理256バイト
-        ;             セクタ、線形セクタ番号 = hidden + logical×(bps/256))
+        ;   候補2〜5: HDD SASI相対 (dic_da_ua=0x00〜0x03、物理セクタ長は
+        ;             新センスで取得、線形番号 = hidden + logical×(bps/物理セクタ長))
         ; 区間リスト(install_run_logical[]/install_run_sectors[]、計
         ; install_nruns個)を候補の単位に変換して dic_run_start[]/
         ; dic_run_sectors[]/dic_nruns へ控える。
@@ -2741,15 +2741,33 @@ install:
 .cand_setup_hdd:
         ; --- 候補2〜5: HDD SASI相対 (ua = cand_idx-2) ---
         mov     byte [dic_kind], 1
-        mov     word [dic_bps], 256
         mov     al, [install_cand_idx]
         sub     al, 2
         mov     [dic_da_ua], al
+        or      al, 0x80
+        mov     ah, 0x84                ; 新センス: BX = 物理セクタ長
+        xor     bx, bx                  ; SASI型ではBXが変更されない場合がある
+        int     0x1B
+        jc      .hdd_bps_default
+        cmp     bx, 256
+        je      .hdd_bps_ready
+        cmp     bx, 512
+        je      .hdd_bps_ready
+        cmp     bx, 1024
+        je      .hdd_bps_ready
+.hdd_bps_default:
+        mov     bx, 256
+.hdd_bps_ready:
+        mov     [dic_bps], bx           ; 最大1024なので2セクタは2048バイトに収まる
 
-        ; mul = bpb_bps/256 (256/512/1024/2048はすべて256の倍数)
+        ; mul = bpb_bps / 物理セクタ長。小さい場合や端数があれば候補を飛ばす
         mov     ax, [install_bpb_bps]
-        mov     cl, 8
-        shr     ax, cl
+        cmp     ax, bx
+        jb      .cand_skip
+        xor     dx, dx
+        div     bx
+        or      dx, dx
+        jnz     .cand_skip
         mov     [install_bps_mul], ax
 
         ; 各区間: start(32bit) = hidden(32bit) + install_run_logical[i]×mul
@@ -3109,7 +3127,7 @@ install_push_run:
         ret
 
 ; どの候補で常駐したかを表示する(例: "Tsukushi FEP resident (dict: FD ua=91)."
-; / "(dict: SASI ua=00)."。dic_kind/dic_da_uaは候補確定時に設定済み)
+; / "(dict: SASI ua=00 bps=512)."。候補確定時の設定を使う)
 ; 破壊: AX,DX
 print_resident_message:
         mov     dx, msg_ok_prefix
@@ -3129,6 +3147,19 @@ print_resident_message:
         mov     al, [dic_da_ua]
         call    install_print_hex8
 
+        cmp     byte [dic_kind], 0
+        je      .p_suffix
+        mov     dx, msg_bps_256
+        cmp     word [dic_bps], 256
+        je      .p_bps
+        mov     dx, msg_bps_512
+        cmp     word [dic_bps], 512
+        je      .p_bps
+        mov     dx, msg_bps_1024
+.p_bps:
+        mov     ah, 0x09
+        int     0x21
+.p_suffix:
         mov     dx, msg_ok_suffix
         mov     ah, 0x09
         int     0x21
@@ -3169,6 +3200,9 @@ install_print_hex8:
 msg_ok_prefix:          db 'Tsukushi FEP resident (dict: $'
 msg_kind_fd:            db 'FD ua=$'
 msg_kind_sasi:          db 'SASI ua=$'
+msg_bps_256:            db ' bps=256$'
+msg_bps_512:            db ' bps=512$'
+msg_bps_1024:           db ' bps=1024$'
 msg_ok_suffix:          db ').', 0x0D, 0x0A
                         db 'Ctrl+XFER or Ctrl-K toggles kana, Space converts, Enter commits.', 0x0D, 0x0A, '$'
 msg_already:            db 'Tsukushi FEP already resident.', 0x0D, 0x0A, '$'
@@ -3236,7 +3270,7 @@ install_nruns:           db    0      ; 確定した区間数(<=MAXRUNS)
 install_run_logical:    times MAXRUNS dw 0
 install_run_sectors:    times MAXRUNS dw 0
 
-install_bps_mul:              dw 0      ; HDD候補用: bpb_bps/256
+install_bps_mul:              dw 0      ; HDD候補用: bpb_bps/物理セクタ長
 install_cand_idx:               db 0    ; 1=FD, 2〜5=HDD(ua=idx-2)
 install_any_read_ok:            db 0    ; 候補のうちどれか1つでもディスク読み込み自体は成功したか
 
