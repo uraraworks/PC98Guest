@@ -2118,7 +2118,7 @@ newint18:
 
         ; --- 切り替えキー判定 (かなモードでも直接モードでも有効) ---
         cmp     ah, 0xB5                ; Ctrl+XFER
-        je      .ah00_toggle
+        je      .ah00_toggle_xfer
         cmp     al, 0x0B                ; Ctrl-K
         je      .ah00_toggle
 
@@ -2181,21 +2181,18 @@ newint18:
         jmp     .ah00_redraw_continue
 
 .ah00_toggle:
-        cmp     byte [cs:cand_count], 0
-        je      .ah00_toggle_simple
-        call    cancel_conversion       ; 変換中: 取り消してから切替(かなは残す)
-.ah00_toggle_simple:
-        xor     byte [cs:mode], 1
-        cmp     byte [cs:mode], 0
-        je      .ah00_toggle_to_direct
-        ; 直接->かな: ステータス行を描く(draw_status内で未退避なら退避する)
-        call    draw_status
+        call    toggle_mode
         jmp     .ah00_after_status
-.ah00_toggle_to_direct:
-        ; かな->直接: 退避しておいた内容を書き戻し、以後は描かない
-        mov     byte [cs:kata_flag], 0
-        call    restore_status
-        jmp     .ah00_after_status
+
+        ; FreeDOS は Ctrl+XFER を除去するため AH=00h を呼ぶ。
+        ; 切替後に次のキーを待つと、そのキーが DOS に捨てられる。
+        ; Ctrl+XFER 自体を返し、DOS にそのまま捨ててもらう。
+.ah00_toggle_xfer:
+        push    ax
+        call    toggle_mode
+        call    drain_outq_to_ring
+        pop     ax
+        jmp     .ah00_exit
 
 .ah00_do_space:
         cmp     byte [cs:cand_count], 0
@@ -2308,8 +2305,8 @@ newint18:
 .ah00_redraw_continue:
         ; この経路は mode==1(かなモード)のときにしか通らない
         ; (直接モードの各キーは .ah00_direct_return で早期に返るため)。
-        ; toggle だけは自分で .ah00_after_status へ直接ジャンプして
-        ; ここを経由しない。
+        ; Ctrl-K の切替は .ah00_after_status へ直接ジャンプし、
+        ; Ctrl+XFER の切替はキーを返すため、ここを経由しない。
         call    draw_status
 .ah00_after_status:
         ; ここまでで outq に新規確定バイトが積まれた可能性がある
@@ -2349,6 +2346,23 @@ newint18:
         ; 見る元のキーセンスがそのまま正しく「入力あり」を返す。
         call    drain_outq_to_ring
         jmp     far [cs:oldint18]
+
+toggle_mode:
+        cmp     byte [cs:cand_count], 0
+        je      .simple
+        call    cancel_conversion       ; 変換中: 取り消してから切替(かなは残す)
+.simple:
+        xor     byte [cs:mode], 1
+        cmp     byte [cs:mode], 0
+        je      .to_direct
+        ; 直接->かな: ステータス行を描く(draw_status内で未退避なら退避する)
+        call    draw_status
+        ret
+.to_direct:
+        ; かな->直接: 退避しておいた内容を書き戻し、以後は描かない
+        mov     byte [cs:kata_flag], 0
+        call    restore_status
+        ret
 
 ;--------------------------------------------------------------------
 ; ローマ字->かな 変換テーブル (tools/gen_romaji.py の生成物)
